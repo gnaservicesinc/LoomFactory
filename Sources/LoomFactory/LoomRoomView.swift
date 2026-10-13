@@ -121,7 +121,8 @@ struct LoomRoomView: View {
     }
 
     private func sourcePanel(_ snapshot: ProjectSnapshot) -> some View {
-        HStack(spacing: 22) {
+        let materials = model.materialFolders
+        return HStack(spacing: 22) {
             Image(systemName: "folder.fill").font(.title2).foregroundStyle(FactoryStyle.accent)
             VStack(alignment: .leading, spacing: 4) {
                 Text("Source folder").font(.headline)
@@ -129,9 +130,12 @@ struct LoomRoomView: View {
                     .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
             }
             Spacer(minLength: 12)
-            metric("Images", snapshot.images.count)
+            metric("Source materials", materials.count)
+            metric("Map files", snapshot.images.count)
             metric("Datasets", snapshot.datasets.count)
-            metric("Reviewed", snapshot.images.filter(\.verified).count)
+            metric("Reviewed", materials.filter { folder in
+                folder.resolutions.flatMap(\.images).allSatisfy(\.verified)
+            }.count)
             Divider().frame(height: 36)
             Button("Show in Finder") { model.revealSource() }
             Button("Change Source Folder…") { model.chooseSourceFolder() }
@@ -149,25 +153,31 @@ struct LoomRoomView: View {
     }
 
     private func datasetPanel(_ snapshot: ProjectSnapshot) -> some View {
-        FactoryPanel("Datasets", subtitle: "A dataset contains the images tagged with its category.") {
+        let materials = model.visibleMaterialFolders
+        let mapCount = materials.reduce(0) { $0 + $1.imageCount }
+        let materialLabel = materials.count == 1 ? "source material" : "source materials"
+        let mapLabel = mapCount == 1 ? "map file" : "map files"
+        return FactoryPanel("Datasets", subtitle: "A dataset contains the images tagged with its category.") {
             HStack(spacing: 16) {
                 Picker("Dataset", selection: $model.selectedDatasetID) {
-                    Text("All images").tag("")
+                    Text("All materials").tag("")
                     Text("Uncategorized").tag("unassigned")
                     if !snapshot.datasets.isEmpty { Divider() }
                     ForEach(snapshot.datasets, id: \.id) { dataset in
                         Text(dataset.name).tag(dataset.id)
                     }
                 }.frame(width: 270)
-                Text("\(model.visibleImages.count.formatted()) images").font(.callout).foregroundStyle(.secondary)
+                Text("\(materials.count.formatted()) \(materialLabel) · \(mapCount.formatted()) \(mapLabel)")
+                    .font(.callout).foregroundStyle(.secondary)
                 Spacer()
-                TextField("Find an image", text: $model.imageSearch).textFieldStyle(.roundedBorder).frame(width: 230)
+                TextField("Find a material or map", text: $model.imageSearch).textFieldStyle(.roundedBorder).frame(width: 210)
                 Button("Pair Images…") { pairingSheet = true }.disabled(model.busy || snapshot.images.count < 2)
                 Button("Categorize", systemImage: "tag") { model.categorize() }.disabled(model.busy || snapshot.images.isEmpty)
                     .help("Categorize each material folder once using one diffuse image. Existing tags and reviewed images are preserved.")
             }
             HSplitView {
-                ImageBrowser(model: model).frame(minWidth: 220, idealWidth: 285, maxWidth: 380)
+                MaterialBrowser(model: model).id(snapshot.sourceURL.path)
+                    .frame(minWidth: 220, idealWidth: 285, maxWidth: 380)
                 if let image = model.selectedImage {
                     VStack(spacing: 10) {
                         FactoryImage(url: image.url, revision: image.previewRevision)
@@ -175,6 +185,7 @@ struct LoomRoomView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                         HStack {
                             Text(image.role.displayName)
+                                .help(image.url.lastPathComponent)
                             Spacer()
                             Text("\(image.width.formatted()) × \(image.height.formatted())")
                         }.font(.caption).foregroundStyle(.secondary)
@@ -184,40 +195,13 @@ struct LoomRoomView: View {
                     ContentUnavailableView("No image selected", systemImage: "photo", description: Text("Import images or choose another dataset."))
                         .frame(maxWidth: .infinity)
                 }
-            }.frame(height: 405)
+            }.frame(height: 450)
         }
         .onChange(of: model.selectedDatasetID) {
-            model.selectedImageID = model.visibleImages.first?.id
+            model.selectVisibleImageIfNeeded()
         }
-    }
-}
-
-private struct ImageBrowser: View {
-    @Bindable var model: FactoryModel
-    var body: some View {
-        ScrollView {
-            LazyVStack(spacing: 5) {
-                ForEach(model.visibleImages, id: \.id) { image in
-                    Button { model.selectedImageID = image.id } label: {
-                        HStack(spacing: 10) {
-                            FactoryImage(url: image.url, revision: image.previewRevision, maximumPixels: 160)
-                                .frame(width: 52, height: 52).clipShape(RoundedRectangle(cornerRadius: 7))
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(image.displayName).font(.callout.weight(.medium)).lineLimit(2)
-                                Text(image.role.displayName).font(.caption).foregroundStyle(.secondary)
-                            }
-                            Spacer(minLength: 0)
-                            if image.verified { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
-                        }.padding(8).contentShape(Rectangle())
-                            .background(model.selectedImageID == image.id ? FactoryStyle.accent.opacity(0.14) : Color.clear,
-                                        in: RoundedRectangle(cornerRadius: 10))
-                    }.buttonStyle(.plain).help(image.url.lastPathComponent)
-                }
-                if model.visibleImages.isEmpty {
-                    ContentUnavailableView("No images", systemImage: "photo.stack", description: Text("Import images or change the dataset."))
-                        .padding(.top, 40)
-                }
-            }.padding(.trailing, 10)
+        .onChange(of: model.imageSearch) {
+            model.selectVisibleImageIfNeeded()
         }
     }
 }
@@ -228,11 +212,12 @@ private struct ImageReviewPanel: View {
     @State private var category = ""
     @State private var note = ""
     @State private var verified = false
+    @State private var ignored = false
     @State private var role: MapRole = .unknown
     @State private var normalConvention = "opengl"
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             VStack(alignment: .leading, spacing: 5) {
                 Text("Image review").font(.headline)
                 Text(image.displayName).font(.callout).foregroundStyle(.secondary).lineLimit(2)
@@ -252,33 +237,40 @@ private struct ImageReviewPanel: View {
             Picker("Map type", selection: $role) {
                 ForEach(MapRole.allCases, id: \.self) { Text($0.displayName).tag($0) }
             }
+            if role == .bump {
+                Text("Bump maps are kept for inspection and are excluded from depth training.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             if role == .normal {
                 Picker("Normal format", selection: $normalConvention) {
                     Text("OpenGL").tag("opengl")
                     Text("DirectX").tag("directx")
                 }
             }
+            Toggle("Ignore this file", isOn: $ignored).toggleStyle(.checkbox)
+                .help("Keep this image available for inspection and leave it out of categorization, Create ML export and model training.")
             Toggle("Reviewed and verified", isOn: $verified).toggleStyle(.checkbox)
             VStack(alignment: .leading, spacing: 5) {
                 Text("Review note").font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                TextEditor(text: $note).font(.callout).frame(minHeight: 70, maxHeight: 110)
+                TextEditor(text: $note).font(.callout).frame(minHeight: 60, maxHeight: 90)
                     .scrollContentBackground(.hidden).padding(6)
                     .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 7))
             }
-            Text("Saved on the images. All maps and resolutions in this material folder share the dataset and review state.")
+            Text("Dataset and review apply to this material folder. Map type and Ignore apply to this file.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
             HStack {
                 Button("Show File") { model.reveal(image.url) }
                 Spacer()
-                Button("Save Review") { model.review(image: image, category: category, role: role, normalConvention: normalConvention, verified: verified, note: note) }
+                Button("Save Review") { model.review(image: image, category: category, role: role, normalConvention: normalConvention, verified: verified, note: note, ignored: ignored) }
                     .buttonStyle(.borderedProminent)
             }
         }.padding(.leading, 16).disabled(model.busy)
-            .task(id: "\(image.id)|\(image.category ?? "")|\(image.verified)|\(image.role.rawValue)|\(image.normalConvention ?? "")|\(image.note)") {
+            .task(id: "\(image.id)|\(image.category ?? "")|\(image.verified)|\(image.ignored)|\(image.role.rawValue)|\(image.normalConvention ?? "")|\(image.note)") {
                 category = image.category ?? ""
                 note = image.note
                 verified = image.verified
+                ignored = image.ignored
                 role = image.role
                 normalConvention = image.normalConvention ?? "opengl"
             }

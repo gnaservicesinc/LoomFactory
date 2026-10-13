@@ -7,6 +7,25 @@ import XCTest
 @testable import LoomCore
 
 final class ClassifierDataExportTests: XCTestCase {
+    func testIgnoredDiffuseAndConflictingIgnoredMapDoNotEnterClassifierExport() async throws {
+        let root = try fixture(), destination = try fixture()
+        defer { try? FileManager.default.removeItem(at: root); try? FileManager.default.removeItem(at: destination) }
+        let input = try image(root, "Active/material_diff.png", size: 1024)
+        let map = try image(root, "Active/material_bump.png", size: 1024)
+        let ignoredInput = try image(root, "Ignored/material_diff.png", size: 1024)
+        let project = try LoomProject(sourceFolder: root)
+        let snapshot = try await project.snapshot()
+        try tag(input, "Wood"); try tag(map, "Wrong category"); try tag(ignoredInput, "Wood")
+        for file in [map, ignoredInput] {
+            let id = try XCTUnwrap(snapshot.images.first { $0.url == file }?.id)
+            try await project.setIgnored(id: id, ignored: true)
+        }
+        let exported = try await project.exportClassifierData(to: destination)
+        XCTAssertEqual(exported.imageCount, 1); XCTAssertEqual(exported.folderCount, 1)
+        let links = try contents(exported.directory).flatMap(contents)
+        XCTAssertEqual(links.map { $0.resolvingSymlinksInPath() }, [input])
+    }
+
     func testCreateMLExportLinksOneNative1KDiffusePerMaterialUnderItsCategory() async throws {
         let root = try fixture(), destination = try fixture()
         defer { try? FileManager.default.removeItem(at: root); try? FileManager.default.removeItem(at: destination) }

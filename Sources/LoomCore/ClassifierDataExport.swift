@@ -16,7 +16,7 @@ extension LoomProject {
         guard !operationActive else { throw LoomError("Finish or stop the current project operation before exporting classifier data.") }
         operationActive = true
         defer { operationActive = false }
-        let images = try scanImages()
+        let images = try scanImages().filter { !$0.ignored }
         let folders = Dictionary(grouping: images) { $0.url.deletingLastPathComponent().standardizedFileURL }
             .sorted { $0.key.path.localizedStandardCompare($1.key.path) == .orderedAscending }
         var samples: [(folder: URL, image: SourceImage, category: String, categoryID: String)] = []
@@ -71,7 +71,8 @@ extension LoomProject {
                 // export link is written; a concurrent edit is never ignored.
                 guard FileManager.default.fileExists(atPath: sample.image.url.path),
                       let metadata = try ImageMetadataStore.read(sample.image.url), metadata.id == sample.image.id,
-                      metadata.role == .diffuse, metadata.category.map(ImageMetadataStore.categoryID) == sample.categoryID else {
+                      metadata.role == .diffuse, metadata.ignored != true,
+                      metadata.category.map(ImageMetadataStore.categoryID) == sample.categoryID else {
                     skipped.append(sample.folder)
                     continue
                 }

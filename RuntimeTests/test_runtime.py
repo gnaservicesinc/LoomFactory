@@ -16,7 +16,7 @@ import torch
 from safetensors.torch import load_file
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Runtime"))
-from loom_factory.engine import Cancellation, TrainingCancelled, train, validate_request
+from loom_factory.engine import Cancellation, TrainingCancelled, current_image_tags, train, validate_request
 from loom_factory.images import exaggerate_depth, native_pair, read_target, read_rgb
 from loom_factory.models import MaterialMapNetwork
 from loom_factory.metadata import write_fixture_metadata
@@ -100,6 +100,53 @@ class PixelContractTests(unittest.TestCase):
 
 
 class RequestMembershipTests(unittest.TestCase):
+    def test_current_normal_tag_cannot_switch_to_directx_even_without_an_ignore_flag(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sample = {"id": "normal-pair", "input": str(root / "diffuse.png"),
+                      "target": str(root / "normal.png"), "normal_convention": "OpenGL"}
+            tags = {}
+            for field, role in (("input", "diffuse"), ("target", "normal")):
+                Path(sample[field]).write_bytes(b"original image bytes")
+                tags[field] = {"schema": "loom-factory.image.v1", "id": field,
+                               "pairingKey": sample["id"], "role": role, "category": "Bark", "verified": True,
+                               "ignored": False, "normalConvention": "opengl" if role == "normal" else None}
+                write_fixture_metadata(sample[field], tags[field])
+            request = {"map_kind": "normal", "require_image_metadata": True,
+                       "dataset_id": "dataset-" + hashlib.sha256(b"bark").hexdigest()[:16]}
+            current_image_tags(request, sample)
+            for convention in ("directx", "DirectX", "DIRECTX"):
+                with self.subTest(convention=convention):
+                    write_fixture_metadata(sample["target"], {**tags["target"], "normalConvention": convention})
+                    with self.assertRaisesRegex(ValueError, "DirectX normal maps are excluded"):
+                        current_image_tags(request, sample)
+            self.assertEqual(Path(sample["target"]).read_bytes(), b"original image bytes")
+
+    def test_bump_cannot_enter_depth_training_and_ignored_metadata_halts_selection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sample = {"id": "bark-pair", "input": str(root / "diffuse.png"),
+                      "target": str(root / "bump.png")}
+            tags = {}
+            for field, role in (("input", "diffuse"), ("target", "bump")):
+                Path(sample[field]).write_bytes(b"original image bytes")
+                tags[field] = {"schema": "loom-factory.image.v1", "id": field,
+                               "pairingKey": sample["id"], "role": role, "category": "Bark", "verified": True}
+                write_fixture_metadata(sample[field], tags[field])
+            request = {"map_kind": "depth", "require_image_metadata": True,
+                       "dataset_id": "dataset-" + hashlib.sha256(b"bark").hexdigest()[:16]}
+            with self.assertRaisesRegex(ValueError, "map type"):
+                current_image_tags(request, sample)
+            write_fixture_metadata(sample["target"], {**tags["target"], "role": "depth"})
+            current_image_tags(request, sample)
+            for field in ("input", "target"):
+                tag = {**tags[field], "role": "diffuse" if field == "input" else "depth", "ignored": True}
+                write_fixture_metadata(sample[field], tag)
+                with self.assertRaisesRegex(ValueError, "review state"):
+                    current_image_tags(request, sample)
+                write_fixture_metadata(sample[field], {**tag, "ignored": False})
+                current_image_tags(request, sample)
+
     def test_external_path_is_rejected_but_a_present_source_symlink_is_accepted(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -287,6 +334,36 @@ class RealTrainingTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "dataset tag"):
                     train(request)
             self.assertEqual([e["sample_ids"] for e in events if e["event"] == "progress"], [["0"]])
+            self.assertFalse((Path(request["output_directory"]) / "model.json").exists())
+
+    def test_live_directx_convention_change_stops_before_the_next_normal_update(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            samples = self.make_samples(root, count=1)
+            samples[0]["normal_convention"] = "OpenGL"
+            Image.fromarray(np.tile(np.array([128, 128, 255], dtype=np.uint8), (32, 32, 1))).save(samples[0]["target"])
+            original_bytes = Path(samples[0]["target"]).read_bytes()
+            target_tag = None
+            for field, role in (("input", "diffuse"), ("target", "normal")):
+                tag = {"schema": "loom-factory.image.v1", "id": field, "pairingKey": "0", "role": role,
+                       "category": "Bricks", "verified": True, "ignored": False, "normalConvention": "opengl"}
+                write_fixture_metadata(samples[0][field], tag)
+                if field == "target":
+                    target_tag = tag
+            request = self.request(root, samples, "normal-convention-change")
+            request.update(map_kind="normal", exaggerate_features=False, require_image_metadata=True,
+                           dataset_id="dataset-" + hashlib.sha256(b"bricks").hexdigest()[:16])
+            updates = []
+            def change_convention_after_first_update(event, **fields):
+                if event == "progress":
+                    updates.append(fields["update"])
+                    write_fixture_metadata(samples[0]["target"], {**target_tag, "normalConvention": "directx"})
+            with patch("loom_factory.engine.emit", change_convention_after_first_update):
+                with self.assertRaisesRegex(ValueError, "DirectX normal maps are excluded"):
+                    train(request)
+            self.assertEqual(updates, [1])
+            self.assertEqual(Path(samples[0]["target"]).read_bytes(), original_bytes)
             self.assertFalse((Path(request["output_directory"]) / "model.json").exists())
 
     def test_shuffled_epochs_differ_for_the_fixture(self):

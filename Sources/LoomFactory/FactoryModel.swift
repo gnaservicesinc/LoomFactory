@@ -12,6 +12,7 @@ final class FactoryModel {
     var selectedImageID: String?
     var selectedMap: MapRole = .depth
     var imageSearch = ""
+    var fileFilter: MaterialBrowserFilter = .all
     private(set) var busy = false
     private(set) var activityTitle = ""
     private(set) var progress: Double?
@@ -34,7 +35,7 @@ final class FactoryModel {
         snapshot?.datasets.first { $0.id == selectedDatasetID }
     }
 
-    var visibleImages: [SourceImage] {
+    var matchingImages: [SourceImage] {
         guard let snapshot else { return [] }
         let dataset = selectedDataset?.name
         return snapshot.images.filter { image in
@@ -42,8 +43,23 @@ final class FactoryModel {
                 (selectedDatasetID == "unassigned" ? image.category == nil : image.category == dataset)
             return matchesDataset && (imageSearch.isEmpty ||
                 image.displayName.localizedCaseInsensitiveContains(imageSearch) ||
-                image.url.lastPathComponent.localizedCaseInsensitiveContains(imageSearch))
+                image.url.lastPathComponent.localizedCaseInsensitiveContains(imageSearch) ||
+                ImageMetadataStore.friendlyName(image.url.deletingLastPathComponent().lastPathComponent).localizedCaseInsensitiveContains(imageSearch) ||
+                image.role.displayName.localizedCaseInsensitiveContains(imageSearch) ||
+                image.category?.localizedCaseInsensitiveContains(imageSearch) == true)
         }
+    }
+
+    var visibleImages: [SourceImage] { matchingImages.filter(fileFilter.includes) }
+
+    var materialFolders: [SourceMaterialFolder] {
+        guard let snapshot else { return [] }
+        return SourceMaterialFolder.group(images: snapshot.images, sourceFolder: snapshot.sourceURL)
+    }
+
+    var visibleMaterialFolders: [SourceMaterialFolder] {
+        guard let snapshot else { return [] }
+        return SourceMaterialFolder.group(images: visibleImages, sourceFolder: snapshot.sourceURL)
     }
 
     var selectedImage: SourceImage? {
@@ -111,6 +127,7 @@ final class FactoryModel {
         selectedDatasetID = ""
         selectedMap = .depth
         imageSearch = ""
+        fileFilter = .all
         settings = ProjectSettings()
         exportedPackage = nil
         publishedURL = nil
@@ -171,13 +188,20 @@ final class FactoryModel {
         perform("Importing images") { project in try await project.importImages(urls) }
     }
 
-    func review(image: SourceImage, category: String, role: MapRole, normalConvention: String, verified: Bool, note: String) {
+    func review(image: SourceImage, category: String, role: MapRole, normalConvention: String, verified: Bool, note: String, ignored: Bool = false) {
         let normalized = category.trimmingCharacters(in: .whitespacesAndNewlines)
         perform("Saving image metadata") { project in
             try await project.setRole(id: image.id, role: role)
+            try await project.setIgnored(id: image.id, ignored: ignored)
             if role == .normal { try await project.setNormalConvention(id: image.id, convention: normalConvention) }
             try await project.updateImage(id: image.id, category: normalized.isEmpty ? nil : normalized, verified: verified, note: note)
         }
+    }
+
+    func selectVisibleImageIfNeeded() {
+        let members = visibleMaterialFolders.flatMap { $0.resolutions.flatMap(\.images) }
+        guard !members.contains(where: { $0.id == selectedImageID }) else { return }
+        selectedImageID = members.first(where: { $0.role == .diffuse && !$0.ignored })?.id ?? members.first?.id
     }
 
     func pairImages(ids: [String]) {
@@ -407,9 +431,7 @@ final class FactoryModel {
         if restoreSettings { settings = value.settings }
         if !selectedDatasetID.isEmpty, selectedDatasetID != "unassigned",
            !value.datasets.contains(where: { $0.id == selectedDatasetID }) { selectedDatasetID = "" }
-        if selectedImageID == nil || !value.images.contains(where: { $0.id == selectedImageID }) {
-            selectedImageID = visibleImages.first?.id
-        }
+        selectVisibleImageIfNeeded()
         if let url = exportedPackage, !FileManager.default.fileExists(atPath: url.path) { exportedPackage = nil }
         if exportedPackage == nil {
             let exports = value.sourceURL.appendingPathComponent(".loom-factory/exports", isDirectory: true)

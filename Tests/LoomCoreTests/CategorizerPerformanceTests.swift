@@ -52,6 +52,8 @@ final class CategorizerPerformanceTests: XCTestCase {
         XCTAssertEqual(resumed.folderCount, 0)
         XCTAssertEqual(originalTags, try metadataFingerprint(source))
         let record: [String: Any] = ["source": sourcePath, "source_image_count": initial.images.count,
+            "map_roles": Dictionary(grouping: initial.images, by: { $0.role.rawValue }).mapValues(\.count),
+            "browser_material_folders": SourceMaterialFolder.group(images: initial.images, sourceFolder: root).count,
             "diffuse_image_count": initial.images.filter { $0.role == .diffuse }.count,
             "material_folder_count": expectedFolders, "prediction_count": summary.predictionCount,
             "seconds": seconds, "resume_prediction_count": resumed.predictionCount, "resume_seconds": resumeSeconds,

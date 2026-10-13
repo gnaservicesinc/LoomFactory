@@ -40,9 +40,9 @@ public actor LoomProject {
 
     public func snapshot() throws -> ProjectSnapshot {
         let images = try scanImages()
-        let categories = Set(images.compactMap(\.category)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+        let categories = Set(images.filter { !$0.ignored }.compactMap(\.category)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
         let datasets = categories.map { category in
-            let members = images.filter { $0.category == category }
+            let members = images.filter { $0.category == category && !$0.ignored }
             let families = Dictionary(grouping: members, by: \.pairingKey)
             let counts = Dictionary(uniqueKeysWithValues: MapRole.targets.map { map in
                 (map.rawValue, families.values.filter { group in
@@ -96,6 +96,14 @@ public actor LoomProject {
             throw LoomError("This image was removed from the source folder.")
         }
         metadata.role = role
+        metadata.roleWasManuallySelected = true
+        try ImageMetadataStore.write(metadata, to: image.url)
+    }
+    public func setIgnored(id: String, ignored: Bool) throws {
+        guard let image = try scanImages().first(where: { $0.id == id }), var metadata = try ImageMetadataStore.read(image.url) else {
+            throw LoomError("This image was removed from the source folder.")
+        }
+        metadata.ignored = ignored
         try ImageMetadataStore.write(metadata, to: image.url)
     }
     public func pairImages(ids: [String]) throws {
@@ -107,6 +115,7 @@ public actor LoomProject {
         for image in images {
             guard var metadata = try ImageMetadataStore.read(image.url) else { throw LoomError("Refresh the source folder before pairing these images.") }
             metadata.pairingKey = key
+            metadata.pairingWasManuallySelected = true
             try ImageMetadataStore.write(metadata, to: image.url)
         }
     }
@@ -172,6 +181,15 @@ public actor LoomProject {
                     try ImageMetadataStore.write(metadata!, to: target)
                 }
                 var tag = metadata!
+                let repaired = ImageMetadataStore.repairingLegacyInference(tag, file: file, sourceRoot: sourceFolder, width: width, height: height)
+                if repaired != tag {
+                    tag = repaired
+                    try ImageMetadataStore.write(tag, to: target)
+                }
+                if tag.role == .normal, tag.normalConvention?.lowercased() == "directx", tag.ignored != true {
+                    tag.ignored = true
+                    try ImageMetadataStore.write(tag, to: target)
+                }
                 // Copying a file copies its metadata too. Each distinct image
                 // needs its own selection identity while retaining its teaching tags.
                 if !imageIDs.insert(tag.id).inserted {
@@ -181,7 +199,7 @@ public actor LoomProject {
                 }
                 result.append(SourceImage(id: tag.id, url: file, displayName: ImageMetadataStore.friendlyName(file.deletingPathExtension().lastPathComponent),
                     role: tag.role, category: tag.category, verified: tag.verified, note: tag.note,
-                    pairingKey: tag.pairingKey, width: width, height: height, normalConvention: tag.normalConvention))
+                    pairingKey: tag.pairingKey, width: width, height: height, normalConvention: tag.normalConvention, ignored: tag.ignored == true))
             }
         }
         try visit(sourceFolder)

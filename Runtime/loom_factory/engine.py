@@ -125,6 +125,8 @@ def validate_request(request: dict):
 
 def current_image_tags(request, sample):
     """Stop a run when its current file metadata no longer authorizes a sample."""
+    if request["map_kind"] == "normal" and sample.get("normal_convention", "OpenGL").lower() == "directx":
+        raise ValueError("DirectX normal maps are excluded from training.")
     for field in ("input", "target"):
         path = Path(sample[field])
         if not path.is_file():
@@ -139,8 +141,10 @@ def current_image_tags(request, sample):
         category = str(metadata.get("category") or "").strip()
         category_id = "dataset-" + hashlib.sha256(category.lower().encode()).hexdigest()[:16]
         role = "diffuse" if field == "input" else request["map_kind"]
+        if role == "normal" and (metadata.get("normalConvention") or "opengl").lower() == "directx":
+            raise ValueError(f"DirectX normal maps are excluded from training: {path.name}")
         if (metadata.get("schema") != "loom-factory.image.v1" or not metadata.get("verified") or
-                metadata.get("role") != role or category_id != request["dataset_id"] or
+                metadata.get("ignored", False) or metadata.get("role") != role or category_id != request["dataset_id"] or
                 metadata.get("pairingKey") != sample["id"]):
             raise ValueError(f"The dataset tag, map type or review state changed during training: {path.name}")
 

@@ -1,12 +1,13 @@
 import Foundation
 
 public enum MapRole: String, Codable, CaseIterable, Sendable, Identifiable {
-    case diffuse, depth, roughness, normal, unknown
+    case diffuse, depth, bump, roughness, normal, unknown
     public var id: String { rawValue }
     public var displayName: String {
         switch self {
         case .diffuse: "Diffuse"
         case .depth: "Depth"
+        case .bump: "Bump"
         case .roughness: "Roughness"
         case .normal: "Normal"
         case .unknown: "Choose map type"
@@ -59,17 +60,20 @@ public struct SourceImage: Codable, Identifiable, Sendable, Equatable {
     public var category: String?
     public var verified: Bool
     public var note: String
+    public var ignored: Bool
     public let pairingKey: String
     public let width: Int
     public let height: Int
     public let normalConvention: String?
     public var dimensions: String { "\(width) × \(height)" }
     public init(id: String, url: URL, displayName: String, role: MapRole, category: String?,
-                verified: Bool, note: String, pairingKey: String, width: Int, height: Int, normalConvention: String? = nil) {
+                verified: Bool, note: String, pairingKey: String, width: Int, height: Int, normalConvention: String? = nil,
+                ignored: Bool = false) {
         self.id = id; self.url = url; self.displayName = displayName; self.role = role
         self.category = category; self.verified = verified; self.note = note
         self.pairingKey = pairingKey; self.width = width; self.height = height
         self.normalConvention = normalConvention
+        self.ignored = ignored
     }
 }
 

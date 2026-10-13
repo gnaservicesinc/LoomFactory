@@ -8,14 +8,13 @@ struct TrainingPair: Sendable {
 
 enum TrainingPairSelector {
     static func select(images: [SourceImage], dataset: String, map: MapRole, size: Int) throws -> [TrainingPair] {
-        let members = images.filter { $0.category == dataset && $0.verified }
+        let members = images.filter { $0.category == dataset && $0.verified && !$0.ignored }
         let families = Dictionary(grouping: members, by: \.pairingKey)
         var pairs: [TrainingPair] = []
         for key in families.keys.sorted() {
             let group = families[key]!
             let inputs = group.filter { $0.role == .diffuse }
-            var targets = group.filter { $0.role == map }
-            if map == .normal, targets.count > 1 { targets = targets.filter { $0.normalConvention != "directx" } }
+            let targets = group.filter { $0.role == map && (map != .normal || $0.normalConvention?.lowercased() != "directx") }
             guard !inputs.isEmpty, !targets.isEmpty else { continue }
             guard inputs.count == 1, targets.count == 1 else {
                 throw LoomError("\(group[0].displayName) contains several maps of the same type. Pair the intended maps before training.")

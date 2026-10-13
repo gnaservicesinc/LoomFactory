@@ -53,8 +53,9 @@ extension LoomProject {
     private func categorizeFolders(images: [SourceImage], inputWidth: Int, inputHeight: Int,
                                    predict: @Sendable (SourceImage) async throws -> String,
                                    progress: @Sendable (Double, String) -> Void) async throws -> CategorizationSummary {
-        let folders = Dictionary(grouping: images) { $0.url.deletingLastPathComponent().standardizedFileURL }
-            .filter { _, members in
+        let activeImages = images.filter { !$0.ignored }
+        let grouped: [URL: [SourceImage]] = Dictionary(grouping: activeImages) { $0.url.deletingLastPathComponent().standardizedFileURL }
+        let folders = grouped.filter { _, members in
                 members.contains { $0.role == .diffuse } &&
                 (members.contains { $0.category == nil && !$0.verified } || categoryNames(members).count > 1)
             }
@@ -64,7 +65,7 @@ extension LoomProject {
         for (index, folder) in folders.enumerated() {
             try Task.checkCancellation()
             let members = try folder.value.compactMap { image -> SourceImage? in
-                guard let tag = try currentTag(image) else { return nil }
+                guard let tag = try currentTag(image), tag.ignored != true else { return nil }
                 return SourceImage(id: image.id, url: image.url, displayName: image.displayName, role: tag.role,
                     category: tag.category, verified: tag.verified, note: tag.note, pairingKey: tag.pairingKey,
                     width: image.width, height: image.height, normalConvention: tag.normalConvention)
@@ -87,15 +88,15 @@ extension LoomProject {
                 // A removed input or an edit made during inference invalidates
                 // this prediction; never use it to overwrite the user's decision.
                 let changedDuringPrediction = try members.contains { member in
-                    guard let tag = try currentTag(member) else { return false }
-                    return tag.category != member.category || tag.verified != member.verified
+                    guard let tag = try currentTag(member) else { return true }
+                    return tag.category != member.category || tag.verified != member.verified || tag.ignored == true
                 }
                 if !changedDuringPrediction, let tag = try currentTag(input),
-                   tag.category == input.category, tag.verified == input.verified {
+                   tag.category == input.category, tag.verified == input.verified, tag.ignored != true {
                     var saved = false
                     for member in members where member.category == nil && !member.verified {
                         try Task.checkCancellation()
-                        guard var current = try currentTag(member), current.category == nil, !current.verified else { continue }
+                        guard var current = try currentTag(member), current.category == nil, !current.verified, current.ignored != true else { continue }
                         current.category = category
                         try ImageMetadataStore.write(current, to: member.url)
                         saved = true

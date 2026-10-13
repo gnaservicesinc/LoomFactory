@@ -5,6 +5,44 @@ import XCTest
 @testable import LoomCore
 
 final class CategorizerTests: XCTestCase {
+    func testIgnoredDiffuseCannotBePredictedAndIgnoredMapsKeepTheirMetadata() async throws {
+        let root = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let active = try image(root, "Active/material_diff.png", width: 64, height: 64)
+        let ignoredMap = try image(root, "Active/material_bump.png", width: 64, height: 64)
+        let ignoredInput = try image(root, "Ignored/material_diff.png", width: 64, height: 64)
+        let project = try LoomProject(sourceFolder: root)
+        _ = try await project.snapshot()
+        for file in [ignoredMap, ignoredInput] {
+            var tag = try XCTUnwrap(ImageMetadataStore.read(file))
+            tag.ignored = true; tag.note = "Keep ignored metadata"
+            try ImageMetadataStore.write(tag, to: file)
+        }
+        let protected = try [ignoredMap, ignoredInput].map { try ImageMetadataStore.read($0) }
+        let predictions = PredictionRecorder()
+        let summary = try await project.categorizeFolders(inputWidth: 64, inputHeight: 64, predict: {
+            await predictions.record($0); return "Wood"
+        }, progress: { _, _ in })
+        XCTAssertEqual(summary.predictionCount, 1)
+        let predicted = await predictions.images
+        XCTAssertEqual(predicted.map(\.url), [active])
+        XCTAssertEqual(try [ignoredMap, ignoredInput].map { try ImageMetadataStore.read($0) }, protected)
+        XCTAssertEqual(try ImageMetadataStore.read(active)?.category, "Wood")
+    }
+
+    func testIgnoringInputDuringPredictionCannotApplyItsCategory() async throws {
+        let root = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        _ = try image(root, "Oak/material_diff.png", width: 64, height: 64)
+        let target = try image(root, "Oak/material_disp.png", width: 64, height: 64)
+        let project = try LoomProject(sourceFolder: root)
+        _ = try await project.categorizeFolders(inputWidth: 64, inputHeight: 64, predict: { image in
+            var tag = try XCTUnwrap(ImageMetadataStore.read(image.url))
+            tag.ignored = true
+            try ImageMetadataStore.write(tag, to: image.url)
+            return "Stale category"
+        }, progress: { _, _ in })
+        XCTAssertNil(try ImageMetadataStore.read(target)?.category)
+    }
+
     func testOnePredictionPerMaterialFolderSelectsSmallestSuitableDiffuse() async throws {
         let root = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
