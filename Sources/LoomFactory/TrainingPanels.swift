@@ -14,7 +14,7 @@ struct TrainingPanel: View {
     }
 
     var body: some View {
-        FactoryPanel("Train a dataset", subtitle: "Create a custom base model from paired diffuse and material maps.") {
+        FactoryPanel("Train a dataset", subtitle: "Train with native Swift and the Apple GPU from paired diffuse and material maps.") {
             datasetSelection
             pairReadiness
             trainingSection("Model", symbol: "cube") { architectureSettings }
@@ -86,9 +86,10 @@ struct TrainingPanel: View {
                 }.labelsHidden().disabled(continuing).accessibilityIdentifier("training.imageSize")
             }
             numberRow("Epochs", value: $model.settings.training.epochs, detail: "One pass through the training images.", identifier: "training.epochs")
-            row("Training device", detail: "Automatic uses Metal when available.") {
+            row("Training device", detail: "Native MPSGraph training uses the Apple GPU.") {
                 Picker("Training device", selection: $model.settings.training.device) {
-                    ForEach(TrainingDevice.allCases) { Text($0.displayName).tag($0) }
+                    ForEach([TrainingDevice.automatic, .metal]) { Text($0.displayName).tag($0) }
+                    if model.settings.training.device == .cpu { Text("CPU (unavailable for native training)").tag(TrainingDevice.cpu) }
                 }.labelsHidden().accessibilityIdentifier("training.device")
             }
             numberRow("Random seed", value: $model.settings.training.seed, detail: "Repeat crop, shuffle and model initialization choices.", identifier: "training.seed")
@@ -545,7 +546,7 @@ struct RunPanel: View {
                 if model.busy { ProgressView().controlSize(.small) }
                 Text(model.activityTitle).font(.callout).textSelection(.enabled)
                 Spacer()
-                if model.busy { Button("Stop") { model.cancel() } }
+                if model.busy { Button("Stop") { model.cancel() }.accessibilityIdentifier("training.stop") }
             }
             if let progress = model.progress {
                 ProgressView(value: progress).progressViewStyle(.linear)

@@ -1,0 +1,256 @@
+{
+  "cancellation" : {
+    "backend" : "native-metal-mpsgraph",
+    "blocks" : 4,
+    "crop" : {
+      "size" : 1024,
+      "x" : 0,
+      "y" : 0
+    },
+    "crop_seconds" : 0.0076860833332830225,
+    "decode_seconds" : 0.06965491666642265,
+    "elapsed_seconds" : 8.7887880416669759,
+    "error" : "CancellationError()",
+    "final_weights_sha256" : "4c56a76cc10b90631186648e2c7a961ab7738e19168768849a928f4dc74d2bd1",
+    "gpu" : "Apple M2 Max",
+    "initial_weights_sha256" : "c9b737607b7ce3927183f0d740951460e38c18d72fcdc89e73b4197399f1bcf5",
+    "initialization_seconds" : 0.060411583333461749,
+    "learning_rate" : 0.001,
+    "machine" : "Apple M2 Max",
+    "map" : "depth",
+    "memory" : {
+      "peak_resident_bytes" : 184123392,
+      "physical_memory_bytes" : 68719476736
+    },
+    "native_source_dimensions" : [
+      1024,
+      1024
+    ],
+    "os" : "Version 27.2 (Build 26B5112a)",
+    "parameter_count" : 1943893,
+    "quality_note" : "This measures execution and cancellation, not learned prediction quality.",
+    "requested_updates" : 500,
+    "schema" : "loom-native-execution-probe-v1",
+    "seed" : 42,
+    "size" : 1024,
+    "sources" : [
+      {
+        "after_sha256" : "e25841ea5e0322b25d99967bf02d66bc19df0beba5a62112fa0ca09fa1b4a4d0",
+        "before_sha256" : "e25841ea5e0322b25d99967bf02d66bc19df0beba5a62112fa0ca09fa1b4a4d0",
+        "path" : "\/opt\/ipde\/sources_mats\/Bark Willow 02\/bark_willow_02_disp_1k.png",
+        "unchanged" : true
+      },
+      {
+        "after_sha256" : "d5ba0df675904c7b94f1200f3e024fb39372065fd2940e25cc5d36a6e10a92a2",
+        "before_sha256" : "d5ba0df675904c7b94f1200f3e024fb39372065fd2940e25cc5d36a6e10a92a2",
+        "path" : "\/opt\/ipde\/sources_mats\/Bark Willow 02\/bark_willow_02_diff_1k.png",
+        "unchanged" : true
+      }
+    ],
+    "status" : "cancelled",
+    "steps" : [
+      {
+        "event" : "update",
+        "forward_backward_seconds" : 3.1737333750002108,
+        "gradient_norm" : 1.4644880294799805,
+        "includes_first_graph_compile" : true,
+        "loss" : 0.091650724411010742,
+        "memory" : {
+          "peak_resident_bytes" : 167346176,
+          "physical_memory_bytes" : 68719476736
+        },
+        "optimizer_seconds" : 0.082675416666461388,
+        "total_step_seconds" : 3.2564087916666722,
+        "update" : 1
+      },
+      {
+        "event" : "update",
+        "forward_backward_seconds" : 2.6684637916664542,
+        "gradient_norm" : 0.40909165143966675,
+        "includes_first_graph_compile" : false,
+        "loss" : 0.4429701566696167,
+        "memory" : {
+          "peak_resident_bytes" : 184123392,
+          "physical_memory_bytes" : 68719476736
+        },
+        "optimizer_seconds" : 0.0054344583336387586,
+        "total_step_seconds" : 2.673898250000093,
+        "update" : 2
+      }
+    ],
+    "synthetic" : false,
+    "updates" : 2,
+    "weights_changed" : true,
+    "weights_path" : "\/Users\/andrewsmith\/Library\/Application Support\/Loom Factory\/Validation\/native-training-2026-10-13\/cancelled.safetensors",
+    "width" : 164
+  },
+  "date" : "2026-10-13",
+  "limitations" : [
+    "Three-step execution comparison only; no prediction quality qualification.",
+    "GPU timing includes compilation in first step; subsequent compute is similar in both backends.",
+    "Python warm crops are faster when the entire decoded pair remains cached; native cache retains original integer codes at half the Float32 memory for16-bit maps.",
+    "Live computer-use inspection was unavailable. Core and offscreenUI tests do not prove a live click.",
+    "Four optional external classifier\/source\/install integration fixtures were not supplied."
+  ],
+  "machine" : "Apple M2 Max (64 GB)",
+  "native_gpu" : {
+    "backend" : "native-metal-mpsgraph",
+    "blocks" : 4,
+    "crop_seconds" : 0,
+    "decode_seconds" : 0.0061453749999600404,
+    "elapsed_seconds" : 8.638650458333359,
+    "final_weights_sha256" : "36564285e4740a4f555feb52e669104fc71e1abf5a3bb9c0c33c450dedf1bc98",
+    "gpu" : "Apple M2 Max",
+    "initial_weights_sha256" : "e402c18103f29cd91fabee261dbf5af89f34b517c04b13f17bdbdd64067bdb67",
+    "initialization_seconds" : 0.068971833333307586,
+    "learning_rate" : 0.001,
+    "machine" : "Apple M2 Max",
+    "map" : "depth",
+    "memory" : {
+      "peak_resident_bytes" : 144359424,
+      "physical_memory_bytes" : 68719476736
+    },
+    "os" : "Version 27.2 (Build 26B5112a)",
+    "parameter_count" : 1943893,
+    "quality_note" : "This measures execution and cancellation, not learned prediction quality.",
+    "requested_updates" : 3,
+    "schema" : "loom-native-execution-probe-v1",
+    "seed" : 42,
+    "size" : 1024,
+    "sources" : [
+
+    ],
+    "status" : "completed",
+    "steps" : [
+      {
+        "event" : "update",
+        "forward_backward_seconds" : 3.1519885416664692,
+        "gradient_norm" : 0.52237534523010254,
+        "includes_first_graph_compile" : true,
+        "loss" : 0.25810280442237854,
+        "memory" : {
+          "peak_resident_bytes" : 127582208,
+          "physical_memory_bytes" : 68719476736
+        },
+        "optimizer_seconds" : 0.083654541666874138,
+        "total_step_seconds" : 3.2356430833333434,
+        "update" : 1
+      },
+      {
+        "event" : "update",
+        "forward_backward_seconds" : 2.653003875000195,
+        "gradient_norm" : 2.2231450080871582,
+        "includes_first_graph_compile" : false,
+        "loss" : 0.15204229950904846,
+        "memory" : {
+          "peak_resident_bytes" : 144359424,
+          "physical_memory_bytes" : 68719476736
+        },
+        "optimizer_seconds" : 0.0052037499999642023,
+        "total_step_seconds" : 2.6582076250001592,
+        "update" : 2
+      },
+      {
+        "event" : "update",
+        "forward_backward_seconds" : 2.653159666666852,
+        "gradient_norm" : 0.47609642148017883,
+        "includes_first_graph_compile" : false,
+        "loss" : 0.48759406805038452,
+        "memory" : {
+          "peak_resident_bytes" : 144359424,
+          "physical_memory_bytes" : 68719476736
+        },
+        "optimizer_seconds" : 0.005387583333231305,
+        "total_step_seconds" : 2.6585472500000833,
+        "update" : 3
+      }
+    ],
+    "synthetic" : true,
+    "synthetic_input" : "arange(3*size*size)%251\/250 in NCHW",
+    "synthetic_target" : "(arange(channels*size*size)+71)%251\/250 in NCHW",
+    "updates" : 3,
+    "weights_changed" : true,
+    "width" : 164
+  },
+  "python_gpu" : {
+    "backend" : "legacy-python-pytorch-mps",
+    "blocks" : 4,
+    "quality_note" : "Synthetic execution only.",
+    "size" : 1024,
+    "steps" : [
+      {
+        "loss" : 0.25810280442237854,
+        "norm" : 0.52237540483474731,
+        "total_seconds" : 4.4254110000001674,
+        "update" : 1
+      },
+      {
+        "loss" : 0.15204229950904846,
+        "norm" : 2.2231450080871582,
+        "total_seconds" : 2.6679632919999676,
+        "update" : 2
+      },
+      {
+        "loss" : 0.48759406805038452,
+        "norm" : 0.47609668970108032,
+        "total_seconds" : 2.6590320829998291,
+        "update" : 3
+      }
+    ],
+    "width" : 164
+  },
+  "schema" : "loom-native-migration-validation-v1",
+  "source_preparation" : [
+    {
+      "crop_size" : 1024,
+      "first_visit_speedup" : 10.016101835365175,
+      "native_seconds" : [
+        0.068780958333263698,
+        0.030643166666777688,
+        0.029990250000082597
+      ],
+      "native_source_unchanged" : true,
+      "python_seconds" : [
+        0.68891708299997845,
+        0.0027169169998160214,
+        0.001654082999948514
+      ],
+      "python_source_unchanged" : true,
+      "source_size" : 1024
+    },
+    {
+      "crop_size" : 1024,
+      "first_visit_speedup" : 14.685546203986858,
+      "native_seconds" : [
+        0.18965716666662047,
+        0.031884166666714009,
+        0.031794750000017302
+      ],
+      "native_source_unchanged" : true,
+      "python_seconds" : [
+        2.7852190839998912,
+        0.0020712499999717693,
+        0.0019110420000743034
+      ],
+      "python_source_unchanged" : true,
+      "source_size" : 2048
+    },
+    {
+      "crop_size" : 1024,
+      "first_visit_speedup" : 18.121015759060523,
+      "native_seconds" : [
+        0.64172600000006241,
+        0.030941166666707431,
+        0.030740666666588368
+      ],
+      "native_source_unchanged" : true,
+      "python_seconds" : [
+        11.628726959000005,
+        0.0022277090001807665,
+        0.002255082999909064
+      ],
+      "python_source_unchanged" : true,
+      "source_size" : 4096
+    }
+  ]
+}

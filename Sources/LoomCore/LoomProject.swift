@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 import ImageIO
+import LoomNative
 
 struct ProjectDocument: Codable, Sendable {
     var schema = "loom-factory.project.v1"
@@ -13,6 +14,7 @@ public actor LoomProject {
     public nonisolated let projectFolder: URL
     var document: ProjectDocument
     var activeProcess: Process?
+    var activeTraining: NativeCancellation?
     var operationActive = false
     public init(sourceFolder: URL) throws {
         // Foundation can mix /var and /private/var URLs. Establish one actual
@@ -131,7 +133,8 @@ public actor LoomProject {
         try ImageMetadataStore.clear(image.url)
     }
     public func cancelTraining() {
-        activeProcess?.terminate()
+        activeTraining?.cancel()
+        if let activeProcess, activeProcess.isRunning { activeProcess.terminate() }
     }
 
     func saveDocument() throws {

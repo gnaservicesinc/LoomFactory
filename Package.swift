@@ -5,13 +5,18 @@ let package = Package(
     name: "LoomFactory",
     platforms: [.macOS(.v26)],
     products: [
+        .library(name: "LoomNative", targets: ["LoomNative"]),
+        .executable(name: "LoomNativeProbe", targets: ["LoomNativeProbe"]),
         .library(name: "LoomCore", targets: ["LoomCore"]),
         .executable(name: "LoomFactory", targets: ["LoomFactory"])
     ],
     targets: [
-        .target(name: "LoomCore"),
+        .target(name: "LoomNative"),
+        .executableTarget(name: "LoomNativeProbe", dependencies: ["LoomNative"]),
+        .target(name: "LoomCore", dependencies: ["LoomNative"]),
         .executableTarget(name: "LoomFactory", dependencies: ["LoomCore"]),
-        .testTarget(name: "LoomCoreTests", dependencies: ["LoomCore"], path: "Tests/LoomCoreTests"),
+        .testTarget(name: "LoomNativeTests", dependencies: ["LoomNative"], path: "Tests/LoomNativeTests"),
+        .testTarget(name: "LoomCoreTests", dependencies: ["LoomCore", "LoomNative"], path: "Tests/LoomCoreTests"),
         .testTarget(name: "LoomFactoryUITests", dependencies: ["LoomFactory", "LoomCore"], path: "Tests/LoomFactoryUITests")
     ]
 )

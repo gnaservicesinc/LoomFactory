@@ -109,10 +109,6 @@ final class FactoryModel {
 
     init(rememberSourceFolder: Bool = true) {
         self.rememberSourceFolder = rememberSourceFolder
-        if let runtime = Bundle.main.resourceURL?.appendingPathComponent("Runtime"),
-           FileManager.default.fileExists(atPath: runtime.appendingPathComponent("loom_factory/__main__.py").path) {
-            setenv("LOOM_FACTORY_RUNTIME", runtime.path, 1)
-        }
     }
 
     func restoreLastFolder() {
@@ -447,7 +443,7 @@ final class FactoryModel {
                 guard let self, self.generation == current else { return }
                 self.events.append(event)
                 if self.events.count > 300 { self.events.removeFirst(self.events.count - 300) }
-                self.activityTitle = event.message
+                if self.operation?.isCancelled != true { self.activityTitle = event.message }
                 if let progress = event.progress { self.progress = progress }
             }
         }

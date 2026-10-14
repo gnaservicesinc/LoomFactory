@@ -114,26 +114,8 @@ extension LoomProject {
               FileManager.default.fileExists(atPath: resolved.path), resolved.pathExtension == "textureloom" else {
             throw LoomError("Export a Texture Loom package from this source project before publishing.")
         }
-        let python = projectFolder.appendingPathComponent("runtime/bin/python3")
-        guard FileManager.default.isExecutableFile(atPath: python.path) else { throw LoomError("Train a model in this source project before publishing its package.") }
-        // Credentials remain in Hugging Face's credential store; no tokens enter a project or its logs.
-        let code = """
-        import json,sys
-        from huggingface_hub import HfApi
-        api=HfApi()
-        api.whoami()
-        repo=sys.argv[1]; package=sys.argv[2]
-        api.create_repo(repo_id=repo,repo_type='model',exist_ok=True)
-        print(json.dumps({'event':'progress','message':'Uploading the Texture Loom package…'}),flush=True)
-        api.upload_file(path_or_fileobj=package,path_in_repo='TextureLoom.textureloom',repo_id=repo,repo_type='model',commit_message='Publish Texture Loom package')
-        card='# Texture Loom\\n\\nA complete classifier and material-model package created with Loom Factory. Download TextureLoom.textureloom for Texture Studio build integration.\\n'
-        api.upload_file(path_or_fileobj=card.encode(),path_in_repo='README.md',repo_id=repo,repo_type='model',commit_message='Update Texture Loom model card')
-        print(json.dumps({'event':'completed','message':'Texture Loom published','progress':1}),flush=True)
-        """
         progress(.init(type: "publish", message: "Publishing Texture Loom to \(repository)…"))
-        try await execute(executable: python, arguments: ["-c", code, repository, resolved.path], environment: [:],
-                          log: projectFolder.appendingPathComponent("publish.log"), progress: progress)
-        return URL(string: "https://huggingface.co/" + repository)!
+        return try await NativeHubPublisher.publish(package: resolved, repository: repository, progress: progress)
     }
 }
 

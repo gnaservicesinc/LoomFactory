@@ -17,10 +17,6 @@ cp "$factory_binary_dir/LoomFactory" "$factory_stage/Contents/MacOS/LoomFactory"
 cp Resources/Info.plist "$factory_stage/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Add :LoomBuildConfiguration string Release' "$factory_stage/Contents/Info.plist"
 swift Scripts/MakeIcon.swift "$factory_stage/Contents/Resources"
-if [[ -d Runtime ]]; then
-    mkdir -p "$factory_stage/Contents/Resources/Runtime"
-    /usr/bin/rsync -a --exclude '__pycache__' --exclude '*.pyc' Runtime/ "$factory_stage/Contents/Resources/Runtime/"
-fi
 factory_bootstrap="${LOOM_FACTORY_BOOTSTRAP_MODEL:-$factory_root/Resources/DTTC3.mlmodel}"
 if [[ ! -e "$factory_bootstrap" ]]; then
     printf 'Categorizer asset missing: %s\n' "$factory_bootstrap" >&2
@@ -43,6 +39,7 @@ case "$factory_bootstrap" in
         exit 1
         ;;
 esac
+"$factory_root/Scripts/verify-native-bundle.sh" "$factory_stage"
 codesign --force --sign - --options runtime "$factory_stage"
 codesign --verify --strict --verbose=2 "$factory_stage"
 if [[ -e "$factory_bundle" ]]; then

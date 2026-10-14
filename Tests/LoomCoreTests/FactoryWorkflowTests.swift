@@ -5,9 +5,9 @@ import XCTest
 final class FactoryWorkflowTests: XCTestCase {
     func testFreshActorWorkflowTrainsMapImportsClassifierAndExportsOneNativePackage() async throws {
         let environment = ProcessInfo.processInfo.environment
-        guard let runtime = environment["LOOM_FACTORY_TEST_RUNTIME"], let realInput = environment["LOOM_FACTORY_TEST_DIFFUSE"],
+        guard let realInput = environment["LOOM_FACTORY_TEST_DIFFUSE"],
               let realTarget = environment["LOOM_FACTORY_TEST_DEPTH"], let nativeClassifier = environment["LOOM_FACTORY_TEST_CLASSIFIER"] else {
-            throw XCTSkip("Set fresh runtime, diffuse/depth fixtures and an externally trained Bricks classifier to execute native training and package integration.")
+            throw XCTSkip("Set diffuse/depth fixtures and an externally trained Bricks classifier to execute package integration.")
         }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("factory-workflow-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -19,8 +19,6 @@ final class FactoryWorkflowTests: XCTestCase {
         let current = try await project.snapshot()
         let diffuse = try XCTUnwrap(current.images.first { $0.role == .diffuse })
         try await project.updateImage(id: diffuse.id, category: "Bricks", verified: false, note: "Integration fixture")
-        let runtimeLink = root.appendingPathComponent(".loom-factory/runtime")
-        try FileManager.default.createSymbolicLink(at: runtimeLink, withDestinationURL: URL(fileURLWithPath: runtime))
         let settings = TrainingSettings(imageSize: 64, epochs: 1, batchSize: 1, shuffleEachEpoch: false,
                                         exaggerateFeatures: true, modelWidth: 8)
         let map = try await project.trainMap(datasetID: ImageMetadataStore.categoryID("Bricks"), map: .depth,
@@ -55,7 +53,7 @@ final class FactoryWorkflowTests: XCTestCase {
         XCTAssertEqual(categories[0]["id"] as? String, ImageMetadataStore.categoryID("Bricks"))
         let files = try XCTUnwrap(manifest["files"] as? [[String: String]])
         XCTAssertTrue(files.contains { $0["path"]?.hasSuffix(".safetensors") == true })
-        XCTAssertTrue(files.contains { $0["path"]?.contains(".mlpackage/") == true })
+        XCTAssertTrue(files.contains { $0["path"]?.hasSuffix(".mlmodel") == true })
         XCTAssertEqual(try Data(contentsOf: input), try Data(contentsOf: URL(fileURLWithPath: realInput)))
         XCTAssertEqual(try Data(contentsOf: depth), try Data(contentsOf: URL(fileURLWithPath: realTarget)))
         XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent(".loom-factory/runs").path))

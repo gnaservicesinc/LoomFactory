@@ -40,6 +40,6 @@ Scripts/build-app.sh
 Scripts/install-app.sh
 ```
 
-The app installs its pinned Python training runtime in the selected source project's `.loom-factory` folder on first use. Training uses PyTorch with Metal acceleration and exports native Core ML models plus Safetensors weights. See [the package contract](Docs/TextureLoomPackage.md) and [runtime notes](Runtime/README.md).
+Training runs in native Swift with Metal and MPSGraph. Parameters, gradients and optimizer moments remain on the Apple GPU between updates. ImageIO reads original pixels at native precision, and the app exports Core ML models and compatible Safetensors weights without an interpreter or conversion worker. Stop signals the worker independently, saves completed finite updates and returns after the current GPU operation. Existing project settings and saved weights remain compatible. See [the package contract](Docs/TextureLoomPackage.md) and [native training notes](Docs/NativeTraining.md).
 
 Execution tests establish file handling, training and export behavior. They do not establish prediction quality. Review trained models on unseen materials before shipping a deployment.
