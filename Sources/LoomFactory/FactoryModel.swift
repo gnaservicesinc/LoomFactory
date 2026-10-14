@@ -22,13 +22,17 @@ final class FactoryModel {
     var settings = ProjectSettings()
     var selectedDatasetID = "" {
         didSet {
-            if selectedDatasetID != oldValue { selectedTrainingVersionID = ""; invalidateComparisonSelection() }
+            if selectedDatasetID != oldValue {
+                selectedTrainingVersionID = ""; invalidateComparisonSelection(); resetModelTestSelection()
+            }
         }
     }
     var selectedImageID: String?
     var selectedMap: MapRole = .depth {
         didSet {
-            if selectedMap != oldValue { selectedTrainingVersionID = ""; invalidateComparisonSelection() }
+            if selectedMap != oldValue {
+                selectedTrainingVersionID = ""; invalidateComparisonSelection(); resetModelTestSelection()
+            }
         }
     }
     var trainingStartMode: FactoryTrainingStartMode = .checkpoint
@@ -47,6 +51,14 @@ final class FactoryModel {
     private(set) var comparisonResult: ModelComparisonResult?
     private(set) var comparisonIssue: String?
     private(set) var loadingComparisonPairs = false
+    var selectedTestVersionID = "" {
+        didSet { if selectedTestVersionID != oldValue { modelTestResult = nil; testWeightSource = nil } }
+    }
+    var testWeightSource: TrainingWeightSource? {
+        didSet { if testWeightSource != oldValue { modelTestResult = nil } }
+    }
+    private(set) var testInputURL: URL?
+    private(set) var modelTestResult: ModelTestResult?
     var imageSearch = ""
     var fileFilter: MaterialBrowserFilter = .all
     var workspaceSection: LoomWorkspaceSection = .materials
@@ -169,6 +181,40 @@ final class FactoryModel {
         !busy && !loadingComparisonPairs && loadedComparisonKey == comparisonSelectionKey &&
         firstComparisonVersion?.artifact != nil && secondComparisonVersion?.artifact != nil && selectedComparisonPair != nil
     }
+    var testableModelVersions: [ModelVersion] {
+        snapshot?.modelVersions.filter { $0.artifact != nil || $0.checkpoint != nil } ?? []
+    }
+    var selectedTestVersion: ModelVersion? {
+        if !selectedTestVersionID.isEmpty { return testableModelVersions.first { $0.id == selectedTestVersionID } }
+        return testableModelVersions.first { $0.datasetID == selectedDatasetID && $0.map == selectedMap && $0.isActive } ??
+            testableModelVersions.first { $0.datasetID == selectedDatasetID && $0.map == selectedMap } ??
+            testableModelVersions.first(where: \.isActive) ?? testableModelVersions.first
+    }
+    var availableTestWeightSources: [TrainingWeightSource] {
+        guard let version = selectedTestVersion else { return [] }
+        return (version.artifact == nil ? [] : [.model]) + (version.checkpoint == nil ? [] : [.checkpoint])
+    }
+    var effectiveTestWeightSource: TrainingWeightSource? {
+        testWeightSource ?? availableTestWeightSources.first
+    }
+    var testDiffuseImages: [SourceImage] {
+        let dataset = selectedTestVersion?.datasetName ?? selectedDataset?.name
+        return snapshot?.images.filter { $0.role == .diffuse && !$0.ignored &&
+            (dataset == nil || $0.category == dataset) } ?? []
+    }
+    var modelTestIssue: String? {
+        if !selectedTestVersionID.isEmpty, selectedTestVersion == nil {
+            return "The selected run is no longer available. Choose another saved run."
+        }
+        guard selectedTestVersion != nil else { return "Train a model or open a source folder with a saved model or checkpoint." }
+        if let source = effectiveTestWeightSource, !availableTestWeightSources.contains(source) {
+            return "These saved weights are no longer available. Choose exported model weights or a checkpoint from this run."
+        }
+        guard let input = testInputURL else { return "Choose a diffuse image to see the model's output." }
+        if !FileManager.default.fileExists(atPath: input.path) { return "The selected diffuse image is no longer available. Choose an image again." }
+        return nil
+    }
+    var canTestModel: Bool { project != nil && !busy && modelTestIssue == nil && effectiveTestWeightSource != nil }
     var eligiblePairCount: Int {
         trainingPlan?.totalPairCount ?? 0
     }
@@ -277,6 +323,8 @@ final class FactoryModel {
         loadedComparisonKey = ""
         packageNeedsExport = false
         comparisonImageRevisions = [:]
+        resetModelTestSelection()
+        testInputURL = nil
         imageSearch = ""
         fileFilter = .all
         workspaceSection = .materials
@@ -471,6 +519,7 @@ final class FactoryModel {
             if result.runIDs.contains(self.comparisonFirstVersionID) { self.comparisonFirstVersionID = "" }
             if result.runIDs.contains(self.comparisonSecondVersionID) { self.comparisonSecondVersionID = "" }
             self.invalidateComparisonSelection()
+            if result.runIDs.contains(self.selectedTestVersionID) { self.resetModelTestSelection() }
             self.invalidateExportedPackage()
             if self.snapshot?.modelVersions.contains(where: { !result.runIDs.contains($0.id) &&
                 $0.datasetID == self.selectedDatasetID && $0.map == self.selectedMap }) != true {
@@ -531,6 +580,73 @@ final class FactoryModel {
         comparisonPairs = []
         comparisonIssue = nil
         loadedComparisonKey = ""
+    }
+
+    func showModelTesting(_ version: ModelVersion? = nil) {
+        guard !busy else { return }
+        if let version {
+            selectedTestVersionID = version.id
+        } else if let version = selectedTestVersion {
+            selectedTestVersionID = version.id
+        }
+        if testInputURL == nil, let image = selectedImage, image.role == .diffuse { setModelTestInput(image.url) }
+        workspaceSection = .testing
+    }
+
+    func chooseModelTestInput() {
+        guard !busy else { return }
+        let panel = NSOpenPanel()
+        panel.title = "Choose a diffuse image to test"
+        panel.message = "Run the saved model on any diffuse image, including a material outside this source folder."
+        panel.prompt = "Use Image"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.image]
+        panel.directoryURL = testInputURL?.deletingLastPathComponent() ?? sourceFolder
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        setModelTestInput(url)
+    }
+
+    func setModelTestInput(_ url: URL) {
+        guard !busy else { return }
+        testInputURL = url
+        modelTestResult = nil
+    }
+
+    func testModel() {
+        guard canTestModel, let version = selectedTestVersion, let inputURL = testInputURL,
+              let source = effectiveTestWeightSource else { return }
+        selectedTestVersionID = version.id
+        testWeightSource = source
+        let current = generation
+        let onProgress = progressHandler()
+        modelTestResult = nil
+        perform("Testing \(version.datasetName) · \(version.map.displayName)", clearEvents: true) { [weak self] project in
+            let result = try await project.testModel(datasetID: version.datasetID, map: version.map, runID: version.id,
+                                                     source: source, inputURL: inputURL, progress: onProgress)
+            guard let self, self.generation == current else { return }
+            self.modelTestResult = result
+        }
+    }
+
+    func saveModelTestOutput() {
+        guard let result = modelTestResult, !busy else { return }
+        let panel = NSSavePanel()
+        panel.title = "Save model output"
+        panel.prompt = "Save Output"
+        panel.allowedContentTypes = [.png]
+        panel.nameFieldStringValue = "\(result.inputURL.deletingPathExtension().lastPathComponent)_\(result.map.rawValue).png"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try ModelTestOutputExport.save(result, to: url, sourceImageURLs: snapshot?.images.map(\.url) ?? [])
+        } catch { errorMessage = error.localizedDescription }
+    }
+
+    private func resetModelTestSelection() {
+        selectedTestVersionID = ""
+        testWeightSource = nil
+        modelTestResult = nil
     }
 
     private func invalidateExportedPackage() {

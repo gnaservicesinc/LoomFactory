@@ -12,6 +12,7 @@ struct FactoryImage: View {
     let revision: String
     var maximumPixels = 1400
     var interpolation: Image.Interpolation = .high
+    var applyOrientationTransform = true
     @State private var image: NSImage?
     @State private var couldNotRead = false
 
@@ -29,16 +30,17 @@ struct FactoryImage: View {
             }
         }
         .clipped()
-        .task(id: "\(url.path)|\(revision)|\(maximumPixels)") {
+        .task(id: "\(url.path)|\(revision)|\(maximumPixels)|\(applyOrientationTransform)") {
             image = nil
             couldNotRead = false
             let sourceURL = url
             let pixels = maximumPixels
+            let transform = applyOrientationTransform
             let result = await Task.detached(priority: .userInitiated) { () -> FactoryBitmapBox? in
                 guard let source = CGImageSourceCreateWithURL(sourceURL as CFURL, nil),
                       let bitmap = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                         kCGImageSourceCreateThumbnailFromImageAlways: true,
-                        kCGImageSourceCreateThumbnailWithTransform: true,
+                        kCGImageSourceCreateThumbnailWithTransform: transform,
                         kCGImageSourceThumbnailMaxPixelSize: pixels,
                         kCGImageSourceShouldCacheImmediately: true
                       ] as CFDictionary) else { return nil }

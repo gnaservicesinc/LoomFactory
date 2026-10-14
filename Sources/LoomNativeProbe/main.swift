@@ -3,6 +3,7 @@ import Darwin
 import Foundation
 import ImageIO
 import LoomNative
+import Metal
 
 private struct ProbeArguments {
     var values: [String: String] = [:]
@@ -48,7 +49,22 @@ private func executionJSON(_ value: NativeGraphExecutionMeasurements) -> [String
 private func memory() -> [String: Any] {
     var usage = rusage()
     getrusage(RUSAGE_SELF, &usage)
-    return ["peak_resident_bytes": usage.ru_maxrss, "physical_memory_bytes": ProcessInfo.processInfo.physicalMemory]
+    var result: [String: Any] = ["peak_resident_bytes": usage.ru_maxrss,
+        "physical_memory_bytes": ProcessInfo.processInfo.physicalMemory]
+    // GPU allocations can grow while RSS remains small on unified memory.
+    var info = task_vm_info_data_t()
+    var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+    let status = withUnsafeMutablePointer(to: &info) {
+        $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+            task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+        }
+    }
+    if status == KERN_SUCCESS {
+        result["physical_footprint_bytes"] = info.phys_footprint
+        result["resident_bytes"] = info.resident_size
+    }
+    if let device = MTLCreateSystemDefaultDevice() { result["metal_allocated_bytes"] = device.currentAllocatedSize }
+    return result
 }
 private func sysctlString(_ key: String) -> String {
     var size = 0

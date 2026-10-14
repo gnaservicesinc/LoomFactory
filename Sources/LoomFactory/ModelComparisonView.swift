@@ -75,6 +75,11 @@ struct ModelVersionRow: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             HStack(spacing: 9) {
+                if version.artifact != nil || version.checkpoint != nil {
+                    Button("Test model") { model.showModelTesting(version) }
+                        .disabled(model.busy)
+                        .accessibilityIdentifier("training.version.test.\(version.id)")
+                }
                 if version.artifact?.weightsPath != nil {
                     Button("Continue exported") { model.continueModelVersion(version, source: .exportedModel) }
                         .accessibilityIdentifier("training.version.continueModel.\(version.id)")

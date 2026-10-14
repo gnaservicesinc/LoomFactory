@@ -24,6 +24,8 @@ struct LoomRoomView: View {
                                 if model.busy || !model.events.isEmpty { RunPanel(model: model) }
                             case .training:
                                 EmptyView()
+                            case .testing:
+                                ModelTestView(model: model)
                             case .package:
                                 HStack(alignment: .top, spacing: FactoryStyle.spacing) {
                                     CreateMLPanel(model: model).frame(maxWidth: .infinity)
@@ -46,6 +48,9 @@ struct LoomRoomView: View {
             ToolbarItem(placement: .principal) { Text("Loom Factory").font(.headline) }
             ToolbarItemGroup(placement: .primaryAction) {
                 if model.snapshot != nil {
+                    Button { model.showModelTesting() } label: { Label("Test Model", systemImage: "play.rectangle") }
+                        .disabled(model.busy)
+                        .accessibilityIdentifier("loom.testModel")
                     Button { model.importImages() } label: { Label("Import Images", systemImage: "square.and.arrow.down") }
                         .disabled(model.busy)
                     Button { model.refresh() } label: { Label("Refresh", systemImage: "arrow.clockwise") }
@@ -75,7 +80,7 @@ struct LoomRoomView: View {
                 ForEach(LoomWorkspaceSection.allCases) { section in
                     Text(section.displayName).tag(section)
                 }
-            }.pickerStyle(.segmented).labelsHidden().frame(width: 430, alignment: .leading)
+            }.pickerStyle(.segmented).labelsHidden().frame(width: 540, alignment: .leading)
                 .accessibilityIdentifier("loom.workspaceSection")
             Spacer()
         }
@@ -368,12 +373,13 @@ extension SourceImage {
 }
 
 enum LoomWorkspaceSection: String, CaseIterable, Identifiable {
-    case materials, training, package
+    case materials, training, testing, package
     var id: String { rawValue }
     var displayName: String {
         switch self {
         case .materials: "Materials"
         case .training: "Training"
+        case .testing: "Test Model"
         case .package: "Package"
         }
     }
