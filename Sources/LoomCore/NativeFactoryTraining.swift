@@ -27,8 +27,18 @@ enum NativeFactoryTraining {
         let logURL = output.appendingPathComponent("training.log")
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
         let log = try FileHandle(forWritingTo: logURL); defer { try? log.close() }
-        func emit(_ event: TrainingEvent) {
-            let event = event.reporting(tracker.snapshot(now: clock()))
+        var inherited = TrainingContinuationHistory()
+        func emit(_ event: TrainingEvent, inheritedOffsets: Bool = true) {
+            let snapshot = tracker.snapshot(now: clock())
+            let priorEpochs = inheritedOffsets ? inherited.epochs : 0
+            let priorUpdates = inheritedOffsets ? inherited.updates : 0
+            let event = TrainingEvent(type: event.type, message: event.message,
+                progress: event.progress.map { $0 == 1 ? 1 : snapshot.totalSteps > 0 ? Double(snapshot.completedSteps) / Double(snapshot.totalSteps) : $0 },
+                epoch: event.epoch.map { $0 + priorEpochs }, loss: event.loss, validationLoss: event.validationLoss,
+                learningRate: event.learningRate, update: event.update.map { $0 + priorUpdates },
+                totalUpdates: event.totalUpdates.map { $0 + priorUpdates }, parameterCount: event.parameterCount,
+                effectiveBatchSize: event.effectiveBatchSize, gradientNorm: event.gradientNorm,
+                gradientClipThreshold: event.gradientClipThreshold, trainingProgress: snapshot, cycleTiming: event.cycleTiming)
             progress(event)
             var json: [String: Any] = ["event": event.type, "message": event.message, "backend": "swift-mpsgraph-metal"]
             if let v = event.progress { json["progress"] = v }; if let v = event.epoch { json["epoch"] = v }
@@ -58,6 +68,10 @@ enum NativeFactoryTraining {
         request.merge(["schema": "loom-factory-training-v1", "backend": "swift-mpsgraph-metal", "source_root": root.path,
                        "output_directory": output.path, "project_id": projectID, "dataset_id": dataset.id,
                        "display_name": dataset.name, "map_kind": map.rawValue,
+                       "source_material_count": plan.sourceMaterialCount, "source_image_count": plan.sourceImageCount,
+                       "eligible_pair_count": plan.eligiblePairCount, "excluded_pair_count": plan.excludedPairCount,
+                       "training_pair_count": plan.trainingPairCount, "validation_pair_count": plan.validationPairCount,
+                       "planned_training_pair_uses": plan.trainingSampleVisits, "planned_optimizer_updates": plan.totalOptimizerUpdates,
                        "samples": all.map { ["id": $0.id, "input": $0.input.url.path, "target": $0.target.url.path,
                            "split": validationIDs.contains($0.id) ? "validation" : "training"] }]) { _, new in new }
         if let resume { request["resume_weights"] = resume.path }
@@ -86,6 +100,9 @@ enum NativeFactoryTraining {
         var restoredCursor: TrainingCheckpointCursor?
         var restoredDescriptor: [String: Any]?
         var restoredBestWeights: [String: NativeTensor]?
+        var sourceDescriptor: [String: Any]?
+        var sourceKind: TrainingWeightSource?
+        var sourceRunID: String?
         let fingerprint = SHA256.hash(data: Data(all.map { pair in
             "\(pair.id)|\(pair.input.width)x\(pair.input.height)|\(proofs[pair.input.url.path]!.hash)|\(proofs[pair.target.url.path]!.hash)|\(validationIDs.contains(pair.id))"
         }.sorted().joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
@@ -94,6 +111,8 @@ enum NativeFactoryTraining {
                 projectID: projectID, datasetID: dataset.id, map: map, settings: settings,
                 expectedSHA256: runMetadata?.lineage?.weightsSHA256)
             initial = try NativeWeights.read(from: resume)
+            sourceKind = resolved.source; sourceRunID = resolved.runID
+            sourceDescriptor = try TrainingRunFiles.descriptor(at: resume.deletingLastPathComponent(), source: resolved.source)
             if resolved.source == .checkpoint {
                 let folder = resume.deletingLastPathComponent()
                 let descriptor = try TrainingRunFiles.descriptor(at: folder, source: .checkpoint)
@@ -161,7 +180,43 @@ enum NativeFactoryTraining {
         var rng = FactoryRandom(seed: UInt64(settings.seed))
         if let state = restoredCursor?.randomState { rng.state = state }
         var cursor = restoredCursor
-        emit(.init(type: "started", message: "Training \(dataset.name) · \(settings.epochs) epochs · \(totalUpdates) steps", update: update, totalUpdates: totalUpdates,
+        if var sourceDescriptor, let sourceKind, let sourceRunID, let resume {
+            if sourceKind == .checkpoint, sourceDescriptor["elapsed_seconds"] == nil,
+               let completed = sourceDescriptor["updates"] as? Int,
+               let measured = TrainingContinuationHistory.measuredProgress(in: resume.deletingLastPathComponent(),
+                    completedUpdates: completed + (sourceDescriptor["prior_updates"] as? Int ?? 0)) {
+                sourceDescriptor["elapsed_seconds"] = max(0, measured.elapsedSeconds - (measured.priorElapsedSeconds ?? 0))
+                sourceDescriptor["epoch_elapsed_seconds"] = measured.epochElapsedSeconds
+                sourceDescriptor["completed_images"] = max(0, measured.completedImages - (measured.priorImages ?? 0))
+                if restoredDescriptor != nil { restoredDescriptor = sourceDescriptor }
+            }
+            let sourceRequest = TrainingRunFiles.optionalJSON(resume.deletingLastPathComponent().appendingPathComponent("request.json"))
+            inherited = TrainingContinuationHistory(descriptor: sourceDescriptor, source: sourceKind,
+                runID: sourceRunID, resumingCursor: restoredCursor != nil,
+                trainingImages: sourceRequest?["training_pair_count"] as? Int ?? 0)
+        }
+        tracker.restore(epoch: restoredCursor.map { $0.epoch + ($0.order.isEmpty ? 0 : 1) } ?? 0,
+            stepInEpoch: restoredCursor?.epochUpdates ?? 0, completedSteps: update,
+            completedImages: (restoredCursor?.epoch ?? 0) * plan.training.count + (restoredCursor?.imageCount ?? 0),
+            elapsedSeconds: inherited.restoredRunElapsedSeconds,
+            priorEpochs: inherited.epochs, priorSteps: inherited.updates, priorImages: inherited.images,
+            priorElapsedSeconds: inherited.elapsedSeconds, now: clock())
+        let restoredHistory = inherited.rows + history.map { row in
+            var cumulative = row
+            cumulative["epoch"] = (row["epoch"] as? Int ?? 0) + inherited.epochs
+            if let count = row["update"] as? Int { cumulative["update"] = count + inherited.updates }
+            return cumulative
+        }
+        for previous in restoredHistory {
+            let epoch = previous["epoch"] as? Int ?? 0
+            let loss = previous["loss"] as? Double
+            emit(.init(type: "restored_epoch", message: "Previous training · epoch \(epoch)\(loss.map { " · loss \($0)" } ?? "")",
+                epoch: epoch, loss: previous["loss"] as? Double, validationLoss: previous["validation_loss"] as? Double,
+                learningRate: previous["learning_rate"] as? Double, update: previous["update"] as? Int,
+                gradientNorm: previous["mean_gradient_norm"] as? Double,
+                gradientClipThreshold: previous["gradient_clip_threshold"] as? Double), inheritedOffsets: false)
+        }
+        emit(.init(type: "started", message: "Training \(dataset.name) · \(inherited.epochs + settings.epochs) total epochs · \(inherited.updates + totalUpdates) total updates", update: update, totalUpdates: totalUpdates,
                    parameterCount: settings.parameterCount(map: map), effectiveBatchSize: settings.effectiveBatchSize))
         func verify(_ pair: TrainingPair) throws {
             try cancellation.check(); try checkTags(pair, dataset: dataset.name, map: map, root: root)
@@ -172,7 +227,7 @@ enum NativeFactoryTraining {
             let checkpointStart = clock()
             tracker.begin(stage: .checkpointing,
                           index: epochComplete && !history.isEmpty ? plan.training.count : nil, now: checkpointStart)
-            emit(.init(type: "status", message: "Saving checkpoint at step \(update)…", update: update, totalUpdates: totalUpdates))
+            emit(.init(type: "status", message: "Saving checkpoint at total update \(inherited.updates + update)…", update: update, totalUpdates: totalUpdates))
             var descriptor: [String: Any] = ["schema": "loom-factory-checkpoint-v1", "status": status, "project_id": projectID,
                 "dataset_id": dataset.id, "dataset_name": dataset.name, "kind": "map", "map": map.rawValue,
                 "architecture": architecture.identifier, "architecture_config": architectureJSON(architecture),
@@ -180,6 +235,11 @@ enum NativeFactoryTraining {
                 "optimizer_updates": session.updateCount, "backend": "swift-mpsgraph-metal",
                 "continuation": "weights, optimizer state and completed-update epoch position",
                 "saved_at": ISO8601DateFormatter().string(from: Date())]
+            descriptor.merge(inherited.json) { _, new in new }
+            let measured = tracker.snapshot(now: clock())
+            descriptor["completed_images"] = measured.completedImages - inherited.images
+            descriptor["elapsed_seconds"] = measured.elapsedSeconds - inherited.elapsedSeconds
+            descriptor["epoch_elapsed_seconds"] = measured.epochElapsedSeconds
             if let cursor {
                 descriptor["resume_cursor"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(cursor))
             }
@@ -187,7 +247,7 @@ enum NativeFactoryTraining {
             try TrainingCheckpointFiles.write(weights: session.weights(), optimizer: session.optimizerState(),
                 bestWeights: bestWeights, descriptor: descriptor, directory: output)
             tracker.checkpointCompleted(durationSeconds: clock() - checkpointStart, epochComplete: epochComplete, now: clock())
-            emit(.init(type: "checkpoint", message: "Checkpoint saved at step \(update)", epoch: history.count, update: update))
+            emit(.init(type: "checkpoint", message: "Checkpoint saved at total update \(inherited.updates + update)", epoch: history.count, update: update))
         }
         func serviceCheckpointRequest() throws {
             guard update > 0, let control, let stop = control.beginRequest() else { return }
@@ -199,19 +259,33 @@ enum NativeFactoryTraining {
                 emit(.init(type: "checkpoint_failed", message: "Checkpoint was not saved; training continues. \(error.localizedDescription)", update: update))
                 return
             }
-            control.complete(.success(.init(runDirectory: output, completedUpdates: update, stopped: stop)))
-            emit(.init(type: "checkpoint_saved", message: "Checkpoint saved at step \(update)\(stop ? "; stopping training" : "; training continues")", update: update))
+            control.complete(.success(.init(runDirectory: output, completedUpdates: update + inherited.updates, stopped: stop)))
+            emit(.init(type: "checkpoint_saved", message: "Checkpoint saved at total update \(inherited.updates + update)\(stop ? "; stopping training" : "; training continues")", update: update))
             if stop { cancellation.cancel(); throw TrainingSavedStop() }
         }
         func automaticCheckpoint(_ status: String, epochComplete: Bool = true) {
             do { try checkpoint(status, epochComplete: epochComplete) }
             catch { emit(.init(type: "warning", message: "Automatic checkpoint failed; training continues. \(error.localizedDescription)", update: update)) }
         }
+        func writeProgress(_ status: String) throws {
+            let measured = tracker.snapshot(now: clock())
+            var value: [String: Any] = ["status": status, "history": history, "updates": update,
+                "completed_images": measured.completedImages - inherited.images,
+                "elapsed_seconds": measured.elapsedSeconds - inherited.elapsedSeconds,
+                "total_epochs": inherited.epochs + history.count, "total_updates": inherited.updates + update,
+                "total_duration_seconds": measured.elapsedSeconds]
+            value.merge(inherited.json) { _, new in new }
+            try writeJSON(value, to: output.appendingPathComponent("progress.json"))
+        }
         do {
             for epoch in (stoppedEarly ? settings.epochs : restoredCursor?.epoch ?? 0)..<settings.epochs {
                 try cancellation.check()
                 tracker.beginEpoch(epoch: epoch + 1, now: clock())
                 let restoring = restoredCursor?.epoch == epoch && restoredCursor?.order.isEmpty == false ? restoredCursor : nil
+                if let restoring {
+                    tracker.restoreEpochPosition(stepInEpoch: restoring.epochUpdates, imageIndex: restoring.imageCount,
+                        elapsedSeconds: restoredDescriptor?["epoch_elapsed_seconds"] as? Double ?? 0)
+                }
                 var order = plan.training
                 if let restoring {
                     let pairs = Dictionary(uniqueKeysWithValues: order.map { ($0.id, $0) })
@@ -292,7 +366,7 @@ enum NativeFactoryTraining {
                     let cap = options.gradientClipThreshold(updateCount: session.updateCount)
                     tracker.begin(stage: .optimizing,
                                   image: order[window..<end].map { $0.input.trainingDisplayName }.joined(separator: ", "), now: clock())
-                    emit(.init(type: "step_updating", message: "Updating step \(update + 1) of \(totalUpdates)", epoch: epoch + 1,
+                    emit(.init(type: "step_updating", message: "Updating total step \(inherited.updates + update + 1) of \(inherited.updates + totalUpdates)", epoch: epoch + 1,
                                update: update, totalUpdates: totalUpdates))
                     let optimizerStart = clock()
                     let norm = try session.applyGradients(learningRate: learningRate); update += 1
@@ -303,7 +377,7 @@ enum NativeFactoryTraining {
                     let cycleSeconds = clock() - cycleStart
                     tracker.completeStep(stepInEpoch: epochUpdates, completedSteps: update,
                         completedImages: epoch * order.count + count, cycleSeconds: cycleSeconds, now: clock())
-                    emit(.init(type: "progress", message: "Epoch \(epoch + 1) of \(settings.epochs) · step \(update) of \(totalUpdates) · \(totalUpdates - update) steps left",
+                    emit(.init(type: "progress", message: "Epoch \(inherited.epochs + epoch + 1) of \(inherited.epochs + settings.epochs) · step \(inherited.updates + update) of \(inherited.updates + totalUpdates) · \(totalUpdates - update) steps left",
                         progress: Double(update) / Double(totalUpdates), epoch: epoch + 1, loss: epochLoss / Double(count),
                         learningRate: learningRate, update: update, totalUpdates: totalUpdates,
                         gradientNorm: norm, gradientClipThreshold: cap,
@@ -352,11 +426,11 @@ enum NativeFactoryTraining {
                     imageCount: 0, epochUpdates: 0, clippedUpdates: 0, gradientNormSum: 0, peakGradientNorm: 0,
                     augmentation: augmentation, randomState: rng.state, sourceFingerprint: fingerprint,
                     bestLoss: bestLoss, bestEpoch: bestEpoch, staleEpochs: stale, stoppedEarly: stop)
-                emit(.init(type: "epoch_completed", message: "Epoch \(epoch + 1) complete", epoch: epoch + 1,
+                emit(.init(type: "epoch_completed", message: "Epoch \(inherited.epochs + epoch + 1) complete", epoch: epoch + 1,
                     loss: epochLoss / Double(count), validationLoss: validation, update: update, totalUpdates: totalUpdates))
                 if (epoch + 1) % settings.checkpointEveryEpochs == 0 || epoch + 1 == settings.epochs || stop { automaticCheckpoint("training") }
                 try serviceCheckpointRequest()
-                try writeJSON(["status": "training", "history": history, "updates": update], to: output.appendingPathComponent("progress.json"))
+                try writeProgress("training")
                 if stop { stoppedEarly = true; break }
             }
             try serviceCheckpointRequest()
@@ -398,6 +472,13 @@ enum NativeFactoryTraining {
                 "export_epoch": exportEpoch, "best_epoch": bestEpoch ?? NSNull(), "best_validation_loss": bestLoss ?? NSNull(),
                 "validation_crop": plan.validation.isEmpty ? NSNull() : "fixed-center-native-no-augmentation",
                 "device": "metal", "backend": "swift-mpsgraph-metal", "duration_seconds": Date().timeIntervalSince(started)]) { _, new in new }
+            training.merge(inherited.json) { _, new in new }
+            let measured = tracker.snapshot(now: clock())
+            training["elapsed_seconds"] = measured.elapsedSeconds - inherited.elapsedSeconds
+            training["completed_images"] = measured.completedImages - inherited.images
+            training["total_epochs"] = inherited.epochs + history.count
+            training["total_updates"] = inherited.updates + update
+            training["total_duration_seconds"] = measured.elapsedSeconds
             let finalLoss = history[exportEpoch - 1]["loss"] as! Double
             var descriptor: [String: Any] = ["schema": "loom-factory-model-v1", "status": "completed", "kind": "map",
                 "project_id": projectID, "dataset_id": dataset.id, "dataset_name": dataset.name, "map": map.rawValue,
@@ -412,7 +493,7 @@ enum NativeFactoryTraining {
                 "parameter_count": settings.parameterCount(map: map), "sources": proofs.map { path, proof in proof.json(path: String(path.dropFirst(root.path.count + 1))) },
                 "quality_note": "Training completion does not qualify prediction quality on unseen materials."]
             descriptor.merge(versionJSON) { _, new in new }
-            try writeJSON(["status": "completed", "history": history, "updates": update], to: output.appendingPathComponent("progress.json"))
+            try writeProgress("completed")
             try cancellation.check()
             try writeJSON(descriptor, to: output.appendingPathComponent("model.json"))
             let artifact = ModelArtifact(id: id, kind: "map", datasetID: dataset.id, datasetName: dataset.name, map: map,
@@ -423,16 +504,16 @@ enum NativeFactoryTraining {
             return artifact
         } catch {
             if error is TrainingSavedStop {
-                try? writeJSON(["status": "saved_stopped", "history": history, "updates": update], to: output.appendingPathComponent("progress.json"))
+                try? writeProgress("saved_stopped")
                 tracker.begin(stage: .stopped, now: clock())
-                emit(.init(type: "saved_stopped", message: "Training stopped after saving checkpoint at step \(update)", update: update))
+                emit(.init(type: "saved_stopped", message: "Training stopped after saving checkpoint at total update \(inherited.updates + update)", update: update))
                 throw error
             }
             let status = error is CancellationError ? "cancelled" : "stopped"
             var savedLatest = false
             do { try checkpoint(status); savedLatest = update > 0 }
             catch { emit(.init(type: "checkpoint_failed", message: "Latest checkpoint could not be saved. The previous checkpoint was preserved: \(error.localizedDescription)")) }
-            try? writeJSON(["status": status, "history": history, "updates": update], to: output.appendingPathComponent("progress.json"))
+            try? writeProgress(status)
             tracker.begin(stage: .stopped, now: clock())
             emit(.init(type: status, message: error is CancellationError
                 ? savedLatest ? "Training stopped; completed steps were saved" : update == 0 ? "Training stopped before any optimizer update; no trained checkpoint exists" : "Training stopped; latest save failed. Check the previous checkpoint in Model Versions."
@@ -460,7 +541,7 @@ enum NativeFactoryTraining {
         a.descriptor
     }
     static func settingsJSON(_ s: TrainingSettings) -> [String: Any] {
-        ["image_size": s.imageSize, "model_architecture": s.modelArchitecture,
+        ["image_size": s.imageSize, "source_resolution_levels": s.sourceResolutionLevels, "model_architecture": s.modelArchitecture,
          "scalar_loss": s.scalarLoss.rawValue,
          "width": s.modelWidth, "blocks": s.modelBlocks, "epochs": s.epochs,
          "batch_size": s.batchSize, "learning_rate": s.learningRate, "shuffle_each_epoch": s.shuffleEachEpoch,

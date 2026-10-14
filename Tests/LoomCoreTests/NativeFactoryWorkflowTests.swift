@@ -8,6 +8,37 @@ import XCTest
 @testable import LoomCore
 
 final class NativeFactoryWorkflowTests: XCTestCase {
+    func testNativeRunUsesTheBuildersSelectedResolutionPlanAndRecordsItsCounts() async throws {
+        let (project, root) = try fixture(resolutions: [64, 128, 256])
+        defer { try? FileManager.default.removeItem(at: root) }
+        let snapshot = try await project.snapshot()
+        let originals = try Dictionary(uniqueKeysWithValues: snapshot.images.map { ($0.url, try Data(contentsOf: $0.url)) })
+        let settings = TrainingSettings(imageSize: 32, sourceResolutionLevels: 2, epochs: 2,
+            batchSize: 2, shuffleEachEpoch: false, modelWidth: 8, modelBlocks: 1,
+            gradientAccumulationSteps: 3, validationFraction: 0)
+        let datasetID = ImageMetadataStore.categoryID("Bricks")
+        let plan = try XCTUnwrap(snapshot.trainingPlan(datasetID: datasetID, map: .depth, settings: settings))
+        XCTAssertEqual(plan.sourceMaterialCount, 1)
+        XCTAssertEqual(plan.sourceImageCount, 6)
+        XCTAssertEqual(plan.trainingPairCount, 2)
+        XCTAssertEqual(plan.excludedPairCount, 1)
+        let artifact = try await project.trainMap(datasetID: datasetID, map: .depth, settings: settings, progress: { _ in })
+        let request = try NativeFactoryTraining.json(artifact.directory.appendingPathComponent("request.json"))
+        let samples = try XCTUnwrap(request["samples"] as? [[String: Any]])
+        XCTAssertEqual(Set(samples.compactMap { $0["id"] as? String }), Set(plan.training.map(\.id)))
+        XCTAssertEqual(request["source_resolution_levels"] as? Int, 2)
+        XCTAssertEqual(request["source_material_count"] as? Int, 1)
+        XCTAssertEqual(request["source_image_count"] as? Int, 6)
+        XCTAssertEqual(request["excluded_pair_count"] as? Int, 1)
+        XCTAssertEqual(request["planned_training_pair_uses"] as? Int, plan.trainingSampleVisits)
+        XCTAssertEqual(request["planned_optimizer_updates"] as? Int, plan.totalOptimizerUpdates)
+        let descriptor = try NativeFactoryTraining.json(artifact.directory.appendingPathComponent("model.json"))
+        let training = try XCTUnwrap(descriptor["training"] as? [String: Any])
+        XCTAssertEqual(training["updates"] as? Int, plan.totalOptimizerUpdates)
+        XCTAssertEqual(training["source_resolution_levels"] as? Int, 2)
+        for (url, bytes) in originals { XCTAssertEqual(try Data(contentsOf: url), bytes) }
+    }
+
     func testNativeTrainingPublishesRealCoreMLAndCompatibleWeightsPreservingOriginals() async throws {
         let (project, root) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
         let before = try pixels(root)
@@ -188,25 +219,28 @@ final class NativeFactoryWorkflowTests: XCTestCase {
         }
     }
 
-    private func fixture() throws -> (LoomProject, URL) {
+    private func fixture(resolutions: [Int] = [64]) throws -> (LoomProject, URL) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("native-factory-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        for name in ["brick_diff.png", "brick_disp.png"] {
-            var bytes = [UInt8](repeating: 0, count: 64 * 64 * 3)
+        for size in resolutions {
+          for stem in ["brick_diff", "brick_disp"] {
+            let name = stem + (resolutions.count == 1 ? "" : "_\(size)") + ".png"
+            var bytes = [UInt8](repeating: 0, count: size * size * 3)
             for index in bytes.indices {
                 let valueIndex = name.contains("disp") ? index / 3 : index
                 bytes[index] = UInt8((valueIndex * 7 + 31) % 255)
             }
             let provider = CGDataProvider(data: Data(bytes) as CFData)!
-            let image = CGImage(width: 64, height: 64, bitsPerComponent: 8, bitsPerPixel: 24, bytesPerRow: 64*3,
+            let image = CGImage(width: size, height: size, bitsPerComponent: 8, bitsPerPixel: 24, bytesPerRow: size*3,
                 space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
                 provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
             let file = root.appendingPathComponent(name)
             let destination = CGImageDestinationCreateWithURL(file as CFURL, UTType.png.identifier as CFString, 1, nil)!
             CGImageDestinationAddImage(destination, image, nil); XCTAssertTrue(CGImageDestinationFinalize(destination))
-            var metadata = ImageMetadata(pairingKey: "fixture", role: name.contains("diff") ? .diffuse : .depth)
+            var metadata = ImageMetadata(pairingKey: "fixture_\(size)", role: name.contains("diff") ? .diffuse : .depth)
             metadata.category = "Bricks"; metadata.roleWasManuallySelected = true; metadata.pairingWasManuallySelected = true
             try ImageMetadataStore.write(metadata, to: file)
+          }
         }
         return (try LoomProject(sourceFolder: root), root.resolvingSymlinksInPath().standardizedFileURL)
     }

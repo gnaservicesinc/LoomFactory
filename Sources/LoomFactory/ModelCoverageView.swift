@@ -38,6 +38,9 @@ struct ModelCoveragePresentation {
     var chosen: ModelCoverageCandidate? {
         entry.candidates.first { $0.id == entry.selectedRunID }
     }
+    var actionCandidate: ModelCoverageCandidate? {
+        chosen ?? entry.candidates.first { $0.id == entry.effectiveRunID } ?? entry.candidates.first
+    }
     var isReady: Bool {
         guard let chosen else { return false }
         return chosen.isAvailable && chosen.isApproved && !chosen.approvalIsStale
@@ -83,6 +86,7 @@ struct ModelCoverageView: View {
     @State private var filter: ModelCoverageFilter = .all
     @State private var search = ""
     @State private var selectedEntryID: String?
+    @State private var selectedCandidateRunID: String?
     @State private var comparingModels = false
 
     private var entries: [ModelCoverageEntry] { model.modelCoverage }
@@ -106,7 +110,8 @@ struct ModelCoverageView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: FactoryStyle.spacing) {
-            FactoryPanel("Model coverage", subtitle: "Choose the model each group uses, review its approval, and find the models still needed.") {
+            FactoryPanel("Models", subtitle: "Approve & Use accepts the displayed version and chooses it for your package. Test output opens any saved version for inspection.") {
+                if let selectedEntry { selectedModelActions(selectedEntry) }
                 summary
                 HStack(spacing: 16) {
                     Picker("Show groups", selection: $filter) {
@@ -117,38 +122,39 @@ struct ModelCoverageView: View {
                         .textFieldStyle(.roundedBorder).frame(width: 240)
                         .accessibilityIdentifier("coverage.search")
                 }
-                if matchingEntries.isEmpty {
+            }
+            if matchingEntries.isEmpty {
                     ContentUnavailableView("No matching requirements", systemImage: "checklist",
                         description: Text(entries.isEmpty ? "Add categorized source images to see the models needed for each group." : "Change the filter to see other groups and products."))
                         .frame(maxWidth: .infinity).padding(.vertical, 24)
-                } else {
-                    if !visibleDatasetIDs.isEmpty {
-                        ScrollView {
+            } else {
+                VSplitView {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 12) {
                             coverageMatrix
-                        }.frame(height: min(CGFloat(visibleDatasetIDs.count) * 88 + 30, 340))
-                            .accessibilityIdentifier("coverage.groups")
+                            if let classifier = matchingEntries.first(where: { $0.slot.product == .classifier }) {
+                                sharedClassifier(classifier)
+                            }
+                        }.padding(12)
+                    }.frame(minHeight: 150, idealHeight: 210)
+                        .accessibilityIdentifier("coverage.groups")
+                    ScrollView {
+                        if let selectedEntry { requirementDetail(selectedEntry).padding(12) }
+                    }.frame(minHeight: 180).accessibilityIdentifier("coverage.inspector")
                     }
-                    if let classifier = matchingEntries.first(where: { $0.slot.product == .classifier }) {
-                        sharedClassifier(classifier)
-                    }
-                }
-                Text("Approval records your review. A model is ready for use when an available approved model is explicitly chosen. The latest model remains the default until you choose one.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-            if let selectedEntry { requirementDetail(selectedEntry) }
         }
         .accessibilityIdentifier("loom.modelCoverage")
-        .onChange(of: model.snapshot?.projectID) { selectedEntryID = nil }
-        .onChange(of: filter) { selectedEntryID = nil }
-        .onChange(of: search) { selectedEntryID = nil }
+        .onChange(of: model.snapshot?.projectID) { selectedEntryID = nil; selectedCandidateRunID = nil }
+        .onChange(of: filter) { selectedEntryID = nil; selectedCandidateRunID = nil }
+        .onChange(of: search) { selectedEntryID = nil; selectedCandidateRunID = nil }
+        .onChange(of: selectedEntryID) { selectedCandidateRunID = nil }
         .sheet(isPresented: $comparingModels) { ModelComparisonView(model: model) }
     }
 
     private var summary: some View {
         HStack(spacing: 0) {
             metric("Required models", count: requiredEntries.count, symbol: "checklist", color: .primary)
-            metric("Have a model", count: requiredEntries.filter { $0.availableCount > 0 }.count, symbol: "cube", color: .accentColor)
-            metric("Have approved", count: requiredEntries.filter { $0.approvedCount > 0 }.count, symbol: "checkmark.seal", color: .green)
             metric("Need a model", count: requiredEntries.filter { $0.availableCount == 0 }.count, symbol: "circle.dashed", color: .red)
             metric("Need approval", count: requiredEntries.filter { ModelCoveragePresentation($0).needsApproval }.count, symbol: "checkmark.seal", color: .orange)
             metric("Ready for use", count: requiredEntries.filter { ModelCoveragePresentation($0).isReady }.count, symbol: "checkmark.seal.fill", color: .green)
@@ -157,19 +163,17 @@ struct ModelCoverageView: View {
     }
 
     private func metric(_ label: String, count: Int, symbol: String, color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
+        HStack(spacing: 6) {
                 Image(systemName: symbol).foregroundStyle(color)
-                Text(count, format: .number).font(.title2.weight(.semibold)).monospacedDigit()
-            }
-            Text(label).font(.caption).foregroundStyle(.secondary)
+                Text(count, format: .number).font(.callout.weight(.semibold)).monospacedDigit()
+                Text(label).font(.caption).foregroundStyle(.secondary)
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder private var coverageMatrix: some View {
         if !visibleDatasetIDs.isEmpty {
-            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 10) {
-                GridRow {
+            LazyVStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 12) {
                     Text("Group").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                         .frame(width: 165, alignment: .leading)
                     ForEach(ModelProductID.categoryProducts, id: \.self) { product in
@@ -178,7 +182,7 @@ struct ModelCoverageView: View {
                     }
                 }
                 ForEach(visibleDatasetIDs, id: \.self) { datasetID in
-                    GridRow {
+                    HStack(alignment: .top, spacing: 12) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(groupName(datasetID)).font(.callout.weight(.semibold))
                             Text("\(groupImageCount(datasetID).formatted()) images").font(.caption).foregroundStyle(.secondary)
@@ -197,7 +201,8 @@ struct ModelCoverageView: View {
     private func coverageCell(_ entry: ModelCoverageEntry) -> some View {
         let state = ModelCoveragePresentation(entry)
         let selected = selectedEntry?.id == entry.id
-        return Button { selectedEntryID = entry.id } label: {
+        return VStack(alignment: .leading, spacing: 8) {
+            Button { selectedEntryID = entry.id } label: {
             VStack(alignment: .leading, spacing: 5) {
                 Label(state.title, systemImage: state.symbol)
                     .font(.caption.weight(.semibold)).foregroundStyle(state.color)
@@ -209,14 +214,62 @@ struct ModelCoverageView: View {
                 }
                 Text(entry.isRequired ? (entry.usesLatestByDefault ? "Latest default" : (entry.selectedRunID == nil ? "Required" : "Model chosen")) : "Optional")
                     .font(.caption2).foregroundStyle(.secondary)
-            }.padding(11).frame(maxWidth: .infinity, minHeight: 78, alignment: .leading)
-                .background(selected ? Color.accentColor.opacity(0.09) : Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
-                .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(selected ? Color.accentColor.opacity(0.6) : Color.primary.opacity(0.08)))
+            }.frame(maxWidth: .infinity, minHeight: 66, alignment: .leading)
                 .contentShape(RoundedRectangle(cornerRadius: 9))
-        }.buttonStyle(.plain)
+            }.buttonStyle(.plain)
             .help("Manage \(entry.groupName) · \(entry.slot.product.displayName)")
             .accessibilityLabel("\(entry.groupName), \(entry.slot.product.displayName), \(state.title), \(state.detailCounts)")
             .accessibilityIdentifier("coverage.slot.\(entry.id)")
+            if let candidate = state.actionCandidate {
+                Button(state.isReady ? "Approved & chosen" : "Approve & Use", systemImage: "checkmark.seal.fill") {
+                    model.approveAndUseCoverageModel(artifact: candidate.artifact)
+                }.buttonStyle(.borderedProminent).controlSize(.small)
+                    .disabled(model.busy || state.isReady || !candidate.isAvailable || !candidate.canChoose)
+                    .accessibilityIdentifier("coverage.quickApprove.\(entry.id)")
+                if entry.slot.product != .classifier {
+                    Button("Test output", systemImage: "play") { model.testCoverageModel(artifact: candidate.artifact) }
+                        .controlSize(.small)
+                        .accessibilityIdentifier("coverage.quickTest.\(entry.id)")
+                }
+            } else {
+                Button("Train model…") { model.trainCoverageSlot(slot: entry.slot) }
+                    .controlSize(.small).disabled(model.busy)
+            }
+        }.padding(11).frame(maxWidth: .infinity, alignment: .leading)
+            .background(selected ? Color.accentColor.opacity(0.09) : Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
+            .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(selected ? Color.accentColor.opacity(0.6) : Color.primary.opacity(0.08)))
+    }
+
+    private func selectedModelActions(_ entry: ModelCoverageEntry) -> some View {
+        let state = ModelCoveragePresentation(entry)
+        let candidate = entry.candidates.first { $0.id == selectedCandidateRunID } ?? state.actionCandidate
+        let ready = candidate.map { $0.isSelected && $0.isApproved && !$0.approvalIsStale && $0.isAvailable } ?? false
+        return HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("\(entry.groupName) · \(entry.slot.product.displayName)").font(.headline)
+                if let candidate {
+                    Picker("Saved model", selection: Binding(
+                        get: { selectedCandidateRunID ?? candidate.id }, set: { selectedCandidateRunID = $0 }
+                    )) {
+                        ForEach(entry.candidates) { value in
+                            let version = model.snapshot?.modelVersions.first { $0.id == value.id }
+                            Text(version.map(ModelVersionPresentation.title) ?? "Run \(value.id.prefix(8))").tag(value.id)
+                        }
+                    }.labelsHidden().controlSize(.small).accessibilityIdentifier("coverage.primaryVersion")
+                } else { Text(state.title).font(.caption).foregroundStyle(state.color) }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            if let candidate {
+                Button(ready ? "Approved & chosen" : "Approve & Use", systemImage: "checkmark.seal.fill") {
+                    model.approveAndUseCoverageModel(artifact: candidate.artifact)
+                }.buttonStyle(.borderedProminent)
+                    .disabled(model.busy || ready || !candidate.isAvailable || !candidate.canChoose)
+                    .accessibilityIdentifier("coverage.primaryApprove")
+                if entry.slot.product != .classifier {
+                    Button("Test output", systemImage: "play") { model.testCoverageModel(artifact: candidate.artifact) }
+                        .accessibilityIdentifier("coverage.primaryTest")
+                }
+            }
+        }.padding(.bottom, 6).accessibilityIdentifier("coverage.primaryActions")
     }
 
     private func sharedClassifier(_ entry: ModelCoverageEntry) -> some View {
@@ -272,8 +325,10 @@ struct ModelCoverageView: View {
                 Text(entry.checkpointCount > 0 ? "No completed model is available. Continue a saved training run or train a new model." : "This group has no saved model for this product. Open training to create one.")
                     .font(.callout).foregroundStyle(.secondary).padding(.vertical, 10)
             } else {
-                ForEach(entry.candidates) { candidate in
-                    ModelCoverageCandidateRow(model: model, entry: entry, candidate: candidate)
+                LazyVStack(spacing: 10) {
+                    ForEach(entry.candidates) { candidate in
+                        ModelCoverageCandidateRow(model: model, entry: entry, candidate: candidate)
+                    }
                 }
             }
             let checkpoints = unfinishedVersions(entry)
@@ -325,7 +380,7 @@ struct ModelCoverageCheckpointRow: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(ModelVersionPresentation.title(version)).font(.callout.weight(.semibold)).textSelection(.enabled)
-                    Text("\(version.status.capitalized) · \((version.checkpoint?.epochsCompleted ?? 0).formatted()) saved epochs")
+                    Text("\(version.status.capitalized) · \((version.checkpoint?.totalEpochsCompleted ?? 0).formatted()) saved epochs")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -335,10 +390,11 @@ struct ModelCoverageCheckpointRow: View {
                 Text(ModelVersionPresentation.summary(settings, map: version.map)).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            ModelVersionMetadataEditor(model: model, version: version)
             HStack(spacing: 10) {
                 Button("Continue checkpoint", action: continueTraining).disabled(model.busy)
                     .accessibilityIdentifier("coverage.continueCheckpoint.\(version.id)")
-                Button("Test checkpoint") { model.showModelTesting(version) }.disabled(model.busy)
+                Button("Test checkpoint") { model.showModelTesting(version) }
                     .accessibilityIdentifier("coverage.testCheckpoint.\(version.id)")
                 Spacer(minLength: 0)
                 Button("Show folder") { model.reveal(version.directory) }
@@ -374,7 +430,7 @@ struct ModelCoverageCandidateRow: View {
             HStack(alignment: .top, spacing: 10) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title).font(.callout.weight(.semibold)).textSelection(.enabled)
-                    Text("\(candidate.artifact.epochs.formatted()) epochs · \(candidate.artifact.architecture)")
+                    Text("\((version?.exportedEpochsCompleted ?? candidate.artifact.epochs).formatted()) epochs · \(candidate.artifact.architecture)")
                         .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                 }
                 Spacer()
@@ -397,19 +453,15 @@ struct ModelCoverageCandidateRow: View {
                 Text(ModelVersionPresentation.summary(settings, map: version?.map)).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if let version { ModelVersionMetadataEditor(model: model, version: version) }
             HStack(spacing: 10) {
-                Button(candidate.isSelected ? "Chosen for use" : "Use this model", systemImage: "checkmark.circle") {
-                    model.useCoverageModel(artifact: candidate.artifact)
-                }.disabled(model.busy || candidate.isSelected || !candidate.canChoose)
-                    .accessibilityIdentifier("coverage.use.\(candidate.id)")
-                Button(removesApproval ? "Remove approval" : "Mark approved", systemImage: "checkmark.seal") {
-                    model.setModelApproval(runID: candidate.id, approved: !removesApproval)
-                }.disabled(model.busy || (!candidate.isAvailable && !removesApproval))
-                    .help("Records your review of this saved artifact. Choosing a model and approving it are separate decisions.")
-                    .accessibilityIdentifier("coverage.approve.\(candidate.id)")
+                Button(candidate.isApproved && candidate.isSelected && !candidate.approvalIsStale ? "Approved & chosen" : "Approve & Use", systemImage: "checkmark.seal.fill") {
+                    model.approveAndUseCoverageModel(artifact: candidate.artifact)
+                }.buttonStyle(.borderedProminent)
+                    .disabled(model.busy || (candidate.isApproved && candidate.isSelected && !candidate.approvalIsStale) || !candidate.isAvailable || !candidate.canChoose)
+                    .accessibilityIdentifier("coverage.approveAndUse.\(candidate.id)")
                 if entry.slot.product != .classifier {
                     Button("Test output") { model.testCoverageModel(artifact: candidate.artifact) }
-                        .disabled(model.busy || !candidate.isAvailable)
                         .accessibilityIdentifier("coverage.test.\(candidate.id)")
                 }
                 if let version, version.artifact?.weightsPath != nil {
@@ -418,11 +470,22 @@ struct ModelCoverageCandidateRow: View {
                         model.selectedMap = version.map
                         model.continueModelVersion(version, source: .exportedModel)
                         model.workspaceSection = .training
-                    }.disabled(model.busy || !candidate.isAvailable)
+                    }.disabled(model.busy)
                         .accessibilityIdentifier("coverage.continue.\(candidate.id)")
                 }
                 Spacer(minLength: 0)
                 Button("Show folder") { model.reveal(candidate.artifact.directory) }
+            }.controlSize(.small)
+            HStack(spacing: 10) {
+                Button(candidate.isSelected ? "Chosen for use" : "Use without changing approval", systemImage: "checkmark.circle") {
+                    model.useCoverageModel(artifact: candidate.artifact)
+                }.disabled(model.busy || candidate.isSelected || !candidate.canChoose)
+                    .accessibilityIdentifier("coverage.use.\(candidate.id)")
+                Button(removesApproval ? "Remove approval" : "Mark approved only", systemImage: "checkmark.seal") {
+                    model.setModelApproval(runID: candidate.id, approved: !removesApproval)
+                }.disabled(model.busy || (!candidate.isAvailable && !removesApproval))
+                    .help("Records your review without changing which saved model is used.")
+                    .accessibilityIdentifier("coverage.approve.\(candidate.id)")
             }.controlSize(.small)
         }.padding(13).frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))

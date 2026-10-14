@@ -67,7 +67,7 @@ final class ModelTestingTests: XCTestCase {
         }
     }
 
-    func testSavedModelAndCheckpointSelectionPreserveExactSourceAndPublishFullSizePNG() throws {
+    func testSavedModelAndCheckpointSelectionPreserveExactSourceAndPublishFloatEXRPlusPNGPreview() throws {
         let fixture = try Fixture(); defer { fixture.remove() }
         let original = try Data(contentsOf: fixture.input)
         let checkpoint = try fixture.selection(.checkpoint)
@@ -82,20 +82,33 @@ final class ModelTestingTests: XCTestCase {
                 }
             XCTAssertEqual(result.width, fixture.width); XCTAssertEqual(result.height, fixture.height)
             XCTAssertEqual(result.inputURL, fixture.input)
-            XCTAssertEqual(result.outputURL, output.appendingPathComponent("depth.png"))
+            XCTAssertEqual(result.outputURL, output.appendingPathComponent("depth.exr"))
+            XCTAssertEqual(result.previewURL, output.appendingPathComponent("depth.png"))
             XCTAssertEqual(result.source, selection.source)
             XCTAssertEqual(try Data(contentsOf: fixture.input), original)
             XCTAssertEqual(try Data(contentsOf: selection.weightsURL), savedWeights)
             let decoded = try NativeImages.readTarget(from: result.outputURL, mapKind: "depth")
             XCTAssertEqual(decoded.width, fixture.width); XCTAssertEqual(decoded.height, fixture.height)
             XCTAssertTrue(decoded.values.allSatisfy { abs($0 - 0.25) < 1 / 65535 })
-            let source = try XCTUnwrap(CGImageSourceCreateWithURL(result.outputURL as CFURL, nil))
+            let floatOptions = [kCGImageSourceShouldAllowFloat: true] as CFDictionary
+            let floatSource = try XCTUnwrap(CGImageSourceCreateWithURL(result.outputURL as CFURL, floatOptions))
+            let floatImage = try XCTUnwrap(CGImageSourceCreateImageAtIndex(floatSource, 0, floatOptions))
+            XCTAssertEqual(floatImage.bitsPerComponent, 32)
+            XCTAssertTrue(floatImage.bitmapInfo.contains(.floatComponents))
+            let source = try XCTUnwrap(CGImageSourceCreateWithURL(result.previewURL as CFURL, nil))
             let image = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
             XCTAssertEqual(image.bitsPerComponent, 16)
             let record = try NativeFactoryTraining.json(output.appendingPathComponent("test.json"))
             XCTAssertEqual(record["weights_sha256"] as? String, selection.weightsSHA256)
             XCTAssertEqual(record["input_sha256"] as? String, try TrainingRunFiles.sha256(fixture.input))
             XCTAssertEqual(record["weight_source"] as? String, selection.source.rawValue)
+            XCTAssertEqual(record["output_path"] as? String, "depth.exr")
+            XCTAssertEqual(record["output_component_type"] as? String, "float32")
+            XCTAssertEqual(record["output_bits_per_channel"] as? Int, 32)
+            XCTAssertEqual(record["output_channels"] as? [String], ["Y"])
+            XCTAssertEqual(record["preview_path"] as? String, "depth.png")
+            XCTAssertEqual(record["preview_bits_per_channel"] as? Int, 16)
+            XCTAssertTrue(result.note.contains("Float32"))
             XCTAssertTrue(result.note.contains("16 bits"))
         }
     }

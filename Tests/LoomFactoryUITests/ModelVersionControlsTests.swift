@@ -40,7 +40,7 @@ struct ModelVersionControlsTests {
     }
 
     @Test @MainActor
-    func selectedContinuationUsesItsArchitectureAndKeepsNewOptimizerSettings() async throws {
+    func loadingContinuationRestoresSavedSettingsAndAllowsDeliberateEditsAfterLoading() async throws {
         let fixture = try await VersionControlsFixture()
         defer { fixture.remove() }
         let model = FactoryModel(rememberSourceFolder: false)
@@ -57,6 +57,12 @@ struct ModelVersionControlsTests {
         #expect(model.effectiveTrainingSettings.modelWidth == oldest.settings?.modelWidth)
         #expect(model.effectiveTrainingSettings.imageSize == oldest.settings?.imageSize)
         #expect(model.effectiveTrainingSettings.scalarLoss == oldest.settings?.scalarLoss)
+        #expect(model.effectiveTrainingSettings.learningRate == oldest.settings?.learningRate)
+        #expect(model.effectiveTrainingSettings.optimizer == oldest.settings?.optimizer)
+        #expect(model.settings.training.validationFraction == oldest.settings?.validationFraction)
+        model.settings.training.learningRate = 0.02
+        model.settings.training.optimizer = .sgd
+        model.settings.training.validationFraction = 0
         #expect(model.effectiveTrainingSettings.learningRate == 0.02)
         #expect(model.effectiveTrainingSettings.optimizer == .sgd)
         #expect(model.canTrain)
@@ -64,7 +70,11 @@ struct ModelVersionControlsTests {
         #expect(model.trainingStart == .checkpoint(runID: oldest.id))
         #expect(model.selectedCheckpoint?.directory == oldest.directory)
         #expect(model.effectiveTrainingSettings.modelWidth == oldest.checkpoint?.modelWidth)
+        #expect(model.effectiveTrainingSettings.learningRate == oldest.settings?.learningRate)
+        #expect(model.effectiveTrainingSettings.optimizer == oldest.settings?.optimizer)
         model.setTrainingStartMode(.fresh)
+        model.settings.training.modelWidth = 164
+        model.settings.training.imageSize = 2048
         #expect(model.trainingStart == .fresh)
         #expect(model.effectiveTrainingSettings.modelWidth == 164)
         #expect(model.effectiveTrainingSettings.imageSize == 2048)

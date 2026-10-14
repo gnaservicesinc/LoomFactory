@@ -48,6 +48,11 @@ public struct TrainingProgress: Codable, Sendable, Equatable {
     /// The portion of the ETA assigned to the work currently in progress.
     /// Live displays may count down this amount without consuming future work.
     public var currentWorkRemainingSeconds: Double?
+    /// Work inherited from the selected weights. Optional for old saved logs.
+    public var priorEpochs: Int?
+    public var priorSteps: Int?
+    public var priorImages: Int?
+    public var priorElapsedSeconds: Double?
 
     public init(stage: TrainingStage = .checkingSources, currentImage: String? = nil,
                 epoch: Int = 0, totalEpochs: Int = 0, imageIndex: Int = 0, imagesPerEpoch: Int = 0,
@@ -57,7 +62,9 @@ public struct TrainingProgress: Codable, Sendable, Equatable {
                 averageCycleSeconds: Double? = nil, epochRemainingSeconds: Double? = nil,
                 totalRemainingSeconds: Double? = nil, recordedAt: Date = Date(),
                 stageElapsedSeconds: Double = 0, estimatesIncludeValidation: Bool = false,
-                estimatesIncludeCheckpointing: Bool = false, currentWorkRemainingSeconds: Double? = nil) {
+                estimatesIncludeCheckpointing: Bool = false, currentWorkRemainingSeconds: Double? = nil,
+                priorEpochs: Int? = nil, priorSteps: Int? = nil, priorImages: Int? = nil,
+                priorElapsedSeconds: Double? = nil) {
         self.stage = stage; self.currentImage = currentImage
         self.epoch = epoch; self.totalEpochs = totalEpochs
         self.imageIndex = imageIndex; self.imagesPerEpoch = imagesPerEpoch
@@ -71,6 +78,8 @@ public struct TrainingProgress: Codable, Sendable, Equatable {
         self.estimatesIncludeValidation = estimatesIncludeValidation
         self.estimatesIncludeCheckpointing = estimatesIncludeCheckpointing
         self.currentWorkRemainingSeconds = currentWorkRemainingSeconds
+        self.priorEpochs = priorEpochs; self.priorSteps = priorSteps; self.priorImages = priorImages
+        self.priorElapsedSeconds = priorElapsedSeconds
     }
 }
 
@@ -107,6 +116,12 @@ struct TrainingProgressTracker {
     private var checkpointActive = false
     private var finalCheckpointCompleted = false
     private var exportStarted = false
+    private var priorEpochs = 0
+    private var priorSteps = 0
+    private var priorImages = 0
+    private var priorElapsedSeconds = 0.0
+    private var restoredElapsedSeconds = 0.0
+    private var restoredEpochElapsedSeconds = 0.0
     private static let timingWindow = 20
 
     init(totalEpochs: Int, trainingImages: Int, validationImages: Int, stepsPerEpoch: Int,
@@ -126,8 +141,38 @@ struct TrainingProgressTracker {
         let now = clock(now)
         self.epoch = min(totalEpochs, max(0, epoch))
         epochStartedSeconds = now
+        restoredEpochElapsedSeconds = 0
         stepInEpoch = 0; imageIndex = 0; currentImage = nil
         cycleActive = false
+    }
+
+    mutating func restoreEpochPosition(stepInEpoch: Int, imageIndex: Int, elapsedSeconds: Double) {
+        self.stepInEpoch = min(stepsPerEpoch, max(0, stepInEpoch))
+        self.imageIndex = min(trainingImages, max(0, imageIndex))
+        restoredEpochElapsedSeconds = elapsedSeconds.isFinite ? max(0, elapsedSeconds) : 0
+    }
+
+    /// Restore measured work without treating past steps as new timing samples.
+    /// ETA still uses measurements from the current machine and training plan.
+    mutating func restore(epoch: Int = 0, stepInEpoch: Int = 0, completedSteps: Int = 0,
+                          completedImages: Int = 0, elapsedSeconds: Double = 0,
+                          priorEpochs: Int = 0, priorSteps: Int = 0, priorImages: Int = 0,
+                          priorElapsedSeconds: Double = 0, now: Double) {
+        _ = clock(now)
+        self.epoch = min(totalEpochs, max(0, epoch))
+        self.stepInEpoch = min(stepsPerEpoch, max(0, stepInEpoch))
+        self.completedSteps = min(totalSteps, max(0, completedSteps))
+        self.completedImages = max(0, completedImages)
+        self.priorEpochs = max(0, priorEpochs); self.priorSteps = max(0, priorSteps)
+        self.priorImages = max(0, priorImages)
+        self.priorElapsedSeconds = priorElapsedSeconds.isFinite ? max(0, priorElapsedSeconds) : 0
+        restoredElapsedSeconds = elapsedSeconds.isFinite ? max(0, elapsedSeconds) : 0
+        // Already-completed epochs have no pending validation or scheduled save.
+        let completedEpochs = stepsPerEpoch > 0 ? self.completedSteps / stepsPerEpoch : 0
+        if completedEpochs > 0 {
+            validatedEpochs.formUnion(1...completedEpochs)
+            checkpointedEpochs.formUnion((1...completedEpochs).filter { checkpointScheduled($0) })
+        }
     }
 
     mutating func begin(stage: TrainingStage, image: String? = nil, index: Int? = nil,
@@ -249,22 +294,30 @@ struct TrainingProgressTracker {
             if stage == .exporting || stage == .verifyingSources { totalRemaining = nil }
         }
         return TrainingProgress(stage: stage, currentImage: currentImage,
-            epoch: epoch, totalEpochs: totalEpochs, imageIndex: imageIndex,
+            epoch: adding(epoch, priorEpochs), totalEpochs: adding(totalEpochs, priorEpochs), imageIndex: imageIndex,
             imagesPerEpoch: stage == .validating ? validationImages : trainingImages,
-            completedImages: completedImages, stepInEpoch: stepInEpoch, stepsPerEpoch: stepsPerEpoch,
-            completedSteps: completedSteps, totalSteps: totalSteps,
-            elapsedSeconds: max(0, now - startSeconds),
-            epochElapsedSeconds: epochStartedSeconds.map { max(0, now - $0) } ?? 0,
+            completedImages: adding(completedImages, priorImages), stepInEpoch: stepInEpoch, stepsPerEpoch: stepsPerEpoch,
+            completedSteps: adding(completedSteps, priorSteps), totalSteps: adding(totalSteps, priorSteps),
+            elapsedSeconds: priorElapsedSeconds + restoredElapsedSeconds + max(0, now - startSeconds),
+            epochElapsedSeconds: restoredEpochElapsedSeconds + (epochStartedSeconds.map { max(0, now - $0) } ?? 0),
             lastCycleSeconds: lastCycleSeconds, averageCycleSeconds: averageCycle,
             epochRemainingSeconds: finite(epochRemaining), totalRemainingSeconds: finite(totalRemaining),
             recordedAt: date, stageElapsedSeconds: stageElapsed,
             estimatesIncludeValidation: validationImages == 0 || validationMean != nil,
             estimatesIncludeCheckpointing: checkpointMean != nil,
-            currentWorkRemainingSeconds: finite(currentWorkRemaining))
+            currentWorkRemainingSeconds: finite(currentWorkRemaining),
+            priorEpochs: priorEpochs > 0 ? priorEpochs : nil, priorSteps: priorSteps > 0 ? priorSteps : nil,
+            priorImages: priorImages > 0 ? priorImages : nil,
+            priorElapsedSeconds: priorElapsedSeconds > 0 ? priorElapsedSeconds : nil)
     }
 
     private func checkpointScheduled(_ epoch: Int) -> Bool {
         epoch > 0 && (epoch % checkpointEveryEpochs == 0 || epoch == totalEpochs)
+    }
+
+    private func adding(_ first: Int, _ second: Int) -> Int {
+        let (total, overflow) = first.addingReportingOverflow(second)
+        return overflow ? Int.max : total
     }
 
     private mutating func clock(_ now: Double) -> Double {

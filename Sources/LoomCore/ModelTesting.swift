@@ -5,7 +5,10 @@ public struct ModelTestResult: Sendable {
     public let directory: URL
     /// The unchanged original selected by the user, including external files.
     public let inputURL: URL
+    /// Canonical model output: exact Float32 OpenEXR pixels.
     public let outputURL: URL
+    /// A fixed-scale sixteen-bit PNG for ordinary image viewers.
+    public let previewURL: URL
     public let runID: String
     public let source: TrainingWeightSource
     public let map: MapRole
@@ -16,8 +19,10 @@ public struct ModelTestResult: Sendable {
     public let note: String
 
     public init(directory: URL, inputURL: URL, outputURL: URL, runID: String, source: TrainingWeightSource,
-                map: MapRole, width: Int, height: Int, tileSize: Int, tileCount: Int, note: String) {
+                map: MapRole, width: Int, height: Int, tileSize: Int, tileCount: Int, note: String,
+                previewURL: URL? = nil) {
         self.directory = directory; self.inputURL = inputURL; self.outputURL = outputURL
+        self.previewURL = previewURL ?? outputURL
         self.runID = runID; self.source = source; self.map = map
         self.width = width; self.height = height; self.tileSize = tileSize; self.tileCount = tileCount; self.note = note
     }
@@ -127,10 +132,12 @@ enum ModelTestWorker {
         let staging = parent.appendingPathComponent(".pending-" + output.lastPathComponent, isDirectory: true)
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: staging) }
-        let name = model.map.rawValue + ".png"
+        let name = model.map.rawValue + ".exr", previewName = model.map.rawValue + ".png"
         progress(.init(type: "status", message: "Saving \(image.width) × \(image.height) \(model.map.rawValue) output…"))
-        try ModelTestImage.writePNG(pixels, channels: model.architecture.outputChannels,
+        try NativeFloatEXR.write(pixels, channels: model.architecture.outputChannels,
             width: image.width, height: image.height, to: staging.appendingPathComponent(name), cancellation: cancellation)
+        try ModelTestImage.writePNG(pixels, channels: model.architecture.outputChannels,
+            width: image.width, height: image.height, to: staging.appendingPathComponent(previewName), cancellation: cancellation)
         try cancellation.check()
         guard inputHash == (try NativeFactoryTraining.sha(original, cancellation: cancellation)) else {
             throw LoomError("The diffuse image changed during testing. Run the test again on the completed image.")
@@ -142,11 +149,16 @@ enum ModelTestWorker {
             + "Original \(image.width) × \(image.height) resolution; \(plan.tiles.count) overlapping native tile\(plan.tiles.count == 1 ? "" : "s"). "
             + "Overlap blending can differ from whole-image inference. "
             + (model.map == .normal ? "OpenGL normal vectors are normalized after blending. " : "")
-            + "PNG uses fixed [0,1] values quantized to 16 bits, without per-output normalization."
+            + "The canonical EXR stores the Float32 prediction values without clamping or normalization. "
+            + "The PNG preview uses fixed [0,1] values quantized to 16 bits, without per-output normalization."
         try NativeFactoryTraining.writeJSON(["schema": "loom-factory-model-test-v1", "run_id": model.runID,
             "weight_source": model.source.rawValue, "dataset_id": model.datasetID, "map": model.map.rawValue,
             "architecture": model.architecture.identifier, "input_path": original.path, "input_sha256": inputHash,
             "weights_sha256": model.weightsSHA256, "output_path": name,
+            "output_format": "openexr", "output_component_type": "float32", "output_bits_per_channel": 32,
+            "output_channels": model.map == .normal ? ["R", "G", "B"] : ["Y"],
+            "output_value_transform": "none", "preview_path": previewName, "preview_format": "png",
+            "preview_bits_per_channel": 16, "preview_value_range": [0, 1],
             "output_statistics": statistics.record,
             "output_diagnostic": saturationNote as Any? ?? NSNull(),
             "width": image.width, "height": image.height, "tile_size": tileSize, "tile_count": plan.tiles.count,
@@ -158,7 +170,7 @@ enum ModelTestWorker {
         try FileManager.default.moveItem(at: staging, to: output)
         let result = ModelTestResult(directory: output, inputURL: original, outputURL: output.appendingPathComponent(name),
             runID: model.runID, source: model.source, map: model.map, width: image.width, height: image.height,
-            tileSize: tileSize, tileCount: plan.tiles.count, note: note)
+            tileSize: tileSize, tileCount: plan.tiles.count, note: note, previewURL: output.appendingPathComponent(previewName))
         progress(.init(type: "completed", message: "Saved full-resolution \(model.map.rawValue) output", progress: 1))
         return result
     }

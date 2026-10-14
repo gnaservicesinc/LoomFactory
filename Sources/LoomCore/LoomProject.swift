@@ -17,6 +17,9 @@ public actor LoomProject {
     var activeTraining: NativeCancellation?
     var activeTrainingControl: TrainingRunControl?
     var operationActive = false
+    private var mapTypePredictor: (any MapTypePredictor)?
+    private var mapTypeClassifierWasResolved = false
+    private var failedMapTypePredictions: Set<String> = []
     public init(sourceFolder: URL) throws {
         // Foundation can mix /var and /private/var URLs. Establish one actual
         // project root, then keep every discovered membership path relative to it.
@@ -103,6 +106,7 @@ public actor LoomProject {
         }
         metadata.role = role
         metadata.roleWasManuallySelected = true
+        metadata.mapTypeInference = nil
         try ImageMetadataStore.write(metadata, to: image.url)
     }
     public func setIgnored(id: String, ignored: Bool) throws {
@@ -179,6 +183,7 @@ public actor LoomProject {
             let resolved = folder.resolvingSymlinksInPath().standardizedFileURL
             guard visitedDirectories.insert(resolved.path).inserted else { return }
             for entry in try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) {
+                try Task.checkCancellation()
                 // Retain the in-folder link path for imported external originals.
                 let file = folder.appendingPathComponent(entry.lastPathComponent)
                 let target = file.resolvingSymlinksInPath().standardizedFileURL
@@ -204,6 +209,16 @@ public actor LoomProject {
                     tag = repaired
                     try ImageMetadataStore.write(tag, to: target)
                 }
+                let classified = resolveMapType(tag, file: file, width: width, height: height)
+                try Task.checkCancellation()
+                if classified != tag {
+                    // A classifier call may outlive an external metadata edit.
+                    // Human edits or metadata removal win over the stale guess.
+                    if let current = try ImageMetadataStore.read(target) {
+                        if current == tag { tag = classified; try ImageMetadataStore.write(tag, to: target) }
+                        else { tag = current }
+                    }
+                }
                 if tag.role == .normal, tag.normalConvention?.lowercased() == "directx", tag.ignored != true {
                     tag.ignored = true
                     try ImageMetadataStore.write(tag, to: target)
@@ -217,10 +232,73 @@ public actor LoomProject {
                 }
                 result.append(SourceImage(id: tag.id, url: file, displayName: ImageMetadataStore.friendlyName(file.deletingPathExtension().lastPathComponent),
                     role: tag.role, category: tag.category, verified: tag.verified, note: tag.note,
-                    pairingKey: tag.pairingKey, width: width, height: height, normalConvention: tag.normalConvention, ignored: tag.ignored == true))
+                    pairingKey: tag.pairingKey, width: width, height: height, normalConvention: tag.normalConvention,
+                    ignored: tag.ignored == true, mapTypeInference: tag.mapTypeInference))
             }
         }
         try visit(sourceFolder)
         return result.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+    }
+
+    // Internal injection keeps tests deterministic without loading a model for
+    // every project. The shipping app resolves only its bundled native asset.
+    func setMapTypePredictor(_ predictor: (any MapTypePredictor)?) {
+        mapTypePredictor = predictor; mapTypeClassifierWasResolved = true
+        failedMapTypePredictions.removeAll()
+    }
+
+    private func resolveMapType(_ metadata: ImageMetadata, file: URL, width: Int, height: Int) -> ImageMetadata {
+        if metadata.roleWasManuallySelected == true {
+            var chosen = metadata; chosen.mapTypeInference = nil
+            return chosen
+        }
+        var tag = metadata
+        let named = ImageMetadataStore.initialMetadata(file: file, sourceRoot: sourceFolder, width: width, height: height)
+        let canClassify = ImageMetadataStore.canClassifyMapType(file: file)
+        // An existing guess can be superseded by a newly meaningful filename.
+        // Other persisted roles retain their authority across renames.
+        if tag.mapTypeInference != nil, named.role != .unknown || !canClassify {
+            tag.role = named.role; tag.mapTypeInference = nil
+            tag.normalConvention = named.normalConvention
+            if tag.pairingWasManuallySelected != true { tag.pairingKey = named.pairingKey }
+            if named.ignored == true { tag.ignored = true }
+            return tag
+        }
+        guard canClassify, named.role == .unknown, tag.ignored != true,
+              tag.role == .unknown || tag.mapTypeInference != nil else { return tag }
+        if !mapTypeClassifierWasResolved {
+            mapTypeClassifierWasResolved = true
+            mapTypePredictor = NativeMapTypeClassifier.bundled()
+        }
+        guard let signature = try? MapTypeInferencePolicy.sourceSignature(file: file, width: width, height: height),
+              let predictor = mapTypePredictor else {
+            if tag.mapTypeInference != nil { tag.role = .unknown; tag.mapTypeInference = nil }
+            return tag
+        }
+        if let cached = tag.mapTypeInference, cached.modelID == predictor.modelID, cached.sourceSignature == signature { return tag }
+        let attempt = file.resolvingSymlinksInPath().standardizedFileURL.path + ":" + predictor.modelID + ":" + signature
+        guard !failedMapTypePredictions.contains(attempt) else { return tag }
+        do {
+            let probabilities = try predictor.probabilities(for: file)
+            guard (try? MapTypeInferencePolicy.sourceSignature(file: file, width: width, height: height)) == signature else {
+                if tag.mapTypeInference != nil { tag.role = .unknown; tag.mapTypeInference = nil }
+                return tag
+            }
+            guard let inference = MapTypeInferencePolicy.evaluate(probabilities,
+                                                                 modelID: predictor.modelID, sourceSignature: signature) else {
+                failedMapTypePredictions.insert(attempt)
+                if tag.mapTypeInference != nil { tag.role = .unknown; tag.mapTypeInference = nil }
+                return tag
+            }
+            tag.role = inference.accepted ? inference.role : .unknown
+            tag.mapTypeInference = inference
+            return tag
+        } catch {
+            // A suggestion must never stop folder discovery or repeatedly retry
+            // an unreadable image during polling. Editing the file permits retry.
+            failedMapTypePredictions.insert(attempt)
+            if tag.mapTypeInference != nil { tag.role = .unknown; tag.mapTypeInference = nil }
+            return tag
+        }
     }
 }

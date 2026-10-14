@@ -54,6 +54,8 @@ public struct ModelVersion: Identifiable, Sendable, Equatable {
     public let status: String
     public let createdAt: Date
     public let label: String
+    public let notes: String
+    public let inheritedEpochs: Int
     public let settings: TrainingSettings?
     public let checkpoint: TrainingCheckpoint?
     public let artifact: ModelArtifact?
@@ -62,13 +64,17 @@ public struct ModelVersion: Identifiable, Sendable, Equatable {
     public let isActive: Bool
     public let isApproved: Bool
     public let approvalIsStale: Bool
+    /// The recorded run settings, including optimizer and data selection.
+    public var savedSettings: TrainingSettings? { settings }
+    public var exportedEpochsCompleted: Int { (artifact?.epochs ?? 0) + inheritedEpochs }
     public init(id: String, directory: URL, datasetID: String, datasetName: String, map: MapRole,
                 status: String, createdAt: Date = .now, label: String = "", settings: TrainingSettings? = nil,
                 checkpoint: TrainingCheckpoint? = nil, artifact: ModelArtifact? = nil,
                 history: [TrainingMetric] = [], lineage: TrainingLineage? = nil, isActive: Bool = false,
-                isApproved: Bool = false, approvalIsStale: Bool = false) {
+                isApproved: Bool = false, approvalIsStale: Bool = false, notes: String = "", inheritedEpochs: Int = 0) {
         self.id = id; self.directory = directory; self.datasetID = datasetID; self.datasetName = datasetName
-        self.map = map; self.status = status; self.createdAt = createdAt; self.label = label
+        self.map = map; self.status = status; self.createdAt = createdAt; self.label = label; self.notes = notes
+        self.inheritedEpochs = inheritedEpochs
         self.settings = settings; self.checkpoint = checkpoint; self.artifact = artifact
         self.history = history; self.lineage = lineage; self.isActive = isActive
         self.isApproved = isApproved; self.approvalIsStale = approvalIsStale
@@ -155,6 +161,7 @@ extension LoomProject {
         guard FileManager.default.fileExists(atPath: runs.path) else { return [] }
         let selection = try loadModelSelection()
         let management = try loadModelManagement()
+        let displayMetadata = try loadModelVersionMetadata()
         let folders = try FileManager.default.contentsOfDirectory(at: runs, includingPropertiesForKeys: nil)
         return folders.compactMap { folder -> ModelVersion? in
             guard (try? TrainingRunFiles.ownedRun(folder, projectFolder: projectFolder)) != nil else { return nil }
@@ -176,7 +183,16 @@ extension LoomProject {
             let training = model?["training"] as? [String: Any]
             let settings = metadata?.settings ?? TrainingRunFiles.settings(from: request ?? training ?? savedCheckpoint?["settings"] as? [String: Any] ?? [:],
                 descriptor: model ?? savedCheckpoint)
-            let historyRows = progress?["history"] as? [[String: Any]] ?? training?["history"] as? [[String: Any]] ?? savedCheckpoint?["history"] as? [[String: Any]] ?? []
+            let localHistory = progress?["history"] as? [[String: Any]] ?? training?["history"] as? [[String: Any]] ?? savedCheckpoint?["history"] as? [[String: Any]] ?? []
+            let priorHistory = progress?["prior_history"] as? [[String: Any]] ?? training?["prior_history"] as? [[String: Any]] ?? savedCheckpoint?["prior_history"] as? [[String: Any]] ?? []
+            let priorEpochs = progress?["prior_epochs"] as? Int ?? training?["prior_epochs"] as? Int ?? savedCheckpoint?["prior_epochs"] as? Int ?? 0
+            let priorUpdates = progress?["prior_updates"] as? Int ?? training?["prior_updates"] as? Int ?? savedCheckpoint?["prior_updates"] as? Int ?? 0
+            let historyRows = priorHistory + localHistory.enumerated().map { index, row in
+                var shifted = row
+                shifted["epoch"] = (row["epoch"] as? Int ?? index + 1) + priorEpochs
+                if let update = row["update"] as? Int ?? row["updates"] as? Int { shifted["update"] = update + priorUpdates }
+                return shifted
+            }
             let history = historyRows.enumerated().map { index, row in
                 TrainingMetric(epoch: row["epoch"] as? Int ?? index + 1, loss: row["loss"] as? Double,
                     validationLoss: row["validation_loss"] as? Double, learningRate: row["learning_rate"] as? Double,
@@ -193,13 +209,14 @@ extension LoomProject {
             let status = ["running", "training"].contains(recordedStatus) && activeTrainingControl?.runID != folder.lastPathComponent
                 ? "inactive in this window" : recordedStatus
             let approval = artifact.map { modelApprovalState(for: $0, management: management) } ?? (approved: false, stale: false)
+            let display = displayMetadata.versions.first { $0.runID == folder.lastPathComponent }
             return ModelVersion(id: folder.lastPathComponent, directory: folder, datasetID: datasetID,
                 datasetName: artifact?.datasetName ?? model?["dataset_name"] as? String ?? savedCheckpoint?["dataset_name"] as? String ?? request?["display_name"] as? String ?? datasetID,
                 map: map, status: artifact == nil ? status : "completed",
-                createdAt: created, label: metadata?.label ?? request?["run_label"] as? String ?? "", settings: settings,
+                createdAt: created, label: display?.name ?? metadata?.label ?? request?["run_label"] as? String ?? "", settings: settings,
                 checkpoint: checkpoint, artifact: artifact, history: history, lineage: metadata?.lineage,
                 isActive: artifact != nil && active == folder.lastPathComponent,
-                isApproved: approval.approved, approvalIsStale: approval.stale)
+                isApproved: approval.approved, approvalIsStale: approval.stale, notes: display?.notes ?? "", inheritedEpochs: priorEpochs)
         }.sorted { $0.createdAt > $1.createdAt }
     }
 

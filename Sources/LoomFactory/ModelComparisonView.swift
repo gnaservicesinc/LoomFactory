@@ -61,6 +61,7 @@ struct ModelVersionRow: View {
                 Text(ModelVersionPresentation.summary(settings, map: version.map)).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            ModelVersionMetadataEditor(model: model, version: version)
             if let metric = version.history.last(where: { $0.loss != nil || $0.validationLoss != nil }) {
                 HStack(spacing: 14) {
                     Text("Epoch \(metric.epoch)")
@@ -79,15 +80,14 @@ struct ModelVersionRow: View {
             HStack(spacing: 9) {
                 if version.artifact != nil || version.checkpoint != nil {
                     Button("Test model") { model.showModelTesting(version) }
-                        .disabled(model.busy)
                         .accessibilityIdentifier("training.version.test.\(version.id)")
                 }
                 if version.artifact?.weightsPath != nil {
-                    Button("Continue exported") { model.continueModelVersion(version, source: .exportedModel) }
+                    Button("Load exported model") { model.continueModelVersion(version, source: .exportedModel) }
                         .accessibilityIdentifier("training.version.continueModel.\(version.id)")
                 }
                 if version.checkpoint != nil {
-                    Button("Continue checkpoint") { model.continueModelVersion(version, source: .checkpoint) }
+                    Button("Load checkpoint") { model.continueModelVersion(version, source: .checkpoint) }
                         .accessibilityIdentifier("training.version.continueCheckpoint.\(version.id)")
                 }
                 if version.artifact != nil {
@@ -126,7 +126,7 @@ struct ModelVersionRow: View {
             .accessibilityIdentifier("training.version.\(version.id)")
     }
 
-    private var epochs: Int { version.checkpoint?.epochsCompleted ?? version.artifact?.epochs ?? version.history.last?.epoch ?? 0 }
+    private var epochs: Int { max(version.checkpoint?.totalEpochsCompleted ?? version.exportedEpochsCompleted, version.history.last?.epoch ?? 0) }
 }
 
 struct ModelComparisonView: View {

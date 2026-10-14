@@ -100,7 +100,7 @@ struct ModelManagement: Codable {
 
 extension LoomProject {
     public var managementPersistenceURLs: [URL] {
-        ["model-selection.json", "model-management.json"].map { projectFolder.appendingPathComponent($0) }
+        ["model-selection.json", "model-management.json", "model-version-metadata.json"].map { projectFolder.appendingPathComponent($0) }
     }
 
     public func modelCoverage() throws -> [ModelCoverageEntry] {

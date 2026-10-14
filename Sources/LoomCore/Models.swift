@@ -41,15 +41,17 @@ public struct SourceImage: Codable, Identifiable, Sendable, Equatable {
     public let width: Int
     public let height: Int
     public let normalConvention: String?
+    public var mapTypeInference: MapTypeInference?
     public var dimensions: String { "\(width) × \(height)" }
     public init(id: String, url: URL, displayName: String, role: MapRole, category: String?,
                 verified: Bool, note: String, pairingKey: String, width: Int, height: Int, normalConvention: String? = nil,
-                ignored: Bool = false) {
+                ignored: Bool = false, mapTypeInference: MapTypeInference? = nil) {
         self.id = id; self.url = url; self.displayName = displayName; self.role = role
         self.category = category; self.verified = verified; self.note = note
         self.pairingKey = pairingKey; self.width = width; self.height = height
         self.normalConvention = normalConvention
         self.ignored = ignored
+        self.mapTypeInference = mapTypeInference
     }
 }
 

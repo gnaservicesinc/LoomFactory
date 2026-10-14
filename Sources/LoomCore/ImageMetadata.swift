@@ -16,17 +16,19 @@ public struct ImageMetadata: Codable, Sendable, Equatable {
     public var normalConvention: String?
     public var roleWasManuallySelected: Bool?
     public var pairingWasManuallySelected: Bool?
+    public var mapTypeInference: MapTypeInference?
     public init(id: String = UUID().uuidString.lowercased(), pairingKey: String,
                 role: MapRole = .unknown, category: String? = nil, verified: Bool = false,
                 note: String = "", normalConvention: String? = nil,
                 roleWasManuallySelected: Bool? = nil, pairingWasManuallySelected: Bool? = nil,
-                ignored: Bool? = false) {
+                ignored: Bool? = false, mapTypeInference: MapTypeInference? = nil) {
         self.id = id; self.pairingKey = pairingKey; self.role = role
         self.category = category; self.verified = verified; self.note = note
         self.normalConvention = normalConvention
         self.roleWasManuallySelected = roleWasManuallySelected
         self.pairingWasManuallySelected = pairingWasManuallySelected
         self.ignored = ignored
+        self.mapTypeInference = mapTypeInference
     }
 }
 
@@ -105,16 +107,45 @@ public enum ImageMetadataStore {
         return false
     }
 
+    /// Out-of-class images can receive confident predictions. Explicit filename
+    /// exclusions therefore run before the optional four-class classifier.
+    static func canClassifyMapType(file: URL) -> Bool {
+        let tokens = file.deletingPathExtension().lastPathComponent.lowercased()
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+        guard !tokens.contains(where: classifierExcludedNames.contains) else { return false }
+        for (index, token) in tokens.enumerated() {
+            if token.range(of: "^coll?[2-9][0-9]*$", options: .regularExpression) != nil { return false }
+            if ["col", "coll"].contains(token), index + 1 < tokens.count,
+               let variant = Int(tokens[index + 1]), variant > 1 { return false }
+        }
+        return true
+    }
+
+    private static let classifierExcludedNames: Set<String> = [
+        "bump", "bumpmap", "ao", "occlusion", "ambientocclusion", "ambient", "metal", "metalness", "metallic",
+        "spec", "specular", "specularity", "gloss", "glossiness", "smoothness", "smooth", "opacity", "alpha",
+        "transparency", "transparent", "transmission", "translucency", "emission", "emissive", "emit",
+        "orm", "arm", "rma", "mra", "mrao", "packed", "packedmap", "ormmap", "mask", "masks", "id", "materialid", "curvature", "cavity",
+        "anisotropy", "anisotropic", "subsurface", "sss", "refraction", "ior", "coat", "clearcoat", "sheen",
+        "preview", "thumbnail", "thumb", "render", "beauty"
+    ]
+    private static let previousExcludedNames: Set<String> = [
+        "ao", "ambientocclusion", "metal", "metalness", "metallic", "spec", "specular", "opacity", "alpha"
+    ]
+
     /// Repair only an exact filename inference made by earlier versions.
     /// File identity, human review and deliberate role/pair choices remain authoritative.
     static func repairingLegacyInference(_ metadata: ImageMetadata, file: URL, sourceRoot: URL,
                                          width: Int, height: Int) -> ImageMetadata {
-        guard metadata.roleWasManuallySelected != true,
+        guard metadata.mapTypeInference == nil,
+              metadata.roleWasManuallySelected != true,
               metadata.pairingWasManuallySelected != true else { return metadata }
         let inferred = initialMetadata(file: file, sourceRoot: sourceRoot, width: width, height: height)
-        guard inferred.role != .unknown else { return metadata }
+        guard inferred.role != .unknown || !canClassifyMapType(file: file) else { return metadata }
         let legacy = inferredMetadata(file: file, sourceRoot: sourceRoot, width: width, height: height, currentNaming: false)
-        guard metadata.role == legacy.role, metadata.pairingKey == legacy.pairingKey,
+        let previous = inferredMetadata(file: file, sourceRoot: sourceRoot, width: width, height: height,
+                                        currentNaming: true, excludedNames: previousExcludedNames)
+        guard [legacy, previous].contains(where: { metadata.role == $0.role && metadata.pairingKey == $0.pairingKey }),
               metadata.role != inferred.role || metadata.pairingKey != inferred.pairingKey else { return metadata }
         var repaired = metadata
         repaired.role = inferred.role; repaired.pairingKey = inferred.pairingKey
@@ -124,7 +155,7 @@ public enum ImageMetadataStore {
     }
 
     private static func inferredMetadata(file: URL, sourceRoot: URL, width: Int, height: Int,
-                                         currentNaming: Bool,
+                                         currentNaming: Bool, excludedNames: Set<String>? = nil,
                                          allColorVariants: Bool = true) -> ImageMetadata {
         let stem = file.deletingPathExtension().lastPathComponent.lowercased()
         let tokens = stem.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
@@ -137,7 +168,7 @@ public enum ImageMetadataStore {
         ]
         if currentNaming {
             roles.insert((.bump, ["bump", "bumpmap"]), at: 2)
-            roles.append((.unknown, ["ao", "ambientocclusion", "metal", "metalness", "metallic", "spec", "specular", "opacity", "alpha"]))
+            roles.append((.unknown, (excludedNames ?? classifierExcludedNames).subtracting(["bump", "bumpmap"])))
         }
         var role = MapRole.unknown
         var family = tokens
@@ -177,6 +208,7 @@ public enum ImageMetadataStore {
         let directX = role == .normal && tokens.contains(where: { ["dx", "directx", "normaldx"].contains($0) })
         return ImageMetadata(pairingKey: pairing, role: role,
             normalConvention: directX ? "directx" : nil,
-            roleWasManuallySelected: false, pairingWasManuallySelected: false, ignored: directX)
+            roleWasManuallySelected: false, pairingWasManuallySelected: false,
+            ignored: directX || (currentNaming && role == .unknown && !canClassifyMapType(file: file)))
     }
 }

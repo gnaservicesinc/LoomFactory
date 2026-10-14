@@ -68,7 +68,8 @@ extension LoomProject {
                 guard let tag = try currentTag(image), tag.ignored != true else { return nil }
                 return SourceImage(id: image.id, url: image.url, displayName: image.displayName, role: tag.role,
                     category: tag.category, verified: tag.verified, note: tag.note, pairingKey: tag.pairingKey,
-                    width: image.width, height: image.height, normalConvention: tag.normalConvention)
+                    width: image.width, height: image.height, normalConvention: tag.normalConvention,
+                    mapTypeInference: tag.mapTypeInference)
             }
             let categories = categoryNames(members)
             if categories.count > 1 {

@@ -9,6 +9,42 @@ import UniformTypeIdentifiers
 @Suite(.serialized)
 struct ModelCoverageControlsTests {
     @Test @MainActor
+    func approveAndUseIsOneActionAndMissingPackageExportDoesNotHideTesting() async throws {
+        let fixture = try await CoverageControlsFixture()
+        defer { fixture.remove() }
+        let model = FactoryModel(rememberSourceFolder: false)
+        model.openFolder(fixture.source)
+        try await wait(model)
+        let initial = try #require(model.modelCoverage.first { $0.slot == fixture.depthSlot })
+        let candidate = try #require(ModelCoveragePresentation(initial).actionCandidate)
+        #expect(candidate.id == initial.effectiveRunID)
+        model.approveAndUseCoverageModel(artifact: candidate.artifact)
+        try await wait(model)
+        let chosen = try #require(model.modelCoverage.first { $0.slot == fixture.depthSlot })
+        #expect(chosen.selectedRunID == candidate.id)
+        #expect(ModelCoveragePresentation(chosen).isReady)
+
+        let version = try #require(model.snapshot?.modelVersions.first { $0.id == candidate.id })
+        model.updateModelVersionMetadata(version, name: "Brick approval candidate", notes: "Check mortar detail.")
+        try await wait(model)
+        let renamed = try #require(model.snapshot?.modelVersions.first { $0.id == candidate.id })
+        #expect(renamed.label == "Brick approval candidate")
+        #expect(renamed.notes == "Check mortar detail.")
+        #expect(renamed.isApproved)
+        if let coreML = candidate.artifact.coreMLPath {
+            try FileManager.default.removeItem(at: candidate.artifact.directory.appendingPathComponent(coreML))
+        }
+        await model.pollFolder()
+        let unavailable = try #require(model.modelCoverage.first { $0.slot == fixture.depthSlot })
+        #expect(unavailable.candidates.first { $0.id == candidate.id }?.isAvailable == false)
+        model.testCoverageModel(artifact: candidate.artifact)
+        #expect(model.workspaceSection == .testing)
+        #expect(model.selectedTestVersionID == candidate.id)
+        #expect(model.availableTestWeightSources.contains(.model))
+        try await render(LoomRoomView(model: model), size: NSSize(width: 1120, height: 760), name: "test-missing-package-export.png")
+    }
+
+    @Test @MainActor
     func actualSourceCoverageRendersSavedDepthVersionsWhenRequested() async throws {
         guard let path = ProcessInfo.processInfo.environment["LOOM_FACTORY_COVERAGE_SOURCE_ROOT"] else { return }
         let model = FactoryModel(rememberSourceFolder: false)

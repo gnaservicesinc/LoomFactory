@@ -9,7 +9,11 @@ struct LoomRoomView: View {
     var body: some View {
         VStack(spacing: 0) {
             if model.snapshot != nil { workspaceNavigation }
-            if model.workspaceSection == .training, let snapshot = model.snapshot {
+            if model.workspaceSection == .materials, let snapshot = model.snapshot {
+                materialsWorkspace(snapshot)
+            } else if model.workspaceSection == .models, let snapshot = model.snapshot {
+                modelsWorkspace(snapshot)
+            } else if model.workspaceSection == .training, let snapshot = model.snapshot {
                 trainingWorkspace(snapshot)
             } else {
                 ScrollView {
@@ -51,7 +55,6 @@ struct LoomRoomView: View {
             ToolbarItemGroup(placement: .primaryAction) {
                 if model.snapshot != nil {
                     Button { model.showModelTesting() } label: { Label("Test Model", systemImage: "play.rectangle") }
-                        .disabled(model.busy)
                         .accessibilityIdentifier("loom.testModel")
                     Button { model.importImages() } label: { Label("Import Images", systemImage: "square.and.arrow.down") }
                         .disabled(model.busy)
@@ -211,13 +214,47 @@ struct LoomRoomView: View {
         }.frame(minWidth: 58, alignment: .leading)
     }
 
+    private func compactSourceBar(_ snapshot: ProjectSnapshot) -> some View {
+        HStack(spacing: 12) {
+            Label(snapshot.sourceURL.lastPathComponent, systemImage: "folder")
+                .font(.callout.weight(.semibold)).lineLimit(1).help(snapshot.sourceURL.path)
+            Text("\(model.materialFolders.count.formatted()) materials · \(snapshot.images.count.formatted()) maps")
+                .font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            if model.busy {
+                ProgressView().controlSize(.small)
+                Text(model.activityTitle).font(.caption).lineLimit(1).frame(maxWidth: 300)
+                Button(model.isTraining ? "Save & Stop" : "Stop") {
+                    if model.isTraining { model.saveAndStopTraining() } else { model.cancel() }
+                }
+            }
+            Button("Show Folder") { model.revealSource() }
+            Button("Change Folder…") { model.chooseSourceFolder() }.disabled(model.busy)
+        }.padding(.horizontal, 18).padding(.vertical, 10)
+            .background(.bar)
+    }
+
+    private func materialsWorkspace(_ snapshot: ProjectSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            compactSourceBar(snapshot)
+            sourceIssuePanel
+            datasetPanel(snapshot)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private func modelsWorkspace(_ snapshot: ProjectSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            compactSourceBar(snapshot)
+            sourceIssuePanel
+            ModelCoverageView(model: model).padding(16)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
     private func datasetPanel(_ snapshot: ProjectSnapshot) -> some View {
         let materials = model.visibleMaterialFolders
         let mapCount = materials.reduce(0) { $0 + $1.imageCount }
-        let materialLabel = materials.count == 1 ? "source material" : "source materials"
-        let mapLabel = mapCount == 1 ? "map file" : "map files"
-        return FactoryPanel("Datasets", subtitle: "A dataset contains the images tagged with its category.") {
-            HStack(spacing: 16) {
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
                 Picker("Dataset", selection: $model.selectedDatasetID) {
                     Text("All materials").tag("")
                     Text("Uncategorized").tag("unassigned")
@@ -225,44 +262,30 @@ struct LoomRoomView: View {
                     ForEach(snapshot.datasets, id: \.id) { dataset in
                         Text(dataset.name).tag(dataset.id)
                     }
-                }.frame(width: 270)
-                Text("\(materials.count.formatted()) \(materialLabel) · \(mapCount.formatted()) \(mapLabel)")
-                    .font(.callout).foregroundStyle(.secondary)
+                }.frame(width: 260)
+                Text("\(materials.count.formatted()) materials · \(mapCount.formatted()) maps")
+                    .font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                TextField("Find a material or map", text: $model.imageSearch).textFieldStyle(.roundedBorder).frame(width: 210)
+                TextField("Find a material or map", text: $model.imageSearch).textFieldStyle(.roundedBorder).frame(width: 200)
                 Button("Pair Images…") { pairingSheet = true }.disabled(model.busy || snapshot.images.count < 2)
                 Button("Categorize", systemImage: "tag") { model.categorize() }.disabled(model.busy || snapshot.images.isEmpty)
                     .help("Categorize each material folder once using one diffuse image. Existing tags and reviewed images are preserved.")
             }
             HSplitView {
                 MaterialBrowser(model: model).id(snapshot.sourceURL.path)
-                    .frame(minWidth: 220, idealWidth: 285, maxWidth: 380)
-                if let image = model.selectedImage {
-                    VStack(spacing: 10) {
-                        FactoryImage(url: image.url, revision: image.previewRevision)
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        HStack {
-                            Text(image.role.displayName)
-                                .help(image.url.lastPathComponent)
-                            Spacer()
-                            Text("\(image.width.formatted()) × \(image.height.formatted())")
-                        }.font(.caption).foregroundStyle(.secondary)
-                    }.padding(.horizontal, 16).frame(minWidth: 300)
-                    ImageReviewPanel(model: model, image: image).frame(minWidth: 250, idealWidth: 290, maxWidth: 340)
-                } else {
-                    ContentUnavailableView("No image selected", systemImage: "photo", description: Text("Import images or choose another dataset."))
-                        .frame(maxWidth: .infinity)
+                    .frame(minWidth: 230, idealWidth: 285, maxWidth: 380)
+                MaterialSelectionViewer(model: model).frame(minWidth: 340, maxWidth: .infinity, maxHeight: .infinity)
+                if case .image(let image, _, _) = model.selectedMaterialBrowserRow {
+                    ScrollView {
+                        ImageReviewPanel(model: model, image: image)
+                    }.frame(minWidth: 250, idealWidth: 285, maxWidth: 320)
                 }
-            }.frame(height: 450)
-        }
-        .onChange(of: model.selectedDatasetID) {
-            model.selectVisibleImageIfNeeded()
-        }
-        .onChange(of: model.imageSearch) {
-            model.selectVisibleImageIfNeeded()
-        }
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+        }.padding(16).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .onChange(of: model.selectedDatasetID) { model.selectVisibleImageIfNeeded() }
+        .onChange(of: model.imageSearch) { model.selectVisibleImageIfNeeded() }
     }
+
 }
 
 private struct ImageReviewPanel: View {
@@ -295,6 +318,9 @@ private struct ImageReviewPanel: View {
             }
             Picker("Map type", selection: $role) {
                 ForEach(MapRole.allCases, id: \.self) { Text($0.displayName).tag($0) }
+            }
+            if let inference = image.mapTypeInference, role == image.role {
+                MapTypeInferenceNotice(inference: inference)
             }
             if role == .bump {
                 Text("Bump maps are kept for inspection and are excluded from depth training.")
@@ -337,40 +363,110 @@ private struct ImageReviewPanel: View {
     }
 }
 
-private struct PairImagesSheet: View {
+struct MapTypeInferenceNotice: View {
+    let inference: MapTypeInference
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label("\(inference.accepted ? "Classifier guess" : "Classifier unsure"): \(inference.role.displayName) (\(inference.confidence.formatted(.percent.precision(.fractionLength(0))))).", systemImage: "sparkle.magnifyingglass")
+            if !inference.accepted {
+                Text("Choose the map type above.")
+            } else if inference.role == .depth || inference.role == .roughness {
+                Text("Depth and roughness can look similar. Check the map type.")
+            } else {
+                Text("Check the map type and correct it if needed.")
+            }
+        }
+        .font(.caption).foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("review.mapTypeInference")
+    }
+}
+
+/// Temporary checkbox state. Only current physical members may be paired.
+struct PairImagesSelection {
+    var selectedImageIDs = Set<String>()
+
+    mutating func select(_ id: String, isSelected: Bool, in images: [SourceImage]) {
+        guard images.contains(where: { $0.id == id }) else {
+            selectedImageIDs.remove(id)
+            return
+        }
+        if isSelected { selectedImageIDs.insert(id) } else { selectedImageIDs.remove(id) }
+    }
+
+    mutating func retainExisting(in images: [SourceImage]) {
+        selectedImageIDs.formIntersection(images.map(\.id))
+    }
+
+    func currentIDs(in images: [SourceImage]) -> [String] {
+        selectedImageIDs.intersection(images.map(\.id)).sorted()
+    }
+}
+
+struct PairImagesSheet: View {
     @Bindable var model: FactoryModel
     @Environment(\.dismiss) private var dismiss
-    @State private var selected = Set<String>()
+    @State private var selection: PairImagesSelection
+
+    init(model: FactoryModel, selectedImageIDs: Set<String> = []) {
+        self.model = model
+        _selection = State(initialValue: PairImagesSelection(selectedImageIDs: selectedImageIDs))
+    }
+
+    private var images: [SourceImage] { model.snapshot?.images ?? [] }
+    private var currentSelection: [String] { selection.currentIDs(in: images) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Pair material images").font(.title2.weight(.semibold))
             Text("Select all diffuse variants that share these maps, plus one image of each matching target type at the same resolution. Each diffuse becomes a separate training sample. Set map types in Image Review first.")
                 .foregroundStyle(.secondary)
-            List(model.snapshot?.images ?? [], id: \.id, selection: $selected) { image in
-                HStack {
-                    FactoryImage(url: image.url, revision: image.previewRevision, maximumPixels: 100)
-                        .frame(width: 40, height: 40).clipShape(RoundedRectangle(cornerRadius: 6))
-                    Text(image.displayName)
-                    Spacer()
-                    Text(image.role.displayName).foregroundStyle(.secondary)
-                }.tag(image.id)
-            }.frame(minHeight: 340)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    ForEach(images) { image in
+                        Toggle(isOn: Binding(
+                            get: { selection.selectedImageIDs.contains(image.id) },
+                            set: { selection.select(image.id, isSelected: $0, in: images) }
+                        )) {
+                            HStack {
+                                FactoryImage(url: image.url, revision: model.imagePreviewRevision(image), maximumPixels: 100)
+                                    .frame(width: 40, height: 40).clipShape(RoundedRectangle(cornerRadius: 6))
+                                Text(image.displayName).lineLimit(2)
+                                Spacer()
+                                Text(image.role.displayName).foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .toggleStyle(.checkbox)
+                        .padding(4)
+                        .accessibilityIdentifier("pair.image." + image.id)
+                        .accessibilityLabel("\(image.displayName), \(image.role.displayName), \(image.dimensions)")
+                        .accessibilityHint("Include this image in the material pair")
+                    }
+                }
+                .padding(4)
+            }
+            .frame(minHeight: 340)
             HStack {
-                Text("Use ⌘ to select multiple images.").font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Use the checkboxes to select matching images.")
+                    Text("\(currentSelection.count.formatted()) \(currentSelection.count == 1 ? "image" : "images") selected")
+                }.font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button("Cancel") { dismiss() }
-                Button("Pair Selected") { model.pairImages(ids: selected.sorted()); dismiss() }
-                    .buttonStyle(.borderedProminent).disabled(selected.count < 2)
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Pair Selected") {
+                    let ids = selection.currentIDs(in: images)
+                    guard ids.count >= 2, !model.busy else { return }
+                    model.pairImages(ids: ids)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent).disabled(currentSelection.count < 2 || model.busy)
             }
         }.padding(24).frame(width: 680)
-    }
-}
-
-extension SourceImage {
-    var previewRevision: String {
-        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-        return "\(attributes?[.modificationDate] ?? "")|\(attributes?[.size] ?? "")"
+        .onChange(of: images.map(\.id), initial: true) { selection.retainExisting(in: images) }
     }
 }
 

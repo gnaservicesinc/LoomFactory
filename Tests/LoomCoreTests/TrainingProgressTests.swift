@@ -3,6 +3,44 @@ import XCTest
 @testable import LoomCore
 
 final class TrainingProgressTests: XCTestCase {
+    func testResumedProgressIncludesPriorWorkImmediatelyAndDoesNotInflateETA() throws {
+        var tracker = TrainingProgressTracker(totalEpochs: 4, trainingImages: 6,
+            validationImages: 0, stepsPerEpoch: 3, startSeconds: 100)
+        tracker.restore(epoch: 2, stepInEpoch: 1, completedSteps: 4, completedImages: 8,
+            elapsedSeconds: 20, priorEpochs: 3, priorSteps: 10, priorImages: 20,
+            priorElapsedSeconds: 70, now: 105)
+        let restored = tracker.snapshot(now: 105)
+        XCTAssertEqual(restored.epoch, 5)
+        XCTAssertEqual(restored.totalEpochs, 7)
+        XCTAssertEqual(restored.completedSteps, 14)
+        XCTAssertEqual(restored.totalSteps, 22)
+        XCTAssertEqual(restored.completedImages, 28)
+        XCTAssertEqual(restored.elapsedSeconds, 95)
+        XCTAssertNil(restored.averageCycleSeconds)
+        tracker.beginEpoch(epoch: 2, now: 105)
+        tracker.restoreEpochPosition(stepInEpoch: 1, imageIndex: 2, elapsedSeconds: 12)
+        let positioned = tracker.snapshot(now: 105)
+        XCTAssertEqual(positioned.stepInEpoch, 1)
+        XCTAssertEqual(positioned.imageIndex, 2)
+        XCTAssertEqual(positioned.epochElapsedSeconds, 12)
+        tracker.completeStep(stepInEpoch: 2, completedSteps: 5, completedImages: 10, cycleSeconds: 8, now: 113)
+        tracker.completeStep(stepInEpoch: 3, completedSteps: 6, completedImages: 12, cycleSeconds: 2, now: 115)
+        let live = tracker.snapshot(now: 115)
+        XCTAssertEqual(live.completedSteps, 16)
+        XCTAssertEqual(live.elapsedSeconds, 105)
+        XCTAssertEqual(try XCTUnwrap(live.totalRemainingSeconds), 12, accuracy: 0.000001)
+        XCTAssertEqual(live.priorEpochs, 3)
+        XCTAssertEqual(live.priorSteps, 10)
+    }
+
+    func testOldProgressJSONRemainsReadableWithoutLineageFields() throws {
+        var object = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(TrainingProgress())) as? [String: Any])
+        for key in ["priorEpochs", "priorSteps", "priorImages", "priorElapsedSeconds"] { object.removeValue(forKey: key) }
+        let restored = try JSONDecoder().decode(TrainingProgress.self, from: JSONSerialization.data(withJSONObject: object))
+        XCTAssertNil(restored.priorSteps)
+        XCTAssertEqual(restored.completedSteps, 0)
+    }
+
     func testStartupAndFirstCycleDoNotInventSteadySpeedOrETA() {
         var tracker = TrainingProgressTracker(totalEpochs: 3, trainingImages: 8,
             validationImages: 2, stepsPerEpoch: 4, startSeconds: 100)

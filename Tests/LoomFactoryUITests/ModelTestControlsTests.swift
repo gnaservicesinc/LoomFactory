@@ -1,6 +1,7 @@
 import AppKit
 import ImageIO
 import LoomCore
+import LoomNative
 import SwiftUI
 import Testing
 import UniformTypeIdentifiers
@@ -8,6 +9,114 @@ import UniformTypeIdentifiers
 
 @Suite(.serialized)
 struct ModelTestControlsTests {
+    @Test @MainActor
+    func defaultTestVersionRefreshesOriginalMapWhenTrainingMapChangesWithoutAnExplicitRun() async throws {
+        let fixture = try await ModelTestControlsFixture()
+        defer { fixture.remove() }
+        let depthTarget = fixture.source.appendingPathComponent("brick_depth.exr")
+        let normalTarget = fixture.source.appendingPathComponent("brick_normal.png")
+        try FileManager.default.copyItem(at: fixture.output, to: depthTarget)
+        try FileManager.default.copyItem(at: fixture.sourceInput, to: normalTarget)
+        try ImageMetadataStore.write(.init(pairingKey: "brick", role: .depth, category: "Bricks"), to: depthTarget)
+        try ImageMetadataStore.write(.init(pairingKey: "brick", role: .normal, category: "Bricks"), to: normalTarget)
+
+        let runs = fixture.source.appendingPathComponent(".loom-factory/runs")
+        let depthRun = runs.appendingPathComponent("one-saved-run")
+        let normalRun = runs.appendingPathComponent("one-saved-normal-run")
+        try FileManager.default.copyItem(at: depthRun, to: normalRun)
+        for name in ["model.json", "checkpoint.json"] {
+            let file = normalRun.appendingPathComponent(name)
+            let data = try Data(contentsOf: file)
+            let object = try JSONSerialization.jsonObject(with: data)
+            var descriptor = try #require(object as? [String: Any])
+            descriptor["map"] = "normal"
+            let settingsKey = name == "checkpoint.json" ? "settings" : "training"
+            var savedSettings = try #require(descriptor[settingsKey] as? [String: Any])
+            savedSettings["optimizer"] = "lion"
+            savedSettings["learning_rate"] = 0.00037
+            savedSettings["crop_refresh"] = "per_run"
+            savedSettings["seed"] = 734
+            descriptor[settingsKey] = savedSettings
+            try JSONSerialization.data(withJSONObject: descriptor).write(to: file)
+        }
+        let artifactData = try Data(contentsOf: depthRun.appendingPathComponent("artifact.json"))
+        let depthArtifact = try JSONDecoder().decode(ModelArtifact.self, from: artifactData)
+        let normalArtifact = ModelArtifact(id: normalRun.lastPathComponent, kind: "map",
+            datasetID: depthArtifact.datasetID, datasetName: depthArtifact.datasetName, map: .normal,
+            directory: normalRun, createdAt: depthArtifact.createdAt, epochs: depthArtifact.epochs,
+            loss: nil, coreMLPath: depthArtifact.coreMLPath, weightsPath: depthArtifact.weightsPath,
+            architecture: depthArtifact.architecture)
+        try JSONEncoder().encode(normalArtifact).write(to: normalRun.appendingPathComponent("artifact.json"))
+
+        let model = FactoryModel(rememberSourceFolder: false)
+        model.openFolder(fixture.source)
+        try await wait(model)
+        model.selectedDatasetID = try #require(depthArtifact.datasetID)
+        model.setTrainingStartMode(.checkpoint)
+        #expect(model.selectedTrainingVersionID.isEmpty)
+        // Workspace tab navigation leaves the saved-run selection at its default.
+        model.workspaceSection = .testing
+        #expect(model.selectedTestVersionID.isEmpty)
+        #expect(model.selectedTestVersion?.map == .depth)
+        model.setModelTestInput(fixture.sourceInput)
+        for _ in 0..<250 {
+            if model.testOriginalMap.image?.url == depthTarget { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(model.testOriginalMap.image?.url == depthTarget)
+
+        model.workspaceSection = .training
+        model.selectedMap = .normal
+        #expect(model.selectedTrainingVersionID.isEmpty)
+        #expect(model.selectedTrainingVersion?.id == normalArtifact.id)
+        var expectedSettings = try #require(model.selectedTrainingVersion?.savedSettings)
+        #expect(expectedSettings.optimizer == .lion)
+        #expect(expectedSettings.learningRate == 0.00037)
+        #expect(expectedSettings.cropRefresh == .perRun)
+        #expect(expectedSettings.seed == 734)
+        expectedSettings.continueLatestWeights = true
+        #expect(model.settings.training == expectedSettings)
+        model.workspaceSection = .testing
+        #expect(model.selectedTestVersionID.isEmpty)
+        #expect(model.selectedTestVersion?.map == .normal)
+        #expect(model.testInputURL == fixture.sourceInput)
+        for _ in 0..<250 {
+            if model.testOriginalMap.image?.url == normalTarget { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(model.testOriginalMap.image?.url == normalTarget)
+        #expect(model.testOriginalMap.image?.role == .normal)
+    }
+
+    @Test @MainActor
+    func sourceTestingOffersOtherCategoriesAndDisplaysOriginalPairedMap() async throws {
+        let fixture = try await ModelTestControlsFixture()
+        defer { fixture.remove() }
+        let target = fixture.source.appendingPathComponent("brick_depth.exr")
+        try FileManager.default.copyItem(at: fixture.output, to: target)
+        try ImageMetadataStore.write(.init(pairingKey: "brick", role: .depth, category: "Bricks"), to: target)
+        let other = fixture.source.appendingPathComponent("metal_diffuse.png")
+        try FileManager.default.copyItem(at: fixture.externalInput, to: other)
+        try ImageMetadataStore.write(.init(pairingKey: "metal", role: .diffuse, category: "Metal", ignored: true), to: other)
+        let originalTarget = try Data(contentsOf: target)
+        let model = FactoryModel(rememberSourceFolder: false)
+        model.openFolder(fixture.source)
+        try await wait(model)
+        let version = try #require(model.testableModelVersions.first)
+        model.showModelTesting(version)
+        model.setModelTestInput(fixture.sourceInput)
+        #expect(model.testDiffuseImages.contains { $0.url == other })
+        #expect(model.canTestModel)
+        let paired = ModelTestOriginalMap.resolve(inputURL: model.testInputURL, map: version.map,
+                                                 images: model.snapshot?.images ?? [])
+        #expect(paired.image?.url == target)
+        #expect(paired.issue == nil)
+        try await render(ModelTestView(model: model), size: NSSize(width: 1140, height: 930), name: "model-test-original-target-preview.png")
+        try await render(ModelTestResultView(result: fixture.result, imageZoom: .constant(.fit), saveOutput: {},
+            showOutput: {}, showFolder: {}, originalMap: paired), size: NSSize(width: 1140, height: 780), name: "model-test-original-target-result.png")
+        #expect(try Data(contentsOf: target) == originalTarget)
+    }
+
     @Test @MainActor
     func oneSavedRunAndAnExternalDiffuseNeedNoTargetOrSelectedTrainingDataset() async throws {
         let fixture = try await ModelTestControlsFixture()
@@ -69,13 +178,17 @@ struct ModelTestControlsTests {
         let result = fixture.result
         for zoom in ComparisonImageZoom.allCases {
             let content = ModelTestResultView(result: result, imageZoom: .constant(zoom),
-                                             saveOutput: {}, showOutput: {}, showFolder: {})
+                                             saveOutput: {}, savePNGPreview: {}, showOutput: {}, showFolder: {})
             try await render(content, size: NSSize(width: 1140, height: 740), name: "model-test-result-\(zoom.rawValue).png")
         }
         let image = try #require(CGImageSourceCreateWithURL(result.outputURL as CFURL, nil))
         let properties = try #require(CGImageSourceCopyPropertiesAtIndex(image, 0, nil) as? [CFString: Any])
         #expect(properties[kCGImagePropertyPixelWidth] as? Int == result.width)
         #expect(properties[kCGImagePropertyPixelHeight] as? Int == result.height)
+        #expect(properties[kCGImagePropertyDepth] as? Int == 32)
+        let preview = try #require(CGImageSourceCreateWithURL(result.previewURL as CFURL, nil))
+        let previewProperties = try #require(CGImageSourceCopyPropertiesAtIndex(preview, 0, nil) as? [CFString: Any])
+        #expect(previewProperties[kCGImagePropertyDepth] as? Int == 16)
     }
 
     @Test
@@ -93,10 +206,28 @@ struct ModelTestControlsTests {
             }
         }
         for (index, url) in originals.enumerated() { #expect(try Data(contentsOf: url) == before[index]) }
-        let saved = fixture.root.appendingPathComponent("saved-depth.png")
+        let saved = fixture.root.appendingPathComponent("saved-depth.exr")
         try ModelTestOutputExport.save(result, to: saved, sourceImageURLs: [fixture.sourceInput])
         #expect(try Data(contentsOf: saved) == Data(contentsOf: result.outputURL))
+        let decoded = try NativeImages.readTarget(from: saved, mapKind: "depth")
+        #expect(decoded.values == fixture.outputValues)
         try ModelTestOutputExport.save(result, to: result.outputURL, sourceImageURLs: [fixture.sourceInput])
+        let png = fixture.root.appendingPathComponent("saved-depth.png")
+        #expect(throws: (any Error).self) {
+            try ModelTestOutputExport.save(result, to: png, sourceImageURLs: [fixture.sourceInput])
+        }
+        try ModelTestOutputExport.save(result, to: png, sourceImageURLs: [fixture.sourceInput], format: .png16)
+        #expect(try Data(contentsOf: png) == Data(contentsOf: result.previewURL))
+        let pngImage = try #require(CGImageSourceCreateWithURL(png as CFURL, nil))
+        let pngProperties = try #require(CGImageSourceCopyPropertiesAtIndex(pngImage, 0, nil) as? [CFString: Any])
+        #expect(pngProperties[kCGImagePropertyDepth] as? Int == 16)
+        let legacyResult = ModelTestResult(directory: result.directory, inputURL: result.inputURL, outputURL: result.previewURL,
+            runID: result.runID, source: result.source, map: result.map, width: result.width, height: result.height,
+            tileSize: result.tileSize, tileCount: result.tileCount, note: "Legacy preview-only fixture")
+        #expect(throws: (any Error).self) {
+            try ModelTestOutputExport.save(legacyResult, to: fixture.root.appendingPathComponent("legacy.exr"), sourceImageURLs: [])
+        }
+        try ModelTestOutputExport.save(legacyResult, to: fixture.root.appendingPathComponent("legacy.png"), sourceImageURLs: [], format: .png16)
     }
 
     @MainActor private func wait(_ model: FactoryModel) async throws {
@@ -138,12 +269,15 @@ private struct ModelTestControlsFixture {
     let sourceInput: URL
     let externalInput: URL
     let output: URL
+    let preview: URL
+    let outputValues: [Float]
 
     var result: ModelTestResult {
         .init(directory: output.deletingLastPathComponent(), inputURL: externalInput, outputURL: output,
               runID: "one-saved-run", source: .checkpoint, map: .depth, width: 384, height: 256,
               tileSize: 256, tileCount: 2,
-              note: "Preview layout fixture. The original diffuse and generated map retain their native dimensions.")
+              note: "Preview layout fixture. The original diffuse and generated map retain their native dimensions.",
+              previewURL: preview)
     }
 
     init() async throws {
@@ -153,10 +287,15 @@ private struct ModelTestControlsFixture {
         try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
         sourceInput = source.appendingPathComponent("brick_diffuse.png")
         externalInput = root.appendingPathComponent("unseen_diffuse.png")
-        output = root.appendingPathComponent("depth.png")
+        output = root.appendingPathComponent("depth.exr")
+        preview = root.appendingPathComponent("depth.png")
+        var values = (0..<(384 * 256)).map { Float(($0 % 1024) + 1) / Float(1027) }
+        values[0] = 0.12345679; values[1] = Float(1).nextDown; values[2] = .leastNormalMagnitude
+        outputValues = values
         try Self.writeImage(to: sourceInput, color: true)
         try Self.writeImage(to: externalInput, color: true)
-        try Self.writeImage(to: output, color: false)
+        try NativeFloatEXR.write(values, channels: 1, width: 384, height: 256, to: output)
+        try Self.writePreview(values, to: preview)
         try ImageMetadataStore.write(.init(pairingKey: "brick", role: .diffuse, category: "Bricks"), to: sourceInput)
         let project = try LoomProject(sourceFolder: source)
         let snapshot = try await project.snapshot()
@@ -174,6 +313,7 @@ private struct ModelTestControlsFixture {
         checkpoint["schema"] = "loom-factory-checkpoint-v1"
         checkpoint["settings"] = saved
         checkpoint["epochs_completed"] = 20
+        checkpoint["weights_path"] = "checkpoint.safetensors"
         try JSONSerialization.data(withJSONObject: checkpoint).write(to: run.appendingPathComponent("checkpoint.json"))
         let artifact = ModelArtifact(id: "one-saved-run", kind: "map", datasetID: dataset.id, datasetName: dataset.name,
                                      map: .depth, directory: run, epochs: 20, loss: nil, coreMLPath: "model.mlmodel",
@@ -205,6 +345,19 @@ private struct ModelTestControlsFixture {
             decode: nil, shouldInterpolate: false, intent: .defaultIntent))
         let writer = try #require(CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil))
         CGImageDestinationAddImage(writer, bitmap, nil)
+        #expect(CGImageDestinationFinalize(writer))
+    }
+
+    private static func writePreview(_ values: [Float], to url: URL) throws {
+        var samples = values.map { UInt16(($0 * 65535).rounded()).bigEndian }
+        let data = samples.withUnsafeMutableBytes { Data($0) }
+        let provider = try #require(CGDataProvider(data: data as CFData))
+        let image = try #require(CGImage(width: 384, height: 256, bitsPerComponent: 16, bitsPerPixel: 16,
+            bytesPerRow: 384 * 2, space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: [.byteOrder16Big, CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue)],
+            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent))
+        let writer = try #require(CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(writer, image, nil)
         #expect(CGImageDestinationFinalize(writer))
     }
 

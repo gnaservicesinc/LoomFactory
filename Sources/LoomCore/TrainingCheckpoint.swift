@@ -18,8 +18,17 @@ public struct TrainingCheckpoint: Identifiable, Sendable, Equatable {
     public var updatesCompleted: Int = 0
     public var restoresOptimizer: Bool = false
     public var scalarLoss: NativeScalarLoss = .absoluteV1
+    public var priorEpochsCompleted: Int = 0
+    public var priorUpdatesCompleted: Int = 0
+    public var trainingElapsedSeconds: Double? = nil
+    public var totalEpochsCompleted: Int { total(epochsCompleted, priorEpochsCompleted) }
+    public var totalUpdatesCompleted: Int { total(updatesCompleted, priorUpdatesCompleted) }
     public var parameterCount: Int { TrainingSettings(modelWidth: modelWidth, modelBlocks: modelBlocks,
         modelArchitecture: modelArchitecture).parameterCount(map: map) }
+    private func total(_ current: Int, _ prior: Int) -> Int {
+        let (result, overflow) = max(0, current).addingReportingOverflow(max(0, prior))
+        return overflow ? Int.max : result
+    }
 }
 
 extension LoomProject {
@@ -52,7 +61,12 @@ extension LoomProject {
                 modelBlocks: blocks, modelArchitecture: architectureID, imageSize: size, exaggerateFeatures: savedSettings["exaggerate_features"] as? Bool ?? false,
                 epochsCompleted: descriptor["epochs_completed"] as? Int ?? 0, status: descriptor["status"] as? String ?? "saved", modifiedAt: modified,
                 updatesCompleted: descriptor["updates"] as? Int ?? 0, restoresOptimizer: descriptor["optimizer_path"] as? String != nil,
-                scalarLoss: scalarLoss)
+                scalarLoss: scalarLoss,
+                priorEpochsCompleted: descriptor["prior_epochs"] as? Int ?? 0,
+                priorUpdatesCompleted: descriptor["prior_updates"] as? Int ?? 0,
+                trainingElapsedSeconds: (descriptor["elapsed_seconds"] as? Double).map {
+                    $0 + (descriptor["prior_duration_seconds"] as? Double ?? 0)
+                })
         }.sorted { $0.modifiedAt > $1.modifiedAt }
     }
 }

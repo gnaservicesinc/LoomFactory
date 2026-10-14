@@ -7,6 +7,7 @@ struct TrainingPanel: View {
     @State private var customArchitecture = false
     @State private var optimizerTuning = false
     @State private var comparingModels = false
+    @State private var managedVersionID = ""
 
     init(model: FactoryModel, showTuning: Bool = false) {
         self.model = model
@@ -17,6 +18,7 @@ struct TrainingPanel: View {
     var body: some View {
         FactoryPanel("Train a dataset", subtitle: "Train with native Swift and the Apple GPU from paired diffuse and material maps.") {
             datasetSelection
+            trainedModels
             pairReadiness
             trainingSection("Model", symbol: "cube") { architectureSettings }
             trainingSection("Optimizer and batches", symbol: "slider.horizontal.3") { optimizerSettings }
@@ -36,7 +38,6 @@ struct TrainingPanel: View {
             }.disabled(!model.canTrain)
                 .accessibilityIdentifier("training.start")
             TrainingRunDeletionControl(model: model)
-            trainedModels
         }
         .disabled(model.busy)
         .sheet(isPresented: $comparingModels) { ModelComparisonView(model: model) }
@@ -75,6 +76,14 @@ struct TrainingPanel: View {
             }
             Text("Uses current files tagged for this dataset with matching map types and native dimensions. Maps share each crop and transform; originals are preserved.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if let plan = model.trainingPlan {
+                Divider().padding(.vertical, 4)
+                TrainingSourceSummary(plan: plan)
+            } else if model.selectedDataset != nil {
+                let sources = model.selectedDatasetSourceCounts
+                Text("\(countLabel(sources.folders, singular: "source material folder", plural: "source material folders")) · \(countLabel(sources.images, singular: "image file", plural: "image files"))")
+                    .font(.caption).monospacedDigit().accessibilityIdentifier("training.sourceCounts")
+            }
         }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
             .background(FactoryStyle.accent.opacity(0.06), in: RoundedRectangle(cornerRadius: 9))
     }
@@ -87,6 +96,14 @@ struct TrainingPanel: View {
                         Text("\(value.formatted()) × \(value.formatted())").tag(value)
                     }
                 }.labelsHidden().disabled(continuing).accessibilityIdentifier("training.imageSize")
+            }
+            row("Source resolution levels", detail: "Per material folder, start with the smallest usable original. Level 2 includes sources up to 2× that resolution; level 3 includes up to 4×.") {
+                Picker("Source resolution levels", selection: $model.settings.training.sourceResolutionLevels) {
+                    Text("1 (base)").tag(1)
+                    Text("2 (up to 2×)").tag(2)
+                    Text("3 (up to 4×)").tag(3)
+                    Text("All available").tag(0)
+                }.labelsHidden().accessibilityIdentifier("training.sourceResolutionLevels")
             }
             numberRow("Epochs", value: $model.settings.training.epochs, detail: "One pass through the training images.", identifier: "training.epochs")
             row("Training device", detail: "Native MPSGraph training uses the Apple GPU.") {
@@ -117,7 +134,12 @@ struct TrainingPanel: View {
                      ? "Starts from the exported weights of this version, including lowest validation loss weights when that run exported them. A fresh optimizer uses the settings below."
                      : "Restores saved weights and compatible optimizer state. Unfinished checkpoints resume their saved image position when settings and sources match. Older checkpoints use a fresh optimizer; changing training settings starts a new epoch schedule.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                Text("Saved architecture, training dimensions and depth transform are retained. This continuation creates another saved version.")
+                HStack {
+                    Text("All saved settings are loaded. Edit the controls below for this continuation.")
+                    Spacer()
+                    Button("Restore saved settings") { model.restoreSelectedTrainingSettings() }
+                        .accessibilityIdentifier("training.restoreSavedSettings")
+                }
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 if model.selectedMap != .normal && model.effectiveTrainingSettings.scalarLoss == .absoluteV1 {
                     Text("This version keeps the original scalar training loss. If its output has saturated to white or black, choose Start a fresh model to use stable scalar training.")
@@ -128,8 +150,11 @@ struct TrainingPanel: View {
                 Text("Starts new weights and keeps every previous version. A successful replacement becomes the model used for package export.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-            TextField("Run label (optional), e.g. lower learning rate", text: $model.runLabel)
-                .textFieldStyle(.roundedBorder).accessibilityIdentifier("training.runLabel")
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Model / checkpoint name").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                TextField("Name this run, e.g. Bark depth · lower learning rate", text: $model.runLabel)
+                    .textFieldStyle(.roundedBorder).accessibilityIdentifier("training.runLabel")
+            }
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 11) {
                 row("Network", detail: selectedNetwork.detail) {
                     Picker("Network", selection: networkBinding) {
@@ -292,8 +317,14 @@ struct TrainingPanel: View {
             if let plan = model.trainingPlan {
                 Text("\(countLabel(plan.trainingPairCount, singular: "training pair", plural: "training pairs")) in \(countLabel(plan.trainingMaterialCount, singular: "material", plural: "materials")) · \(countLabel(plan.validationPairCount, singular: "validation pair", plural: "validation pairs")) in \(countLabel(plan.validationMaterialCount, singular: "material", plural: "materials"))")
                     .font(.caption).foregroundStyle(.secondary).monospacedDigit()
-                Text("\(countLabel(model.settings.training.optimizerStepsPerEpoch(pairCount: plan.trainingPairCount), singular: "optimizer update", plural: "optimizer updates")) per epoch")
+                Text("Per epoch: \(countLabel(plan.batchesPerEpoch, singular: "batch", plural: "batches")) · \(countLabel(plan.optimizerStepsPerEpoch, singular: "optimizer update", plural: "optimizer updates"))")
                     .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                Text("Planned across \(model.effectiveTrainingSettings.epochs.formatted()) epochs: \(plan.trainingSampleVisits.formatted()) training pair uses · \(plan.validationSampleVisits.formatted()) validation pair uses · \(plan.totalBatches.formatted()) batches · \(plan.totalOptimizerUpdates.formatted()) optimizer updates")
+                    .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("training.plannedWork")
+                Text("Each pair supplies one crop per epoch. Early stopping or Stop can shorten the run.")
+                    .font(.caption).foregroundStyle(.secondary)
                 if model.settings.training.validationFraction > 0 && plan.validationPairCount == 0 {
                     Text("This dataset needs at least two source materials for a validation holdout. All available pairs will train.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -314,19 +345,47 @@ struct TrainingPanel: View {
 
     @ViewBuilder private var trainedModels: some View {
         if !model.selectedModelVersions.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Saved checkpoints and models").font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Button("A/B Compare", systemImage: "rectangle.split.2x1") { comparingModels = true }
+                        .disabled(model.exportedModelVersions.count < 2).accessibilityIdentifier("training.compare")
+                }
+                Text("Select a saved run to rename, add notes, test, or load its checkpoint and settings.")
+                    .font(.caption).foregroundStyle(.secondary)
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 3) {
+                        ForEach(model.selectedModelVersions) { version in
+                            Button {
+                                managedVersionID = version.id
+                            } label: {
+                                HStack {
+                                    Image(systemName: version.checkpoint == nil ? "cube" : "square.stack.3d.up")
+                                    Text(ModelVersionPresentation.title(version)).lineLimit(1)
+                                    Spacer()
+                                    Text(version.status.capitalized).font(.caption).foregroundStyle(.secondary)
+                                    if managedVersion?.id == version.id { Image(systemName: "checkmark") }
+                                }.padding(7).frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(managedVersion?.id == version.id ? FactoryStyle.accent.opacity(0.12) : Color.clear,
+                                        in: RoundedRectangle(cornerRadius: 6))
+                            }.buttonStyle(.plain)
+                                .accessibilityIdentifier("training.checkpoint.select.\(version.id)")
+                        }
+                    }
+                }.frame(height: min(140, CGFloat(model.selectedModelVersions.count) * 34))
+                if let version = managedVersion {
+                    ModelVersionRow(model: model, version: version).id(version.id)
+                }
+            }.padding(.vertical, 8)
             Divider()
-            HStack {
-                Text("Saved \(model.selectedMap.displayName.lowercased()) versions").font(.subheadline.weight(.semibold))
-                Spacer()
-                Button("A/B Compare", systemImage: "rectangle.split.2x1") { comparingModels = true }
-                    .disabled(model.exportedModelVersions.count < 2).accessibilityIdentifier("training.compare")
-            }
-            Text("Training losses describe optimization. Compare outputs on held-out materials to assess quality.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            ForEach(model.selectedModelVersions) { version in
-                ModelVersionRow(model: model, version: version)
-            }
         }
+    }
+
+    private var managedVersion: ModelVersion? {
+        model.selectedModelVersions.first { $0.id == managedVersionID }
+            ?? model.selectedModelVersions.first { $0.id == model.selectedTrainingVersion?.id }
+            ?? model.selectedModelVersions.first
     }
 
     private var startButtonTitle: String {
@@ -457,6 +516,54 @@ struct TrainingPanel: View {
     }
 }
 
+struct TrainingSourceSummary: View {
+    let plan: TrainingDataPlan
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("\(countLabel(plan.sourceMaterialCount, singular: "source material folder", plural: "source material folders")) · \(countLabel(plan.sourceImageCount, singular: "image file", plural: "image files"))")
+                .font(.callout.weight(.medium)).monospacedDigit()
+                .accessibilityIdentifier("training.sourceCounts")
+            Text("Will train \(countLabel(plan.trainingPairCount, singular: "pair", plural: "pairs")) from \(countLabel(plan.trainingMaterialCount, singular: "folder", plural: "folders")); validate \(countLabel(plan.validationPairCount, singular: "pair", plural: "pairs")) from \(countLabel(plan.validationMaterialCount, singular: "folder", plural: "folders")).")
+                .font(.caption).monospacedDigit().fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("training.selectedCounts")
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 5) {
+                GridRow {
+                    Text("Original resolution")
+                    Text("Usable pairs")
+                    Text("Train")
+                    Text("Validate")
+                }.font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                ForEach(plan.resolutions) { resolution in
+                    GridRow {
+                        Text(resolution.displayName)
+                        Text(resolution.eligiblePairCount.formatted())
+                        Text(resolution.trainingPairCount.formatted())
+                        Text(resolution.validationPairCount.formatted())
+                    }.font(.caption).monospacedDigit()
+                        .foregroundStyle(resolution.totalPairCount > 0 ? .primary : .secondary)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("training.resolution.\(resolution.id)")
+                }
+            }
+            if plan.excludedPairCount > 0 {
+                Text("\(plan.excludedPairCount.formatted()) usable pairs excluded by the resolution-level setting.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if plan.unavailableMaterialCount > 0 {
+                Text("\(plan.unavailableMaterialCount.formatted()) folders have no selected pair for this map and crop size.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text("Image files include diffuse inputs and maps. A usable pair needs both maps at matching dimensions, large enough for the training crop.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func countLabel(_ count: Int, singular: String, plural: String) -> String {
+        "\(count.formatted()) \(count == 1 ? singular : plural)"
+    }
+}
+
 enum TrainingModelPreset: String, CaseIterable, Identifiable {
     case compact, small, medium, large, extraLarge, huge, custom
     var id: String { rawValue }
@@ -494,6 +601,10 @@ struct TrainingOverviewPanel: View {
                 Text("\(model.selectedMap.displayName) model").font(.callout).foregroundStyle(.secondary)
             }
             Divider()
+            if model.selectedDataset != nil {
+                summary("Source folders", model.selectedDatasetSourceCounts.folders.formatted())
+                summary("Image files", model.selectedDatasetSourceCounts.images.formatted())
+            }
             summary("Parameters", model.effectiveTrainingSettings.parameterCount(map: model.selectedMap).formatted())
             summary("Optimizer", model.settings.training.optimizer.displayName)
             summary("Learning rate", model.settings.training.learningRate.formatted(.number.precision(.significantDigits(1...4))))
@@ -504,8 +615,12 @@ struct TrainingOverviewPanel: View {
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if let plan = model.trainingPlan {
+                Divider()
+                summary("Resolution levels", model.effectiveTrainingSettings.sourceResolutionLevels == 0 ? "All available" : model.effectiveTrainingSettings.sourceResolutionLevels.formatted())
                 summary("Training pairs", plan.trainingPairCount.formatted())
                 summary("Validation pairs", plan.validationPairCount.formatted())
+                summary("Training pair uses", plan.trainingSampleVisits.formatted())
+                summary("Planned updates", plan.totalOptimizerUpdates.formatted())
                 if model.settings.training.validationFraction > 0 && plan.validationPairCount == 0 {
                     Text("Validation needs at least two source materials.").font(.caption).foregroundStyle(.secondary)
                 }
@@ -616,7 +731,7 @@ struct PackagePanel: View {
 struct RunPanel: View {
     @Bindable var model: FactoryModel
     @State private var showLog = false
-    @State private var showMeasurements = false
+    @State private var showMeasurements = true
 
     var body: some View {
         FactoryPanel("Run progress") {
@@ -650,7 +765,7 @@ struct RunPanel: View {
             if let progress = model.progress, model.trainingProgress == nil {
                 ProgressView(value: progress).progressViewStyle(.linear)
             }
-            let metrics = TrainingRunMetrics(events: model.events)
+            let metrics = TrainingRunMetrics(events: model.measurementEvents + model.events)
             if let progress = model.trainingProgress {
                 TrainingProgressView(progress: progress, isRunning: model.busy)
             }
@@ -667,7 +782,7 @@ struct RunPanel: View {
                 if let threshold = metrics.gradientClipThreshold { metric("Current clipping cap", ModelVersionPresentation.number(threshold)) }
                 if let batch = metrics.effectiveBatchSize { metric("Images per update", "Up to \(batch.formatted())") }
                 if let count = metrics.parameterCount { metric("Parameters", count.formatted()) }
-                if let timing = model.events.last(where: { $0.cycleTiming != nil })?.cycleTiming {
+                if let timing = model.latestTrainingMeasurements?.cycleTiming ?? model.events.last(where: { $0.cycleTiming != nil })?.cycleTiming {
                     metric("Image preparation", timing.preparationSeconds.formatted(.number.precision(.fractionLength(2))) + " s")
                     metric("Wait for images", timing.preparationWaitSeconds.formatted(.number.precision(.fractionLength(2))) + " s")
                     metric("Training", timing.trainingSeconds.formatted(.number.precision(.fractionLength(2))) + " s")

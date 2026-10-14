@@ -24,19 +24,26 @@ final class FactoryModel {
         didSet {
             if selectedDatasetID != oldValue {
                 selectedTrainingVersionID = ""; invalidateComparisonSelection(); resetModelTestSelection()
+                restoreSelectedTrainingSettings()
             }
         }
     }
     var selectedImageID: String?
+    var selectedMaterialBrowserRowID: String?
     var selectedMap: MapRole = .depth {
         didSet {
             if selectedMap != oldValue {
                 selectedTrainingVersionID = ""; invalidateComparisonSelection(); resetModelTestSelection()
+                restoreSelectedTrainingSettings()
             }
         }
     }
     var trainingStartMode: FactoryTrainingStartMode = .checkpoint
-    var selectedTrainingVersionID = ""
+    var selectedTrainingVersionID = "" {
+        didSet {
+            if selectedTrainingVersionID != oldValue { restoreSelectedTrainingSettings() }
+        }
+    }
     var runLabel = ""
     var comparisonFirstVersionID = "" {
         didSet { if comparisonFirstVersionID != oldValue { invalidateComparisonSelection() } }
@@ -52,13 +59,19 @@ final class FactoryModel {
     private(set) var comparisonIssue: String?
     private(set) var loadingComparisonPairs = false
     var selectedTestVersionID = "" {
-        didSet { if selectedTestVersionID != oldValue { modelTestResult = nil; testWeightSource = nil } }
+        didSet {
+            if selectedTestVersionID != oldValue {
+                modelTestResult = nil; testWeightSource = nil
+                refreshTestOriginalMap()
+            }
+        }
     }
     var testWeightSource: TrainingWeightSource? {
         didSet { if testWeightSource != oldValue { modelTestResult = nil } }
     }
     private(set) var testInputURL: URL?
     private(set) var modelTestResult: ModelTestResult?
+    private(set) var testOriginalMap = ModelTestOriginalMap.resolve(inputURL: nil, map: nil, images: [])
     var imageSearch = ""
     var fileFilter: MaterialBrowserFilter = .all
     var workspaceSection: LoomWorkspaceSection = .materials
@@ -66,6 +79,8 @@ final class FactoryModel {
     private(set) var activityTitle = ""
     private(set) var progress: Double?
     private(set) var events: [TrainingEvent] = []
+    private(set) var latestTrainingMeasurements: TrainingEvent?
+    var measurementEvents: [TrainingEvent] { latestTrainingMeasurements.map { [$0] } ?? [] }
     private(set) var trainingProgress: TrainingProgress?
     private(set) var isTraining = false
     private(set) var checkpointRequestPending = false
@@ -80,12 +95,20 @@ final class FactoryModel {
     @ObservationIgnored private var operation: Task<Void, Never>?
     @ObservationIgnored private var saveOperation: Task<Void, Never>?
     @ObservationIgnored private var checkpointOperation: Task<Bool, Never>?
+    @ObservationIgnored private var originalMapOperation: Task<Void, Never>?
     @ObservationIgnored private var checkpointWillStop = false
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var polling = false
     @ObservationIgnored private var loadedComparisonKey = ""
     @ObservationIgnored private var packageNeedsExport = false
     @ObservationIgnored private var comparisonImageRevisions: [String: String] = [:]
+    private(set) var previewRevisions: [String: String] = [:]
+    @ObservationIgnored private var browserIndex: FactoryBrowserIndex?
+    @ObservationIgnored private var browserProjection: FactoryBrowserProjection?
+    @ObservationIgnored private var cachedTrainingPlan: FactoryTrainingPlanCache?
+    @ObservationIgnored private var presentationRevision = 0
+    @ObservationIgnored private var progressDeliverySerial: UInt64 = 0
+    @ObservationIgnored private var adoptionSerial: UInt64 = 0
     @ObservationIgnored private let rememberSourceFolder: Bool
 
     var sourceFolder: URL? { project?.sourceFolder }
@@ -95,34 +118,45 @@ final class FactoryModel {
     }
 
     var matchingImages: [SourceImage] {
-        guard let snapshot else { return [] }
-        let dataset = selectedDataset?.name
-        return snapshot.images.filter { image in
-            let matchesDataset = selectedDatasetID == "" ||
-                (selectedDatasetID == "unassigned" ? image.category == nil : image.category == dataset)
-            return matchesDataset && (imageSearch.isEmpty ||
-                image.displayName.localizedCaseInsensitiveContains(imageSearch) ||
-                image.url.lastPathComponent.localizedCaseInsensitiveContains(imageSearch) ||
-                ImageMetadataStore.friendlyName(image.url.deletingLastPathComponent().lastPathComponent).localizedCaseInsensitiveContains(imageSearch) ||
-                image.role.displayName.localizedCaseInsensitiveContains(imageSearch) ||
-                image.category?.localizedCaseInsensitiveContains(imageSearch) == true)
-        }
+        currentBrowserProjection()?.matching ?? []
     }
 
-    var visibleImages: [SourceImage] { matchingImages.filter(fileFilter.includes) }
+    var visibleImages: [SourceImage] { currentBrowserProjection()?.visible ?? [] }
 
     var materialFolders: [SourceMaterialFolder] {
-        guard let snapshot else { return [] }
-        return SourceMaterialFolder.group(images: snapshot.images, sourceFolder: snapshot.sourceURL)
+        guard snapshot != nil else { return [] }
+        return browserIndex?.folders ?? []
+    }
+    var materialBrowserIndex: MaterialBrowserIndex {
+        guard snapshot != nil else { return .init() }
+        return browserIndex?.materialBrowserIndex ?? .init()
     }
 
     var visibleMaterialFolders: [SourceMaterialFolder] {
-        guard let snapshot else { return [] }
-        return SourceMaterialFolder.group(images: visibleImages, sourceFolder: snapshot.sourceURL)
+        currentBrowserProjection()?.folders ?? []
     }
 
     var selectedImage: SourceImage? {
-        snapshot?.images.first { $0.id == selectedImageID }
+        guard snapshot != nil else { return nil }
+        return selectedImageID.flatMap { browserIndex?.imagesByID[$0] }
+    }
+
+    func imagePreviewRevision(_ image: SourceImage) -> String {
+        image.previewRevision + "|" + (previewRevisions[image.id] ?? "")
+    }
+
+    private func currentBrowserProjection() -> FactoryBrowserProjection? {
+        guard let snapshot, let browserIndex else { return nil }
+        if let value = browserProjection, value.revision == presentationRevision,
+           value.datasetID == selectedDatasetID, value.search == imageSearch, value.filter == fileFilter { return value }
+        let matching = browserIndex.matching(datasetID: selectedDatasetID, datasetName: selectedDataset?.name, search: imageSearch)
+        let visible = matching.filter(fileFilter.includes)
+        let folders = selectedDatasetID.isEmpty && imageSearch.isEmpty && fileFilter == .all ? browserIndex.folders :
+            SourceMaterialFolder.group(images: visible, sourceFolder: snapshot.sourceURL)
+        let value = FactoryBrowserProjection(revision: presentationRevision, datasetID: selectedDatasetID,
+            search: imageSearch, filter: fileFilter, matching: matching, visible: visible, folders: folders)
+        browserProjection = value
+        return value
     }
 
     var modelCoverage: [ModelCoverageEntry] { snapshot?.modelCoverage ?? [] }
@@ -218,9 +252,7 @@ final class FactoryModel {
         testWeightSource ?? availableTestWeightSources.first
     }
     var testDiffuseImages: [SourceImage] {
-        let dataset = selectedTestVersion?.datasetName ?? selectedDataset?.name
-        return snapshot?.images.filter { $0.role == .diffuse && !$0.ignored &&
-            (dataset == nil || $0.category == dataset) } ?? []
+        snapshot?.images.filter { $0.role == .diffuse } ?? []
     }
     var modelTestIssue: String? {
         if !selectedTestVersionID.isEmpty, selectedTestVersion == nil {
@@ -230,13 +262,17 @@ final class FactoryModel {
         if let source = effectiveTestWeightSource, !availableTestWeightSources.contains(source) {
             return "These saved weights are no longer available. Choose exported model weights or a checkpoint from this run."
         }
-        guard let input = testInputURL else { return "Choose a diffuse image to see the model's output." }
-        if !FileManager.default.fileExists(atPath: input.path) { return "The selected diffuse image is no longer available. Choose an image again." }
+        guard testInputURL != nil else { return "Choose a diffuse image to see the model's output." }
         return nil
     }
     var canTestModel: Bool { project != nil && !busy && modelTestIssue == nil && effectiveTestWeightSource != nil }
     var eligiblePairCount: Int {
         trainingPlan?.totalPairCount ?? 0
+    }
+    var selectedDatasetSourceCounts: (folders: Int, images: Int) {
+        guard let dataset = selectedDataset else { return (0, 0) }
+        let images = snapshot?.images.filter { $0.category == dataset.name } ?? []
+        return (Set(images.map { $0.url.deletingLastPathComponent().standardizedFileURL }).count, images.count)
     }
     var selectedCheckpoint: TrainingCheckpoint? {
         guard effectiveStartMode != .exportedModel else { return nil }
@@ -271,17 +307,27 @@ final class FactoryModel {
         }
         if continuingTraining && !canContinueMap { return "Choose saved weights for this dataset and map, or replace with a fresh model." }
         if let issue = effectiveTrainingSettings.validationIssue { return issue }
-        do {
-            if let plan = try snapshot?.trainingPlan(datasetID: selectedDatasetID, map: selectedMap, settings: effectiveTrainingSettings),
-               effectiveTrainingSettings.earlyStoppingPatience > 0, plan.validationPairCount == 0 {
-                return "Early stopping needs held-out pairs from another material folder. Disable early stopping or add another tagged material folder."
-            }
-        } catch { return error.localizedDescription }
+        if let plan = trainingPlan,
+           effectiveTrainingSettings.earlyStoppingPatience > 0, plan.validationPairCount == 0 {
+            return "Early stopping needs held-out pairs from another material folder. Disable early stopping or add another tagged material folder."
+        }
+        if let issue = currentTrainingPlan().issue { return issue }
         return nil
     }
     var trainingPlan: TrainingDataPlan? {
-        guard effectiveTrainingSettings.validationIssue == nil else { return nil }
-        return try? snapshot?.trainingPlan(datasetID: selectedDatasetID, map: selectedMap, settings: effectiveTrainingSettings)
+        currentTrainingPlan().plan
+    }
+    private func currentTrainingPlan() -> FactoryTrainingPlanCache {
+        let configured = effectiveTrainingSettings
+        if let value = cachedTrainingPlan, value.revision == presentationRevision,
+           value.datasetID == selectedDatasetID, value.map == selectedMap, value.settings == configured { return value }
+        let plan: TrainingDataPlan?, issue: String?
+        do { plan = try snapshot?.trainingPlan(datasetID: selectedDatasetID, map: selectedMap, settings: configured); issue = nil }
+        catch { plan = nil; issue = error.localizedDescription }
+        let value = FactoryTrainingPlanCache(revision: presentationRevision, datasetID: selectedDatasetID,
+            map: selectedMap, settings: configured, plan: plan, issue: issue)
+        cachedTrainingPlan = value
+        return value
     }
     var canContinueMap: Bool {
         if effectiveStartMode == .exportedModel { return selectedTrainingVersion?.artifact?.weightsPath != nil && selectedTrainingVersion?.settings != nil }
@@ -332,6 +378,7 @@ final class FactoryModel {
             return
         }
         operation?.cancel()
+        originalMapOperation?.cancel()
         saveOperation?.cancel()
         let oldProject = project
         generation = UUID()
@@ -339,6 +386,9 @@ final class FactoryModel {
         project = nil
         snapshot = nil
         selectedImageID = nil
+        selectedMaterialBrowserRowID = nil
+        browserIndex = nil; browserProjection = nil; cachedTrainingPlan = nil
+        previewRevisions = [:]
         selectedDatasetID = ""
         selectedMap = .depth
         trainingStartMode = .checkpoint
@@ -363,6 +413,7 @@ final class FactoryModel {
         exportedPackage = nil
         publishedURL = nil
         events = []
+        latestTrainingMeasurements = nil
         trainingProgress = nil
         isTraining = false; checkpointRequestPending = false; checkpointStatus = nil; lastCheckpointDirectory = nil
         errorMessage = nil
@@ -373,11 +424,11 @@ final class FactoryModel {
         operation = Task {
             if let oldProject { await oldProject.cancelTraining() }
             do {
-                let opened = try LoomProject(sourceFolder: url)
+                let opened = try await Task.detached(priority: .userInitiated) { try LoomProject(sourceFolder: url) }.value
                 let value = try await opened.snapshot()
                 guard current == generation, !Task.isCancelled else { return }
                 project = opened
-                adopt(value, restoreSettings: true)
+                await adopt(value, restoreSettings: true)
                 if rememberSourceFolder { UserDefaults.standard.set(url.path, forKey: "recentSourceFolder") }
                 activityTitle = "Source folder opened"
                 busy = false
@@ -400,7 +451,7 @@ final class FactoryModel {
         do {
             let value = try await project.snapshot()
             guard current == generation, !busy else { return }
-            adopt(value, restoreSettings: false)
+            await adopt(value, restoreSettings: false)
         } catch {
             guard current == generation, !busy else { return }
             invalidateSnapshot(error)
@@ -431,10 +482,25 @@ final class FactoryModel {
         }
     }
 
+    func setMaterialReviewed(imageIDs: [String], verified: Bool) {
+        perform(verified ? "Marking material reviewed" : "Marking material unreviewed") { project in
+            try await project.setMaterialReviewed(imageIDs: imageIDs, verified: verified)
+        }
+    }
+
     func selectVisibleImageIfNeeded() {
-        let members = visibleMaterialFolders.flatMap { $0.resolutions.flatMap(\.images) }
+        let folders = visibleMaterialFolders
+        let members = folders.flatMap { $0.resolutions.flatMap(\.images) }
         guard !members.contains(where: { $0.id == selectedImageID }) else { return }
+        if let row = MaterialBrowserSelection.row(id: selectedMaterialBrowserRowID, in: folders),
+           let replacement = MaterialBrowserSelection.representative(in: row.images) {
+            selectedImageID = replacement.id
+            return
+        }
         selectedImageID = members.first(where: { $0.role == .diffuse && !$0.ignored })?.id ?? members.first?.id
+        selectedMaterialBrowserRowID = folders.first(where: { folder in
+            folder.resolutions.contains { $0.images.contains { $0.id == selectedImageID } }
+        }).map { "material:" + $0.id }
     }
 
     func pairImages(ids: [String]) {
@@ -500,11 +566,29 @@ final class FactoryModel {
         trainingStartMode = mode == .fresh ? .checkpoint : mode
         settings.training.continueLatestWeights = mode != .fresh
         selectedTrainingVersionID = ""
+        if mode != .fresh { restoreSelectedTrainingSettings() }
     }
 
     func continueModelVersion(_ version: ModelVersion, source: FactoryTrainingStartMode) {
+        selectedDatasetID = version.datasetID
+        selectedMap = version.map
         setTrainingStartMode(source)
         selectedTrainingVersionID = version.id
+        restoreSelectedTrainingSettings()
+        runLabel = version.label
+    }
+
+    func restoreSelectedTrainingSettings() {
+        guard continuingTraining, let saved = selectedTrainingVersion?.savedSettings else { return }
+        var restored = saved
+        restored.continueLatestWeights = true
+        settings.training = restored
+    }
+
+    func updateModelVersionMetadata(_ version: ModelVersion, name: String, notes: String) {
+        perform("Saving model name and notes") { project in
+            try await project.updateModelVersionMetadata(runID: version.id, name: name, notes: notes)
+        }
     }
 
     func useModelVersionForExport(_ version: ModelVersion) {
@@ -540,6 +624,21 @@ final class FactoryModel {
         }
     }
 
+    func approveAndUseCoverageModel(artifact: ModelArtifact) {
+        let current = generation
+        perform("Approving model for use") { [weak self] project in
+            let runID = artifact.directory.lastPathComponent
+            if artifact.kind == "classifier" {
+                try await project.selectClassifierVersion(runID: runID)
+            } else if let datasetID = artifact.datasetID, let map = artifact.map {
+                try await project.selectModelVersion(runID: runID, datasetID: datasetID, map: map)
+            } else { throw LoomError("Choose a model belonging to this group and product.") }
+            try await project.setModelApproval(runID: runID, approved: true)
+            guard let self, self.generation == current else { return }
+            self.invalidateExportedPackage()
+        }
+    }
+
     func setModelRequirement(slot: ModelSlot, required: Bool) {
         let current = generation
         perform("Updating model requirements") { [weak self] project in
@@ -559,7 +658,7 @@ final class FactoryModel {
     }
 
     func testCoverageModel(artifact: ModelArtifact) {
-        guard let version = snapshot?.modelVersions.first(where: { $0.directory == artifact.directory }), !busy else { return }
+        guard let version = snapshot?.modelVersions.first(where: { $0.directory == artifact.directory }) else { return }
         selectedDatasetID = version.datasetID; selectedMap = version.map
         showModelTesting(version)
     }
@@ -662,7 +761,6 @@ final class FactoryModel {
     }
 
     func showModelTesting(_ version: ModelVersion? = nil) {
-        guard !busy else { return }
         if let version {
             selectedTestVersionID = version.id
         } else if let version = selectedTestVersion {
@@ -673,7 +771,6 @@ final class FactoryModel {
     }
 
     func chooseModelTestInput() {
-        guard !busy else { return }
         let panel = NSOpenPanel()
         panel.title = "Choose a diffuse image to test"
         panel.message = "Run the saved model on any diffuse image, including a material outside this source folder."
@@ -688,9 +785,25 @@ final class FactoryModel {
     }
 
     func setModelTestInput(_ url: URL) {
-        guard !busy else { return }
         testInputURL = url
         modelTestResult = nil
+        refreshTestOriginalMap()
+    }
+
+    private func refreshTestOriginalMap() {
+        originalMapOperation?.cancel()
+        let input = testInputURL, map = selectedTestVersion?.map
+        let images = snapshot?.images ?? []
+        let current = generation
+        testOriginalMap = ModelTestOriginalMap.resolve(inputURL: nil, map: nil, images: [])
+        guard input != nil, map != nil else { return }
+        originalMapOperation = Task {
+            let value = await Task.detached(priority: .userInitiated) {
+                ModelTestOriginalMap.resolve(inputURL: input, map: map, images: images)
+            }.value
+            guard !Task.isCancelled, generation == current, testInputURL == input, selectedTestVersion?.map == map else { return }
+            testOriginalMap = value
+        }
     }
 
     func testModel() {
@@ -704,28 +817,33 @@ final class FactoryModel {
         perform("Testing \(version.datasetName) · \(version.map.displayName)", clearEvents: true) { [weak self] project in
             let result = try await project.testModel(datasetID: version.datasetID, map: version.map, runID: version.id,
                                                      source: source, inputURL: inputURL, progress: onProgress)
-            guard let self, self.generation == current else { return }
+            guard let self, self.generation == current, self.selectedTestVersion?.id == version.id,
+                  self.testInputURL == inputURL, self.effectiveTestWeightSource == source else { return }
             self.modelTestResult = result
         }
     }
 
-    func saveModelTestOutput() {
+    func saveModelTestOutput(format: ModelTestExportFormat = .float32EXR) {
         guard let result = modelTestResult, !busy else { return }
         let panel = NSSavePanel()
-        panel.title = "Save model output"
-        panel.prompt = "Save Output"
-        panel.allowedContentTypes = [.png]
-        panel.nameFieldStringValue = "\(result.inputURL.deletingPathExtension().lastPathComponent)_\(result.map.rawValue).png"
+        panel.title = "Save \(format.displayName) output"
+        panel.prompt = format == .float32EXR ? "Save EXR" : "Export PNG"
+        panel.allowedContentTypes = [format.contentType]
+        panel.nameFieldStringValue = "\(result.inputURL.deletingPathExtension().lastPathComponent)_\(result.map.rawValue).\(format.fileExtension)"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            try ModelTestOutputExport.save(result, to: url, sourceImageURLs: snapshot?.images.map(\.url) ?? [])
-        } catch { errorMessage = error.localizedDescription }
+        let sourceURLs = snapshot?.images.map(\.url) ?? []
+        perform("Saving model test output") { _ in
+            try await Task.detached(priority: .userInitiated) {
+                try ModelTestOutputExport.save(result, to: url, sourceImageURLs: sourceURLs, format: format)
+            }.value
+        }
     }
 
     private func resetModelTestSelection() {
         selectedTestVersionID = ""
         testWeightSource = nil
         modelTestResult = nil
+        refreshTestOriginalMap()
     }
 
     private func invalidateExportedPackage() {
@@ -870,7 +988,7 @@ final class FactoryModel {
                 self.checkpointStatus = "Saved step \(receipt.completedUpdates.formatted()) at \(Date().formatted(date: .omitted, time: .shortened))\(result)"
                 self.checkpointRequestPending = false
                 if let value = try? await project.snapshot(), self.generation == current {
-                    self.adopt(value, restoreSettings: false)
+                    await self.adopt(value, restoreSettings: false)
                 }
                 return true
             } catch {
@@ -913,13 +1031,15 @@ final class FactoryModel {
         guard let project, !busy else { return }
         saveOperation?.cancel()
         let current = generation
+        progressDeliverySerial &+= 1
+        adoptionSerial &+= 1
         busy = true
         isTraining = training
         checkpointRequestPending = false; checkpointStatus = nil; lastCheckpointDirectory = nil
         activityTitle = title
         progress = nil
         errorMessage = nil
-        if clearEvents { events = [] }
+        if clearEvents { events = []; latestTrainingMeasurements = nil }
         trainingProgress = nil
         operation = Task {
             do {
@@ -929,7 +1049,7 @@ final class FactoryModel {
                 do {
                     let value = try await project.snapshot()
                     guard generation == current else { return }
-                    adopt(value, restoreSettings: false)
+                    await adopt(value, restoreSettings: false)
                 } catch {
                     guard generation == current else { return }
                     sourceIssue = "The action completed, but the source folder could not be refreshed: \(error.localizedDescription)"
@@ -949,10 +1069,10 @@ final class FactoryModel {
                         checkpointStatus = status.replacingOccurrences(of: "; stopping…", with: "; training stopped")
                     }
                     progress = nil
-                    if let value = try? await project.snapshot() { adopt(value, restoreSettings: false) }
+                    if let value = try? await project.snapshot() { await adopt(value, restoreSettings: false) }
                 } else {
                     let failure = error
-                    do { adopt(try await project.snapshot(), restoreSettings: false) }
+                    do { await adopt(try await project.snapshot(), restoreSettings: false) }
                     catch { invalidateSnapshot(error) }
                     fail(failure)
                 }
@@ -962,54 +1082,64 @@ final class FactoryModel {
 
     private func progressHandler() -> @Sendable (TrainingEvent) -> Void {
         let current = generation
+        let expectedSerial = progressDeliverySerial &+ 1
+        let buffer = FactoryProgressBuffer()
         return { [weak self] event in
-            Task { @MainActor [weak self] in
-                guard let self, self.generation == current else { return }
-                self.events.append(event)
-                if let value = event.trainingProgress { self.trainingProgress = value }
+            buffer.append(event) { [weak self] batch, measurements in
+                guard let self, self.generation == current, self.progressDeliverySerial == expectedSerial else { return }
+                self.events.append(contentsOf: batch)
+                self.latestTrainingMeasurements = measurements
+                if let value = measurements?.trainingProgress { self.trainingProgress = value }
                 if self.events.count > 300 { self.events.removeFirst(self.events.count - 300) }
-                if self.operation?.isCancelled != true { self.activityTitle = event.message }
-                if let progress = event.progress { self.progress = progress }
+                if self.busy, self.operation?.isCancelled != true, let latest = batch.last { self.activityTitle = latest.message }
+                if self.busy, let progress = measurements?.progress { self.progress = progress }
             }
         }
     }
 
-    private func adopt(_ value: ProjectSnapshot, restoreSettings: Bool) {
+    private func adopt(_ value: ProjectSnapshot, restoreSettings: Bool) async {
+        let current = generation
+        adoptionSerial &+= 1
+        let expectedAdoption = adoptionSerial
+        let imagesChanged = snapshot?.images != value.images || snapshot?.sourceURL != value.sourceURL
+        let oldIndex = browserIndex
+        let existingExport = exportedPackage
+        let prepared = await Task.detached(priority: .userInitiated) {
+            (imagesChanged ? FactoryBrowserIndex(snapshot: value) : oldIndex,
+             FactorySnapshotFiles(snapshot: value, existingExport: existingExport))
+        }.value
+        guard generation == current, adoptionSerial == expectedAdoption else { return }
         let previousModels = Set(snapshot?.modelVersions.filter { $0.isActive }.map(\.id) ?? [])
         let currentModels = Set(value.modelVersions.filter { $0.isActive }.map(\.id))
         if snapshot != nil, previousModels != currentModels || snapshot?.modelCoverage != value.modelCoverage { invalidateExportedPackage() }
-        comparisonImageRevisions = Dictionary(uniqueKeysWithValues: value.images.map { image in
-            let attributes = try? image.url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
-            return (image.id, "\(attributes?.contentModificationDate?.timeIntervalSince1970 ?? 0)|\(attributes?.fileSize ?? 0)")
-        })
-        snapshot = value
+        comparisonImageRevisions = prepared.1.imageRevisions
+        if previewRevisions != prepared.1.imageRevisions { previewRevisions = prepared.1.imageRevisions }
+        if imagesChanged {
+            browserIndex = prepared.0
+            presentationRevision += 1
+            browserProjection = nil
+            cachedTrainingPlan = nil
+        }
+        // An unchanged poll must not rebuild the mounted browser and previews.
+        if snapshot?.sourceURL != value.sourceURL || snapshot?.settings != value.settings ||
+           imagesChanged || snapshot?.datasets != value.datasets || snapshot?.artifacts != value.artifacts ||
+           snapshot?.checkpoints != value.checkpoints || snapshot?.modelVersions != value.modelVersions ||
+           snapshot?.modelCoverage != value.modelCoverage {
+            snapshot = value
+            refreshTestOriginalMap()
+        }
         sourceIssue = nil
         if restoreSettings { settings = value.settings }
         if !selectedDatasetID.isEmpty, selectedDatasetID != "unassigned",
            !value.datasets.contains(where: { $0.id == selectedDatasetID }) { selectedDatasetID = "" }
         selectVisibleImageIfNeeded()
-        if let url = exportedPackage, !FileManager.default.fileExists(atPath: url.path) { exportedPackage = nil }
+        if exportedPackage == existingExport, !prepared.1.existingExportIsPresent { exportedPackage = nil }
         let chosenFilesNeedAttention = value.modelCoverage.contains { entry in
             entry.status == .unavailable || entry.status == .stale ||
                 entry.candidates.first(where: { $0.id == entry.effectiveRunID })?.approvalIsStale == true
         }
         if exportedPackage == nil && !packageNeedsExport && !chosenFilesNeedAttention {
-            let exports = value.sourceURL.appendingPathComponent(".loom-factory/exports", isDirectory: true)
-            let selectionDate = ["model-selection.json", "model-management.json"].compactMap { name in
-                try? value.sourceURL.appendingPathComponent(".loom-factory/\(name)")
-                    .resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
-            }.max() ?? .distantPast
-            exportedPackage = (try? FileManager.default.contentsOfDirectory(at: exports,
-                includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]))?
-                .filter {
-                    $0.pathExtension == "textureloom" &&
-                    ((try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) >= selectionDate
-                }
-                .sorted {
-                    let left = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                    let right = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                    return left > right
-                }.first
+            exportedPackage = prepared.1.exportedPackage
         }
     }
 
@@ -1024,6 +1154,8 @@ final class FactoryModel {
     private func invalidateSnapshot(_ error: Error) {
         snapshot = nil
         selectedImageID = nil
+        selectedMaterialBrowserRowID = nil
+        browserIndex = nil; browserProjection = nil; cachedTrainingPlan = nil
         sourceIssue = error.localizedDescription
     }
 

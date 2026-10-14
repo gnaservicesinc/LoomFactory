@@ -7,6 +7,29 @@ struct TrainingPair: Sendable {
 }
 
 enum TrainingPairSelector {
+    static func select(images: [SourceImage], dataset: String, map: MapRole, settings: TrainingSettings) throws -> [TrainingPair] {
+        if let issue = settings.validationIssue { throw LoomError(issue) }
+        let pairs = try select(images: images, dataset: dataset, map: map, size: settings.imageSize)
+        return selectSourceResolutions(pairs: pairs, levels: settings.sourceResolutionLevels)
+    }
+
+    static func selectSourceResolutions(pairs: [TrainingPair], levels: Int) -> [TrainingPair] {
+        guard levels > 0 else { return pairs }
+        let groups = Dictionary(grouping: pairs) { $0.input.url.deletingLastPathComponent().standardizedFileURL }
+        let factor = 1 << (min(levels, 3) - 1)
+        let maximumDimensions = groups.mapValues { group in
+            let base = group.map { min($0.input.width, $0.input.height) }.min() ?? 0
+            let (maximum, overflow) = base.multipliedReportingOverflow(by: factor)
+            return overflow ? Int.max : maximum
+        }
+        // This only chooses originals already present in the current scan.
+        // The trainer takes exact crops from those originals at imageSize.
+        return pairs.filter { pair in
+            let folder = pair.input.url.deletingLastPathComponent().standardizedFileURL
+            return min(pair.input.width, pair.input.height) <= (maximumDimensions[folder] ?? 0)
+        }
+    }
+
     static func select(images: [SourceImage], dataset: String, map: MapRole, size: Int) throws -> [TrainingPair] {
         let members = images.filter { $0.category == dataset && !$0.ignored }
         let families = Dictionary(grouping: members, by: \.pairingKey)

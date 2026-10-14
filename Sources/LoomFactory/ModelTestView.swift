@@ -1,9 +1,15 @@
 import LoomCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ModelTestView: View {
     @Bindable var model: FactoryModel
     @State private var imageZoom: ComparisonImageZoom = .fit
+    @State private var choosingSource = false
+
+    private var originalMap: ModelTestOriginalMap {
+        model.testOriginalMap
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: FactoryStyle.spacing) {
@@ -29,26 +35,46 @@ struct ModelTestView: View {
             }
             if let result = model.modelTestResult {
                 ModelTestResultView(result: result, imageZoom: $imageZoom,
-                                    saveOutput: { model.saveModelTestOutput() },
+                                    saveOutput: { model.saveModelTestOutput(format: .float32EXR) },
+                                    savePNGPreview: { model.saveModelTestOutput(format: .png16) },
                                     showOutput: { model.reveal(result.outputURL) },
-                                    showFolder: { model.reveal(result.directory) })
+                                    showFolder: { model.reveal(result.directory) },
+                                    originalMap: originalMap,
+                                    originalMapRevision: originalMap.image.map(model.imagePreviewRevision))
             } else {
                 FactoryPanel("Preview") {
                     HStack(alignment: .top, spacing: 18) {
                         if let input = model.testInputURL {
                             VStack(alignment: .leading, spacing: 7) {
                                 Text("Diffuse input").font(.subheadline.weight(.medium))
-                                FactoryImage(url: input, revision: input.path, applyOrientationTransform: false).frame(height: 350)
+                                FactoryImage(url: input, revision: inputRevision(input), applyOrientationTransform: false).frame(height: 350)
                                     .clipShape(RoundedRectangle(cornerRadius: 7))
                             }.frame(maxWidth: .infinity)
                         }
-                        ContentUnavailableView("Your model output appears here", systemImage: "photo.on.rectangle",
+                        if let target = originalMap.image {
+                            VStack(alignment: .leading, spacing: 7) {
+                                Text("Original \(target.role.displayName.lowercased()) map").font(.subheadline.weight(.medium))
+                                FactoryImage(url: target.url, revision: model.imagePreviewRevision(target), applyOrientationTransform: false).frame(height: 350)
+                                    .clipShape(RoundedRectangle(cornerRadius: 7))
+                                Text(target.url.lastPathComponent).font(.caption).foregroundStyle(.secondary)
+                            }.frame(maxWidth: .infinity).accessibilityIdentifier("modelTest.originalMapPreview")
+                        } else {
+                            ContentUnavailableView("Your model output appears here", systemImage: "photo.on.rectangle",
                                                description: Text("Choose one saved run and a diffuse image, then run the model."))
                             .frame(maxWidth: .infinity, minHeight: 350)
+                        }
                     }
+                    if let issue = originalMap.issue { Text(issue).font(.caption).foregroundStyle(.secondary) }
                 }
             }
         }.accessibilityIdentifier("modelTest.workspace")
+            .sheet(isPresented: $choosingSource) {
+                ModelTestSourcePicker(images: model.testDiffuseImages) { model.setModelTestInput($0.url) }
+            }
+    }
+
+    private func inputRevision(_ url: URL) -> String {
+        model.snapshot?.images.first { $0.url == url }.map(model.imagePreviewRevision) ?? url.path
     }
 
     private var modelSelection: some View {
@@ -81,16 +107,16 @@ struct ModelTestView: View {
             }
             if let version = model.selectedTestVersion {
                 HStack(spacing: 16) {
-                    if let artifact = version.artifact {
-                        Text("Exported model: \(artifact.epochs.formatted()) completed epochs")
+                    if version.artifact != nil {
+                        Text("Exported model: \(version.exportedEpochsCompleted.formatted()) completed epochs")
                     }
                     if let checkpoint = version.checkpoint {
-                        Text("Checkpoint: \(checkpoint.epochsCompleted.formatted()) completed epochs")
+                        Text("Checkpoint: \(checkpoint.totalEpochsCompleted.formatted()) completed epochs")
                     }
                 }.font(.caption).foregroundStyle(.secondary)
                     .accessibilityIdentifier("modelTest.savedEpochs")
             }
-        }.disabled(model.busy)
+        }
     }
 
     private var inputSelection: some View {
@@ -100,20 +126,10 @@ struct ModelTestView: View {
                 Button("Choose Image…", systemImage: "photo.badge.plus") { model.chooseModelTestInput() }
                     .accessibilityIdentifier("modelTest.chooseImage")
                 if !model.testDiffuseImages.isEmpty {
-                    Picker("Use an image from this dataset", selection: Binding(
-                        get: { model.testDiffuseImages.first { $0.url == model.testInputURL }?.id ?? "" },
-                        set: { id in
-                            if let image = model.testDiffuseImages.first(where: { $0.id == id }) { model.setModelTestInput(image.url) }
-                        }
-                    )) {
-                        Text("Or use a source diffuse…").tag("")
-                        ForEach(model.testDiffuseImages) { image in
-                            Text("\(image.url.deletingLastPathComponent().lastPathComponent) / \(image.url.lastPathComponent)")
-                                .tag(image.id)
-                        }
-                    }.labelsHidden().frame(maxWidth: 640).accessibilityIdentifier("modelTest.sourceImage")
+                    Button("Use Source Image…", systemImage: "folder") { choosingSource = true }
+                        .accessibilityIdentifier("modelTest.sourceImage")
                 }
-            }.disabled(model.busy)
+            }
             if let input = model.testInputURL {
                 Text(input.path).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                     .textSelection(.enabled).accessibilityIdentifier("modelTest.inputPath")
@@ -124,15 +140,39 @@ struct ModelTestView: View {
     }
 }
 
+enum ModelTestExportFormat: Equatable {
+    case float32EXR, png16
+    var fileExtension: String { self == .float32EXR ? "exr" : "png" }
+    var displayName: String { self == .float32EXR ? "32-bit float EXR" : "16-bit PNG" }
+    var contentType: UTType {
+        self == .float32EXR ? (UTType(filenameExtension: "exr") ?? UTType(importedAs: "com.ilm.openexr-image")) : .png
+    }
+}
+
 enum ModelTestOutputExport {
-    static func save(_ result: ModelTestResult, to destination: URL, sourceImageURLs: [URL]) throws {
+    static func save(_ result: ModelTestResult, to destination: URL, sourceImageURLs: [URL],
+                     format: ModelTestExportFormat = .float32EXR) throws {
         let resolved = destination.standardizedFileURL.resolvingSymlinksInPath()
         let originals = [result.inputURL] + sourceImageURLs
         guard !originals.contains(where: { $0.standardizedFileURL.resolvingSymlinksInPath() == resolved }) else {
             throw LoomError("Choose another output filename. Saving here would overwrite an original source image.")
         }
-        guard resolved != result.outputURL.standardizedFileURL.resolvingSymlinksInPath() else { return }
-        try Data(contentsOf: result.outputURL, options: .mappedIfSafe).write(to: destination, options: .atomic)
+        let source = format == .float32EXR ? result.outputURL : result.previewURL
+        guard source.pathExtension.lowercased() == format.fileExtension else {
+            throw LoomError(format == .float32EXR
+                ? "This saved result has no 32-bit float EXR. Run the model again to create one."
+                : "This saved result has no PNG preview to export.")
+        }
+        guard destination.pathExtension.lowercased() == format.fileExtension else {
+            throw LoomError("Choose an .\(format.fileExtension) filename for \(format.displayName).")
+        }
+        let resolvedSource = source.standardizedFileURL.resolvingSymlinksInPath()
+        guard resolved != resolvedSource else { return }
+        let resultFiles = [result.outputURL, result.previewURL].map { $0.standardizedFileURL.resolvingSymlinksInPath() }
+        guard !resultFiles.contains(resolved) else {
+            throw LoomError("Choose another output filename. Saving here would replace another saved result format.")
+        }
+        try Data(contentsOf: source, options: .mappedIfSafe).write(to: destination, options: .atomic)
     }
 }
 
@@ -140,43 +180,72 @@ struct ModelTestResultView: View {
     let result: ModelTestResult
     @Binding var imageZoom: ComparisonImageZoom
     let saveOutput: () -> Void
+    let savePNGPreview: (() -> Void)?
     let showOutput: () -> Void
     let showFolder: () -> Void
+    let originalMap: ModelTestOriginalMap
+    let originalMapRevision: String?
+
+    init(result: ModelTestResult, imageZoom: Binding<ComparisonImageZoom>, saveOutput: @escaping () -> Void,
+         savePNGPreview: (() -> Void)? = nil, showOutput: @escaping () -> Void, showFolder: @escaping () -> Void,
+         originalMap: ModelTestOriginalMap = .resolve(inputURL: nil, map: nil, images: []),
+         originalMapRevision: String? = nil) {
+        self.result = result; self._imageZoom = imageZoom
+        self.saveOutput = saveOutput; self.savePNGPreview = savePNGPreview
+        self.showOutput = showOutput; self.showFolder = showFolder
+        self.originalMap = originalMap
+        self.originalMapRevision = originalMapRevision
+    }
 
     var body: some View {
-        FactoryPanel("\(result.map.displayName) output", subtitle: "\(result.width.formatted()) × \(result.height.formatted()) pixels · 16-bit PNG") {
+        FactoryPanel("\(result.map.displayName) output", subtitle: "\(result.width.formatted()) × \(result.height.formatted()) pixels · \(result.outputURL.pathExtension.lowercased() == "exr" ? "32-bit float EXR" : "PNG output")") {
             HStack {
                 Picker("Image zoom", selection: $imageZoom) {
                     ForEach(ComparisonImageZoom.allCases) { Text($0.displayName).tag($0) }
                 }.pickerStyle(.segmented).frame(width: 260).accessibilityIdentifier("modelTest.zoom")
                 Spacer()
-                Button("Save Output…", systemImage: "square.and.arrow.up", action: saveOutput)
+                Button("Save 32-bit EXR…", systemImage: "square.and.arrow.up", action: saveOutput)
                     .accessibilityIdentifier("modelTest.saveOutput")
+                if let savePNGPreview {
+                    Button("Export 16-bit PNG…", action: savePNGPreview)
+                        .accessibilityIdentifier("modelTest.savePNGPreview")
+                }
                 Button("Show Output", action: showOutput)
                 Button("Show Test Folder", action: showFolder)
             }
             HStack(alignment: .top, spacing: 18) {
-                imagePanel("Diffuse input", url: result.inputURL)
-                imagePanel("Generated \(result.map.displayName.lowercased())", url: result.outputURL)
+                if let target = originalMap.image {
+                    imagePanel("Original \(result.map.displayName.lowercased()) map", url: target.url, revision: originalMapRevision)
+                        .accessibilityIdentifier("modelTest.originalMap")
+                } else { imagePanel("Diffuse input", url: result.inputURL) }
+                imagePanel("Generated \(result.map.displayName.lowercased())", url: result.previewURL)
             }
+            if let target = originalMap.image {
+                Text("Original: \(target.url.path)\(target.normalConvention.map { " · " + $0 + " normals" } ?? "")")
+                    .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                DisclosureGroup("Diffuse input") { imagePanel("Original diffuse input", url: result.inputURL) }
+            }
+            if let issue = originalMap.issue { Text(issue).font(.caption).foregroundStyle(.secondary) }
+            Text("The display uses a PNG preview. Save the EXR to keep the model's 32-bit floating-point output; exporting PNG reduces it to 16-bit integer values.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Text("Run \(result.runID.prefix(8)) · \(result.source == .model ? "Exported model" : "Saved checkpoint") · \(result.tileCount.formatted()) native \(result.tileSize) px tiles")
                 .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             Text(result.note).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }.accessibilityIdentifier("modelTest.result")
     }
 
-    private func imagePanel(_ title: String, url: URL) -> some View {
+    private func imagePanel(_ title: String, url: URL, revision: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             Text(title).font(.subheadline.weight(.medium))
             if let scale = imageZoom.scale {
                 ScrollView([.horizontal, .vertical]) {
-                    FactoryImage(url: url, revision: result.directory.path,
+                    FactoryImage(url: url, revision: revision ?? result.directory.path,
                                  maximumPixels: max(result.width, result.height), interpolation: .none,
                                  applyOrientationTransform: false)
                         .frame(width: CGFloat(result.width) * scale, height: CGFloat(result.height) * scale)
                 }.frame(height: 480).clipShape(RoundedRectangle(cornerRadius: 7))
             } else {
-                FactoryImage(url: url, revision: result.directory.path, maximumPixels: 1600, applyOrientationTransform: false)
+                FactoryImage(url: url, revision: revision ?? result.directory.path, maximumPixels: 1600, applyOrientationTransform: false)
                     .frame(height: 480).clipShape(RoundedRectangle(cornerRadius: 7))
             }
         }.frame(maxWidth: .infinity, alignment: .leading)

@@ -39,6 +39,12 @@ case "$factory_bootstrap" in
         exit 1
         ;;
 esac
+factory_map_classifier="$factory_root/Resources/MatTypeClassifier.mlmodel"
+if [[ ! -f "$factory_map_classifier" ]]; then
+    printf 'Map-type classifier asset missing: %s\n' "$factory_map_classifier" >&2
+    exit 1
+fi
+/usr/bin/xcrun coremlcompiler compile "$factory_map_classifier" "$factory_stage/Contents/Resources"
 "$factory_root/Scripts/verify-native-bundle.sh" "$factory_stage"
 codesign --force --sign - --options runtime "$factory_stage"
 codesign --verify --strict --verbose=2 "$factory_stage"

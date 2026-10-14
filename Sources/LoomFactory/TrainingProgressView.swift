@@ -63,6 +63,17 @@ struct TrainingProgressView: View {
                         .accessibilityLabel("All training steps progress")
                 }
             }
+            if let priorSteps = progress.priorSteps, priorSteps > 0 {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Previous training included").font(.caption.weight(.semibold))
+                    metric("Completed epochs", (progress.priorEpochs ?? 0).formatted(), identifier: "priorEpochs")
+                    metric("Optimizer updates", priorSteps.formatted(), identifier: "priorSteps")
+                    if let duration = progress.priorElapsedSeconds {
+                        metric("Training elapsed", TrainingProgressPresentation.duration(duration), identifier: "priorElapsed")
+                    }
+                }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(FactoryStyle.accent.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+            }
             Divider()
             VStack(alignment: .leading, spacing: 5) {
                 metric("Last cycle", values.lastCycle, identifier: "lastCycle")
@@ -72,7 +83,7 @@ struct TrainingProgressView: View {
                 if progress.epoch > 0 {
                     metric("Epoch elapsed", values.epochElapsed, identifier: "epochElapsed")
                 }
-                metric("Run elapsed", values.elapsed, identifier: "elapsed")
+                metric(progress.priorSteps == nil ? "Run elapsed" : "Total training elapsed", values.elapsed, identifier: "elapsed")
             }
             if let note = values.estimateScopeNote, isRunning {
                 Text(note)

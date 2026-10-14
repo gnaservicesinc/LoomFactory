@@ -53,6 +53,9 @@ public enum TrainingDevice: String, Codable, CaseIterable, Sendable, Identifiabl
 
 public struct TrainingSettings: Codable, Sendable, Equatable {
     public var imageSize: Int
+    /// One selects each material's smallest usable source grid; two and three
+    /// also allow grids up to 2x and 4x that size. Zero keeps all source grids.
+    public var sourceResolutionLevels: Int
     public var epochs: Int
     public var batchSize: Int
     public var learningRate: Double
@@ -90,7 +93,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     public var exportBestWeights: Bool
     public var checkpointEveryEpochs: Int
 
-    public init(imageSize: Int = 1024, epochs: Int = 10, batchSize: Int = 1,
+    public init(imageSize: Int = 1024, sourceResolutionLevels: Int = 1, epochs: Int = 10, batchSize: Int = 1,
                 learningRate: Double = 0.001, shuffleEachEpoch: Bool = true,
                 flipCrops: Bool = false, rotateCrops: Bool = false,
                 exaggerateFeatures: Bool = false, seed: Int = 0, modelWidth: Int = 38,
@@ -107,7 +110,8 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
                 exportBestWeights: Bool = true, checkpointEveryEpochs: Int = 1,
                 modelArchitecture: String = NativeArchitecture.pyramidIdentifier,
                 scalarLoss: NativeScalarLoss = .logitCrossEntropyV2) {
-        self.imageSize = imageSize; self.epochs = epochs; self.batchSize = batchSize
+        self.imageSize = imageSize; self.sourceResolutionLevels = sourceResolutionLevels
+        self.epochs = epochs; self.batchSize = batchSize
         self.learningRate = learningRate; self.shuffleEachEpoch = shuffleEachEpoch
         self.flipCrops = flipCrops; self.rotateCrops = rotateCrops
         self.exaggerateFeatures = exaggerateFeatures; self.seed = seed; self.modelWidth = modelWidth
@@ -135,6 +139,10 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
         guard pairCount > 0, effectiveBatchSize > 0 else { return 0 }
         return (pairCount - 1) / effectiveBatchSize + 1
     }
+    public func batchesPerEpoch(pairCount: Int) -> Int {
+        guard pairCount > 0, (1...64).contains(batchSize) else { return 0 }
+        return (pairCount - 1) / batchSize + 1
+    }
     public func parameterCount(map: MapRole) -> Int {
         guard (8...256).contains(modelWidth), (1...12).contains(modelBlocks), MapRole.targets.contains(map) else { return 0 }
         return (try? NativeArchitecture(mapKind: map.rawValue, width: modelWidth, blocks: modelBlocks,
@@ -158,6 +166,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     }
     public var validationIssue: String? {
         if !(32...8192).contains(imageSize) { return "Training dimensions must be between 32 and 8,192 pixels." }
+        if !(0...3).contains(sourceResolutionLevels) { return "Source resolution levels must be one to three, or all available." }
         if !(1...100_000).contains(epochs) { return "Epochs must be between 1 and 100,000." }
         if !(1...64).contains(batchSize) { return "Batch size must be between 1 and 64." }
         if !learningRate.isFinite || !(0 < learningRate && learningRate <= 1) { return "Learning rate must be greater than zero and at most one." }
@@ -186,7 +195,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case imageSize, epochs, batchSize, learningRate, shuffleEachEpoch, flipCrops, rotateCrops, exaggerateFeatures, seed, modelWidth, continueLatestWeights
+        case imageSize, sourceResolutionLevels, epochs, batchSize, learningRate, shuffleEachEpoch, flipCrops, rotateCrops, exaggerateFeatures, seed, modelWidth, continueLatestWeights
         case modelArchitecture, scalarLoss, modelBlocks, optimizer, weightDecay, beta1, beta2, momentum, gradientAccumulationSteps, gradientClipNorm
         case gradientClipPolicy, gradientClipWarmupStartNorm, gradientClipWarmupUpdates
         case learningRateSchedule, warmupEpochs, minimumLearningRateRatio, cropRefresh, augmentationRefresh, device
@@ -196,6 +205,9 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = TrainingSettings()
         imageSize = try c.decodeIfPresent(Int.self, forKey: .imageSize) ?? d.imageSize
+        // Earlier projects trained every eligible physical source resolution.
+        // Preserve that choice while new projects start with the base grid.
+        sourceResolutionLevels = try c.decodeIfPresent(Int.self, forKey: .sourceResolutionLevels) ?? 0
         epochs = try c.decodeIfPresent(Int.self, forKey: .epochs) ?? d.epochs
         batchSize = try c.decodeIfPresent(Int.self, forKey: .batchSize) ?? d.batchSize
         learningRate = try c.decodeIfPresent(Double.self, forKey: .learningRate) ?? d.learningRate

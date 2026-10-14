@@ -66,12 +66,54 @@ struct TrainingPanelTests {
         #expect(model.settings.training.earlyStoppingPatience == 2)
         #expect(!model.canTrain)
         #expect(model.trainingOptionsIssue == "Enable held-out validation to use early stopping.")
+        #expect(model.selectedDatasetSourceCounts.folders == 2)
+        #expect(model.selectedDatasetSourceCounts.images == 6)
         try await render(model, name: "training-controls-recover-early-stopping.png")
         model.settings.training.earlyStoppingPatience = 0
         #expect(model.trainingOptionsIssue == nil)
         #expect(model.canTrain)
         #expect(model.trainingPlan?.trainingPairCount == 2)
         #expect(model.trainingPlan?.validationPairCount == 0)
+    }
+
+    @Test @MainActor
+    func sourceLevelsChangeTheRunCountsWithoutFollowingBrowserFilters() async throws {
+        let fixture = try TrainingPanelFixture(resolutions: [256, 512, 1024])
+        defer { fixture.remove() }
+        let model = FactoryModel(rememberSourceFolder: false)
+        try await load(model, source: fixture.source)
+        model.selectedDatasetID = try #require(model.snapshot?.datasets.first?.id)
+        configureFullTrainingOptions(model)
+        model.settings.training.sourceResolutionLevels = 2
+        let twoLevels = try #require(model.trainingPlan)
+        #expect(twoLevels.sourceMaterialCount == 2)
+        #expect(twoLevels.sourceImageCount == 18)
+        #expect(twoLevels.eligiblePairCount == 6)
+        #expect(twoLevels.excludedPairCount == 2)
+        #expect(twoLevels.trainingPairCount == 2)
+        #expect(twoLevels.validationPairCount == 2)
+        #expect(twoLevels.trainingSampleVisits == 8)
+        #expect(twoLevels.validationSampleVisits == 8)
+        #expect(twoLevels.totalBatches == 4)
+        #expect(twoLevels.totalOptimizerUpdates == 4)
+        try await render(model, name: "training-source-levels-two.png")
+        model.settings.training.sourceResolutionLevels = 3
+        model.imageSearch = "no matching source"
+        #expect(model.visibleImages.isEmpty)
+        let threeLevels = try #require(model.trainingPlan)
+        #expect(threeLevels.sourceMaterialCount == 2)
+        #expect(threeLevels.sourceImageCount == 18)
+        #expect(threeLevels.totalPairCount == 6)
+        #expect(threeLevels.trainingSampleVisits == 12)
+        #expect(threeLevels.totalBatches == 8)
+        #expect(threeLevels.totalOptimizerUpdates == 4)
+        try await render(model, name: "training-source-levels-three.png")
+        model.settings.training.imageSize = 512
+        model.settings.training.sourceResolutionLevels = 1
+        let largerCrop = try #require(model.trainingPlan)
+        #expect(largerCrop.totalPairCount == 2)
+        #expect(largerCrop.resolutions.first { $0.width == 256 }?.eligiblePairCount == 0)
+        #expect(largerCrop.resolutions.first { $0.width == 512 }?.totalPairCount == 2)
     }
 
     @Test @MainActor
@@ -92,10 +134,11 @@ struct TrainingPanelTests {
         #expect(restored.settings.training.augmentationRefresh == .perEpoch)
         #expect(restored.settings.training.learningRateSchedule == .cosine)
         #expect(restored.settings.training.exportBestWeights)
+        #expect(restored.settings.training.sourceResolutionLevels == 2)
     }
 
     @Test @MainActor
-    func continuingCancelledWeightsShowsSavedArchitectureAndKeepsNewOptimizerOptions() async throws {
+    func loadingCheckpointRestoresEverySavedSettingAndAllowsExplicitEdits() async throws {
         let fixture = try TrainingPanelFixture()
         defer { fixture.remove() }
         let model = FactoryModel(rememberSourceFolder: false)
@@ -110,7 +153,13 @@ struct TrainingPanelTests {
             "kind": "map", "dataset_id": dataset.id, "map": "depth",
             "architecture": "loom-factory-material-residual-v1",
             "architecture_config": ["id": "loom-factory-material-residual-v1", "width": 24, "blocks": 2],
-            "settings": ["image_size": 256, "exaggerate_features": true],
+            "settings": ["image_size": 256, "exaggerate_features": true,
+                "optimizer": "lion", "learning_rate": 0.0002, "epochs": 15, "batch_size": 2,
+                "gradient_accumulation_steps": 3, "flip_crops": true, "rotate_crops": true,
+                "crop_refresh": "per_run", "augmentation_refresh": "per_sample", "source_resolution_levels": 2,
+                "validation_fraction": 0.5, "validation_seed": 11, "seed": 7,
+                "lr_schedule": "cosine", "warmup_epochs": 1, "minimum_lr_ratio": 0.2,
+                "early_stopping_patience": 2, "checkpoint_every_epochs": 3],
             "epochs_completed": 3, "status": "cancelled"
         ]
         try JSONSerialization.data(withJSONObject: checkpoint).write(to: directory.appendingPathComponent("checkpoint.json"))
@@ -123,18 +172,38 @@ struct TrainingPanelTests {
         model.settings.training.optimizer = .sgd
         model.settings.training.learningRate = 0.03
         model.settings.training.gradientAccumulationSteps = 4
-        model.settings.training.continueLatestWeights = true
+        let version = try #require(model.selectedModelVersions.first)
+        model.continueModelVersion(version, source: .checkpoint)
         #expect(model.canContinueMap)
         #expect(model.canTrain)
         #expect(model.effectiveTrainingSettings.imageSize == 256)
         #expect(model.effectiveTrainingSettings.modelWidth == 24)
         #expect(model.effectiveTrainingSettings.modelBlocks == 2)
         #expect(model.effectiveTrainingSettings.exaggerateFeatures)
-        #expect(model.effectiveTrainingSettings.optimizer == .sgd)
-        #expect(model.effectiveTrainingSettings.learningRate == 0.03)
-        #expect(model.effectiveTrainingSettings.gradientAccumulationSteps == 4)
+        #expect(model.effectiveTrainingSettings.optimizer == .lion)
+        #expect(model.effectiveTrainingSettings.learningRate == 0.0002)
+        #expect(model.effectiveTrainingSettings.epochs == 15)
+        #expect(model.effectiveTrainingSettings.batchSize == 2)
+        #expect(model.effectiveTrainingSettings.gradientAccumulationSteps == 3)
+        #expect(model.effectiveTrainingSettings.flipCrops && model.effectiveTrainingSettings.rotateCrops)
+        #expect(model.effectiveTrainingSettings.cropRefresh == .perRun)
+        #expect(model.effectiveTrainingSettings.augmentationRefresh == .perSample)
+        #expect(model.effectiveTrainingSettings.validationFraction == 0.5)
+        #expect(model.effectiveTrainingSettings.validationSeed == 11)
+        #expect(model.effectiveTrainingSettings.seed == 7)
+        #expect(model.effectiveTrainingSettings.learningRateSchedule == .cosine)
+        #expect(model.effectiveTrainingSettings.warmupEpochs == 1)
+        #expect(model.effectiveTrainingSettings.minimumLearningRateRatio == 0.2)
+        #expect(model.effectiveTrainingSettings.checkpointEveryEpochs == 3)
         #expect(model.selectedCheckpoint?.epochsCompleted == 3)
         try await render(model, name: "training-controls-continue-cancelled.png")
+        model.settings.training.learningRate = 0.00005
+        model.settings.training.epochs = 20
+        #expect(model.effectiveTrainingSettings.learningRate == 0.00005)
+        #expect(model.effectiveTrainingSettings.epochs == 20)
+        model.restoreSelectedTrainingSettings()
+        #expect(model.settings.training.learningRate == 0.0002)
+        #expect(model.settings.training.epochs == 15)
     }
 
     @Test
@@ -158,6 +227,7 @@ struct TrainingPanelTests {
 
     @MainActor private func configureFullTrainingOptions(_ model: FactoryModel) {
         model.settings.training.imageSize = 256
+        model.settings.training.sourceResolutionLevels = 2
         model.settings.training.epochs = 4
         model.settings.training.modelWidth = 84
         model.settings.training.modelBlocks = 4
@@ -230,14 +300,14 @@ struct TrainingPanelTests {
 
 private struct TrainingPanelFixture {
     let source: URL
-    init(reviewed: Bool = true) throws {
+    init(reviewed: Bool = true, resolutions: [Int] = [256]) throws {
         source = FileManager.default.temporaryDirectory.appendingPathComponent("loom-training-ui-\(UUID().uuidString)", isDirectory: true)
         for material in ["brick_wall_a", "brick_wall_b"] {
             let folder = source.appendingPathComponent(material, isDirectory: true)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            for (suffix, role) in [("diff", MapRole.diffuse), ("disp", MapRole.depth), ("nor_gl", MapRole.normal)] {
-                let url = folder.appendingPathComponent("\(material)_\(suffix)_1k.png")
-                let width = 256
+            for width in resolutions {
+              for (suffix, role) in [("diff", MapRole.diffuse), ("disp", MapRole.depth), ("nor_gl", MapRole.normal)] {
+                let url = folder.appendingPathComponent("\(material)_\(suffix)_\(width).png")
                 let pixels = Data(repeating: role == .normal ? 127 : 160, count: width * width * 4)
                 let provider = try #require(CGDataProvider(data: pixels as CFData))
                 let image = try #require(CGImage(width: width, height: width, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
@@ -246,8 +316,9 @@ private struct TrainingPanelFixture {
                 let writer = try #require(CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil))
                 CGImageDestinationAddImage(writer, image, nil)
                 #expect(CGImageDestinationFinalize(writer))
-                try ImageMetadataStore.write(.init(id: UUID().uuidString, pairingKey: material, role: role, category: "Bricks", verified: reviewed, note: "",
+                try ImageMetadataStore.write(.init(id: UUID().uuidString, pairingKey: "\(material)_\(width)", role: role, category: "Bricks", verified: reviewed, note: "",
                                                    normalConvention: role == .normal ? "opengl" : nil), to: url)
+              }
             }
         }
     }

@@ -18,11 +18,12 @@ final class TrainingSettingsTests: XCTestCase {
         XCTAssertFalse(settings.shuffleEachEpoch); XCTAssertTrue(settings.flipCrops)
         XCTAssertEqual(settings.optimizer, .adamW); XCTAssertEqual(settings.gradientAccumulationSteps, 1)
         XCTAssertEqual(settings.cropRefresh, .perEpoch); XCTAssertEqual(settings.augmentationRefresh, .perEpoch)
+        XCTAssertEqual(settings.sourceResolutionLevels, 0, "Saved projects keep all original source resolutions")
         XCTAssertNil(settings.validationIssue)
     }
 
     func testAllNewTrainingControlsRoundTripWithTheirSourceProject() throws {
-        let settings = TrainingSettings(imageSize: 512, epochs: 23, batchSize: 2, learningRate: 0.0001,
+        let settings = TrainingSettings(imageSize: 512, sourceResolutionLevels: 3, epochs: 23, batchSize: 2, learningRate: 0.0001,
             seed: 123, modelWidth: 116, modelBlocks: 6, optimizer: .lion, weightDecay: 0.1,
             beta1: 0.95, beta2: 0.98, gradientAccumulationSteps: 4, gradientClipNorm: 0.5,
             learningRateSchedule: .cosine, warmupEpochs: 2, minimumLearningRateRatio: 0.05,
@@ -32,7 +33,21 @@ final class TrainingSettingsTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(TrainingSettings.self, from: JSONEncoder().encode(settings)), settings)
         XCTAssertEqual(settings.effectiveBatchSize, 8)
         XCTAssertEqual(settings.optimizerStepsPerEpoch(pairCount: 17), 3)
+        XCTAssertEqual(settings.batchesPerEpoch(pairCount: 17), 9)
         XCTAssertEqual(TrainingSettings(optimizer: .lion).beta2, 0.99)
+    }
+
+    func testSourceResolutionLevelsDefaultToBaseAndRejectUnsupportedValues() {
+        var settings = TrainingSettings()
+        XCTAssertEqual(settings.sourceResolutionLevels, 1)
+        for levels in 0...3 {
+            settings.sourceResolutionLevels = levels
+            XCTAssertNil(settings.validationIssue)
+        }
+        for levels in [-1, 4, Int.max] {
+            settings.sourceResolutionLevels = levels
+            XCTAssertEqual(settings.validationIssue, "Source resolution levels must be one to three, or all available.")
+        }
     }
 
     func testParameterCountsAreDerivedFromFreshConvolutionsAndSafeWhileEditing() {
