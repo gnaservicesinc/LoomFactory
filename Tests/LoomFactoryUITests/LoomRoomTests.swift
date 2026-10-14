@@ -46,6 +46,34 @@ struct LoomRoomTests {
     }
 
     @Test @MainActor
+    func focusedTrainingWorkspaceRendersControlsBesidePersistentRunProgress() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let model = FactoryModel(rememberSourceFolder: false)
+        try await load(model, fixture.source)
+        model.selectedDatasetID = try #require(model.snapshot?.datasets.first?.id)
+        model.settings.training.imageSize = 256
+        model.settings.training.batchSize = 1
+        model.settings.training.gradientAccumulationSteps = 4
+        model.settings.training.optimizer = .adamW
+        model.workspaceSection = .training
+        #expect(model.canTrain)
+        #expect(model.effectiveTrainingSettings.parameterCount(map: .depth) > 0)
+        #expect(model.settings.training.effectiveBatchSize == 4)
+        for size in [NSSize(width: 1200, height: 800), NSSize(width: 1380, height: 980)] {
+            try await render(model: model, size: size, name: "loom-room-\(Int(size.width))x\(Int(size.height))-training.png")
+        }
+        let datasetID = model.selectedDatasetID
+        model.workspaceSection = .package
+        #expect(model.selectedDatasetID == datasetID)
+        #expect(model.sourceFolder == fixture.source)
+        try await render(model: model, size: NSSize(width: 1380, height: 980), name: "loom-room-1380x980-package.png")
+        model.workspaceSection = .materials
+        #expect(model.eligiblePairCount == 1)
+        #expect(model.selectedDatasetID == datasetID)
+    }
+
+    @Test @MainActor
     func changingSourceFolderClearsDatasetSelectionAndRestoresFolderSettings() async throws {
         let fixture = try Fixture()
         defer { fixture.remove() }
@@ -60,7 +88,9 @@ struct LoomRoomTests {
         model.selectedDatasetID = try #require(model.snapshot?.datasets.first?.id)
         #expect(model.settings.modelName == "Bricks Loom")
         #expect(model.settings.training.imageSize == 256)
+        model.workspaceSection = .training
         model.openFolder(second)
+        #expect(model.workspaceSection == .materials)
         #expect(model.snapshot == nil)
         #expect(model.selectedDatasetID.isEmpty)
         #expect(model.selectedImageID == nil)

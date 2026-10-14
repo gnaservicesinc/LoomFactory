@@ -37,11 +37,11 @@ final class SourceProjectTests: XCTestCase {
         let root = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
         let diffuse = try image(root, "brick_diff_2k.png")
         let target = try image(root, "brick_disp_2k.png")
-        try Data("{\"samples\":[],\"training_size\":1024}".utf8).write(to: root.appendingPathComponent("dataset.json"))
+        try Data("{\"samples\":[],\"training_size\":4096}".utf8).write(to: root.appendingPathComponent("dataset.json"))
         let project = try LoomProject(sourceFolder: root)
         var current = try await project.snapshot()
         XCTAssertEqual(current.images.count, 2)
-        XCTAssertEqual(current.settings.training.imageSize, 2048)
+        XCTAssertEqual(current.settings.training.imageSize, 1024)
         XCTAssertEqual(current.datasets.count, 0)
         let input = try XCTUnwrap(current.images.first { $0.url.resolvingSymlinksInPath() == diffuse.resolvingSymlinksInPath() })
         try await project.updateImage(id: input.id, category: "Bricks", verified: true, note: "Reviewed")
@@ -125,18 +125,17 @@ final class SourceProjectTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: original.path))
     }
 
-    func testTrainingCannotUseAnUnreviewedOrWrongDatasetAndExportRequiresRealArtifacts() async throws {
+    func testTaggedPairsDoNotRequireReviewAndWrongDatasetsCannotTrain() async throws {
         let root = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
         _ = try image(root, "brick_diff.png"); _ = try image(root, "brick_disp.png")
         let project = try LoomProject(sourceFolder: root)
         let current = try await project.snapshot()
         let input = try XCTUnwrap(current.images.first { $0.role == .diffuse })
         try await project.updateImage(id: input.id, category: "Bricks", verified: false, note: "")
-        do {
-            _ = try await project.trainMap(datasetID: ImageMetadataStore.categoryID("Bricks"), map: .depth,
-                                           settings: .init(imageSize: 64), progress: { _ in })
-            XCTFail("Unreviewed images entered training")
-        } catch { XCTAssertTrue(error.localizedDescription.contains("reviewed")) }
+        let tagged = try await project.snapshot()
+        XCTAssertTrue(tagged.images.allSatisfy { !$0.verified })
+        XCTAssertEqual(tagged.eligiblePairCount(datasetID: ImageMetadataStore.categoryID("Bricks"), map: .depth, imageSize: 64), 1)
+        XCTAssertEqual(try tagged.trainingPlan(datasetID: ImageMetadataStore.categoryID("Bricks"), map: .depth, settings: .init(imageSize: 64))?.trainingPairCount, 1)
         do {
             _ = try await project.trainMap(datasetID: ImageMetadataStore.categoryID("Wood"), map: .depth,
                                            settings: .init(imageSize: 64), progress: { _ in })

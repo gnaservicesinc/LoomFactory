@@ -39,8 +39,20 @@ class DecodedImageCache:
                 return pixels
             self.cached_bytes -= pixels.nbytes
         self.misses += 1
-        pixels = np.ascontiguousarray(loader(path))
-        if file_identity(path) != identity:
+        for attempt in range(2):
+            pixels = np.ascontiguousarray(loader(path))
+            current_identity = file_identity(path)
+            if current_identity == identity:
+                break
+            # Updating image metadata changes ctime even when every pixel and
+            # the file's modification time stay unchanged. Discard that decode
+            # and retry once, while retaining ctime in cache keys so pixel edits
+            # with restored mtime still invalidate previously cached arrays.
+            ctime_only = all(before[:4] == after[:4]
+                             for before, after in zip(identity, current_identity))
+            if attempt == 0 and ctime_only:
+                identity = current_identity
+                continue
             raise ValueError(f"An image changed while its pixels were read: {Path(path).name}")
         if pixels.nbytes <= self.maximum_bytes:
             while self._entries and self.cached_bytes + pixels.nbytes > self.maximum_bytes:

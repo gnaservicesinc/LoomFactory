@@ -53,7 +53,7 @@ public actor LoomProject {
                 imageCount: members.count, verifiedCount: members.filter(\.verified).count, pairCounts: counts)
         }
         return ProjectSnapshot(sourceURL: sourceFolder, projectID: document.id, settings: document.settings,
-            images: images, datasets: datasets, artifacts: try loadArtifacts())
+            images: images, datasets: datasets, artifacts: try loadArtifacts(), checkpoints: try loadCheckpoints())
     }
 
     public func updateSettings(_ settings: ProjectSettings) throws {

@@ -142,9 +142,25 @@ class RequestMembershipTests(unittest.TestCase):
             for field in ("input", "target"):
                 tag = {**tags[field], "role": "diffuse" if field == "input" else "depth", "ignored": True}
                 write_fixture_metadata(sample[field], tag)
-                with self.assertRaisesRegex(ValueError, "review state"):
+                with self.assertRaisesRegex(ValueError, "ignore setting"):
                     current_image_tags(request, sample)
                 write_fixture_metadata(sample[field], {**tag, "ignored": False})
+                current_image_tags(request, sample)
+
+    def test_manual_review_is_informational_and_never_a_training_membership_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            sample = {"id": "unreviewed-pair", "input": str(root / "diffuse.png"),
+                      "target": str(root / "depth.png")}
+            request = {"map_kind": "depth", "require_image_metadata": True,
+                       "dataset_id": "dataset-" + hashlib.sha256(b"bark").hexdigest()[:16]}
+            for verified in (False, True, False):
+                for field, role in (("input", "diffuse"), ("target", "depth")):
+                    Path(sample[field]).write_bytes(b"original image bytes")
+                    write_fixture_metadata(sample[field], {
+                        "schema": "loom-factory.image.v1", "id": field, "pairingKey": sample["id"],
+                        "role": role, "category": "Bark", "verified": verified, "ignored": False,
+                    })
                 current_image_tags(request, sample)
 
     def test_external_path_is_rejected_but_a_present_source_symlink_is_accepted(self):

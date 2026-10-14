@@ -4,125 +4,469 @@ import SwiftUI
 
 struct TrainingPanel: View {
     @Bindable var model: FactoryModel
-    @State private var advanced = false
+    @State private var customArchitecture = false
+    @State private var optimizerTuning = false
+
+    init(model: FactoryModel, showTuning: Bool = false) {
+        self.model = model
+        _customArchitecture = State(initialValue: showTuning)
+        _optimizerTuning = State(initialValue: showTuning)
+    }
 
     var body: some View {
         FactoryPanel("Train a dataset", subtitle: "Create a custom base model from paired diffuse and material maps.") {
-            HStack(alignment: .top, spacing: 20) {
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("Dataset").font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                    Picker("Dataset", selection: Binding(get: { model.selectedDataset?.id ?? "" }, set: { model.selectedDatasetID = $0 })) {
-                        Text("Choose a dataset").tag("")
-                        ForEach(model.snapshot?.datasets ?? [], id: \.id) { Text($0.name).tag($0.id) }
-                    }.labelsHidden().frame(maxWidth: .infinity)
-                }
-                VStack(alignment: .leading, spacing: 7) {
-                    Text("Map to train").font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                    Picker("Map to train", selection: $model.selectedMap) {
-                        ForEach(MapRole.targets) { Text($0.displayName).tag($0) }
-                    }.labelsHidden().frame(maxWidth: .infinity)
-                }
-            }
-            HStack(spacing: 9) {
-                Image(systemName: "square.stack.3d.up").foregroundStyle(FactoryStyle.accent)
-                if let dataset = model.selectedDataset {
-                    Text("\(model.eligiblePairCount.formatted()) reviewed \(model.selectedMap.displayName.lowercased()) pairs ready in \(dataset.name)")
-                        .font(.callout)
-                } else {
-                    Text("Choose the dataset to train.").font(.callout).foregroundStyle(.secondary)
-                }
-            }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
-                .background(FactoryStyle.accent.opacity(0.06), in: RoundedRectangle(cornerRadius: 9))
-            Grid(alignment: .leading, horizontalSpacing: 22, verticalSpacing: 14) {
-                GridRow {
-                    Text("Training dimensions")
-                    Picker("Training dimensions", selection: $model.settings.training.imageSize) {
-                        ForEach([256, 512, 1024, 2048, 4096], id: \.self) { value in
-                            Text("\(value.formatted()) × \(value.formatted())").tag(value)
-                        }
-                    }.labelsHidden().frame(width: 165)
-                    Spacer()
-                }
-                GridRow {
-                    Text("Epochs")
-                    TextField("Epochs", value: $model.settings.training.epochs, format: .number)
-                        .textFieldStyle(.roundedBorder).frame(width: 165)
-                    Text("One pass through the dataset.").font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            Text("Training uses verified pairs that fit this pixel size. Matching maps share each random crop position, and original pixels are preserved.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            Divider()
-            VStack(alignment: .leading, spacing: 11) {
-                Toggle("Continue latest run", isOn: Binding(
-                    get: { model.settings.training.continueLatestWeights ?? false },
-                    set: { model.settings.training.continueLatestWeights = $0 }
-                ))
-                .disabled(!model.canContinueMap && !(model.settings.training.continueLatestWeights ?? false))
-                .help("Continue saved weights with a fresh optimizer.")
-                if model.settings.training.continueLatestWeights == true && !model.canContinueMap {
-                    Text("There are no saved weights for this dataset and map. Turn off Continue latest run to train a new model.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                Toggle("Randomize image order each epoch", isOn: $model.settings.training.shuffleEachEpoch)
-                    .help("Off keeps the image order the same for every epoch.")
-                HStack(spacing: 28) {
-                    Toggle("Randomly flip crops", isOn: $model.settings.training.flipCrops)
-                    Toggle("Randomly rotate crops", isOn: $model.settings.training.rotateCrops)
-                }
-                if model.selectedMap == .depth {
-                    Toggle("Exaggerate features", isOn: $model.settings.training.exaggerateFeatures)
-                        .help("Apply nonlinear contrast to depth values during training. Original images are unchanged.")
-                    if model.settings.training.exaggerateFeatures {
-                        Text("Nonlinear contrast emphasizes depth features while preserving the map’s range.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }.toggleStyle(.checkbox)
-            DisclosureGroup("Advanced training settings", isExpanded: $advanced) {
-                Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 12) {
-                    settingRow("Learning rate", value: $model.settings.training.learningRate)
-                    settingRow("Batch size", value: $model.settings.training.batchSize)
-                    settingRow("Model width", value: $model.settings.training.modelWidth)
-                    settingRow("Random seed", value: $model.settings.training.seed)
-                }.padding(.top, 12)
+            datasetSelection
+            pairReadiness
+            trainingSection("Model", symbol: "cube") { architectureSettings }
+            trainingSection("Optimizer and batches", symbol: "slider.horizontal.3") { optimizerSettings }
+            trainingSection("Run", symbol: "play.circle") { runSettings }
+            trainingSection("Crops and image order", symbol: "crop.rotate") { cropSettings }
+            trainingSection("Learning-rate schedule", symbol: "chart.xyaxis.line") { learningRateSettings }
+            trainingSection("Validation and checkpoints", symbol: "checkmark.seal") { validationSettings }
+            runSummary
+            if let issue = model.trainingOptionsIssue {
+                Label(issue, systemImage: "exclamationmark.triangle")
+                    .font(.callout).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("training.optionsIssue")
             }
             FactoryActionButton(title: "Train \(model.selectedMap.displayName) Model", symbol: "play.fill", prominent: true) {
                 model.trainMap()
             }.disabled(!model.canTrain)
-            if !model.selectedArtifacts.isEmpty {
-                Divider()
-                Text("Trained models").font(.subheadline.weight(.semibold))
-                ForEach(model.selectedArtifacts.prefix(3), id: \.id) { artifact in
-                    HStack(spacing: 12) {
-                        Image(systemName: "cube").foregroundStyle(FactoryStyle.accent)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("\(artifact.datasetName ?? "Dataset") · \(artifact.map?.displayName ?? "Model")")
-                                .font(.callout.weight(.medium))
-                            Text("\(artifact.epochs) epochs · \(artifact.createdAt.formatted(date: .abbreviated, time: .shortened))")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        Button("Show") { model.reveal(artifact.directory) }
-                    }
-                }
-            }
+                .accessibilityIdentifier("training.start")
+            trainedModels
         }
         .disabled(model.busy)
     }
 
-    private func settingRow(_ title: String, value: Binding<Int>) -> some View {
-        GridRow {
-            Text(title).font(.callout)
-            TextField(title, value: value, format: .number).textFieldStyle(.roundedBorder).frame(width: 165)
+    private var datasetSelection: some View {
+        HStack(alignment: .top, spacing: 20) {
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Dataset").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                Picker("Dataset", selection: Binding(get: { model.selectedDataset?.id ?? "" }, set: { model.selectedDatasetID = $0 })) {
+                    Text("Choose a dataset").tag("")
+                    ForEach(model.snapshot?.datasets ?? [], id: \.id) { Text($0.name).tag($0.id) }
+                }.labelsHidden().frame(maxWidth: .infinity)
+                    .accessibilityIdentifier("training.dataset")
+            }
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Map to train").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                Picker("Map to train", selection: $model.selectedMap) {
+                    ForEach(MapRole.targets) { Text($0.displayName).tag($0) }
+                }.labelsHidden().frame(maxWidth: .infinity)
+                    .accessibilityIdentifier("training.map")
+            }
         }
     }
 
-    private func settingRow(_ title: String, value: Binding<Double>) -> some View {
-        GridRow {
-            Text(title).font(.callout)
-            TextField(title, value: value, format: .number).textFieldStyle(.roundedBorder).frame(width: 165)
+    private var pairReadiness: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 9) {
+                Image(systemName: "square.stack.3d.up").foregroundStyle(FactoryStyle.accent)
+                if let dataset = model.selectedDataset {
+                    Text("\(model.eligiblePairCount.formatted()) \(model.selectedMap.displayName.lowercased()) \(model.eligiblePairCount == 1 ? "pair" : "pairs") ready in \(dataset.name)")
+                        .font(.callout.weight(.medium))
+                } else {
+                    Text("Choose the dataset to train.").font(.callout).foregroundStyle(.secondary)
+                }
+            }
+            Text("Uses current files tagged for this dataset with matching map types and native dimensions. Maps share each crop and transform; originals are preserved.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
+            .background(FactoryStyle.accent.opacity(0.06), in: RoundedRectangle(cornerRadius: 9))
+    }
+
+    private var runSettings: some View {
+        Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 11) {
+            row("Training dimensions", detail: "Native pixels; larger maps supply random crops.") {
+                Picker("Training dimensions", selection: imageSizeBinding) {
+                    ForEach([256, 512, 1024, 2048, 4096], id: \.self) { value in
+                        Text("\(value.formatted()) × \(value.formatted())").tag(value)
+                    }
+                }.labelsHidden().disabled(continuing).accessibilityIdentifier("training.imageSize")
+            }
+            numberRow("Epochs", value: $model.settings.training.epochs, detail: "One pass through the training images.", identifier: "training.epochs")
+            row("Training device", detail: "Automatic uses Metal when available.") {
+                Picker("Training device", selection: $model.settings.training.device) {
+                    ForEach(TrainingDevice.allCases) { Text($0.displayName).tag($0) }
+                }.labelsHidden().accessibilityIdentifier("training.device")
+            }
+            numberRow("Random seed", value: $model.settings.training.seed, detail: "Repeat crop, shuffle and model initialization choices.", identifier: "training.seed")
         }
+    }
+
+    private var architectureSettings: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            if model.canContinueMap || continuing {
+                Toggle("Continue latest weights", isOn: Binding(
+                    get: { model.settings.training.continueLatestWeights ?? false },
+                    set: { model.settings.training.continueLatestWeights = $0 }
+                ))
+                .help("Continue saved weights with a fresh optimizer. The saved model architecture is retained.")
+                .accessibilityIdentifier("training.continue")
+            }
+            if model.settings.training.continueLatestWeights == true {
+                if model.canContinueMap {
+                    Text("Saved model architecture and training dimensions are retained. Optimizer and learning-rate settings apply to this new run.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if let checkpoint = model.selectedCheckpoint {
+                        Text("\(checkpoint.epochsCompleted.formatted()) completed epochs · \(checkpoint.imageSize.formatted()) × \(checkpoint.imageSize.formatted()) pixels")
+                            .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                    }
+                } else {
+                    Text("There are no saved weights for this dataset and map. Turn off Continue latest weights to train a new model.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 11) {
+                row("Model size", detail: "Larger models use more memory and take longer to train.") {
+                    Picker("Model size", selection: presetBinding) {
+                        ForEach(TrainingModelPreset.allCases) { preset in
+                            Text(preset.label(map: model.selectedMap)).tag(preset)
+                        }
+                    }.labelsHidden().accessibilityIdentifier("training.modelPreset")
+                }
+            }.disabled(model.settings.training.continueLatestWeights == true)
+            HStack(spacing: 8) {
+                Image(systemName: "number.square").foregroundStyle(FactoryStyle.accent)
+                Text("\(model.effectiveTrainingSettings.parameterCount(map: model.selectedMap).formatted()) trainable parameters")
+                    .font(.callout.weight(.semibold)).monospacedDigit()
+                Spacer()
+                Text("\(model.effectiveTrainingSettings.modelWidth) channels · \(model.effectiveTrainingSettings.modelBlocks) blocks")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.accessibilityElement(children: .combine).accessibilityIdentifier("training.parameterCount")
+            DisclosureGroup("Custom architecture", isExpanded: $customArchitecture) {
+                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 11) {
+                    numberRow("Channel width", value: architectureWidthBinding, detail: "8–256 channels. Custom sizes are supported.", identifier: "training.modelWidth")
+                    numberRow("Residual blocks", value: architectureBlocksBinding, detail: "1–12 blocks. More blocks add capacity and compute.", identifier: "training.modelBlocks")
+                }.padding(.top, 8).disabled(continuing)
+            }.font(.callout)
+        }.toggleStyle(.checkbox)
+    }
+
+    private var optimizerSettings: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 11) {
+                row("Optimizer", detail: optimizerDescription) {
+                    Picker("Optimizer", selection: $model.settings.training.optimizer) {
+                        ForEach(TrainingOptimizer.allCases) { Text($0.displayName).tag($0) }
+                    }.labelsHidden().accessibilityIdentifier("training.optimizer")
+                }
+                numberRow("Learning rate", value: $model.settings.training.learningRate, detail: model.settings.training.optimizer == .lion ? "For Lion, consider starting at 0.0001." : "The starting update size.", identifier: "training.learningRate")
+                numberRow("Batch size", value: $model.settings.training.batchSize, detail: "Images processed together; raises memory use.", identifier: "training.batchSize")
+                numberRow("Gradient accumulation", value: $model.settings.training.gradientAccumulationSteps, detail: "Batches per update; increases effective batch size without a larger image batch.", identifier: "training.gradientAccumulation")
+            }
+            DisclosureGroup("Optimizer tuning", isExpanded: $optimizerTuning) {
+                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 11) {
+                    numberRow("Weight decay", value: $model.settings.training.weightDecay, detail: "Regularization strength. 0 disables it.", identifier: "training.weightDecay")
+                    if model.settings.training.optimizer == .sgd {
+                        numberRow("Momentum", value: $model.settings.training.momentum, detail: "Carry part of the previous update forward.", identifier: "training.momentum")
+                    } else {
+                        numberRow("Beta 1", value: $model.settings.training.beta1, detail: "First-moment decay.", identifier: "training.beta1")
+                        numberRow("Beta 2", value: $model.settings.training.beta2, detail: model.settings.training.optimizer == .lion ? "Momentum decay for Lion; 0.99 is a usual starting value." : "Second-moment decay.", identifier: "training.beta2")
+                    }
+                    numberRow("Gradient clipping", value: $model.settings.training.gradientClipNorm, detail: "Maximum gradient norm. 0 disables clipping.", identifier: "training.gradientClipping")
+                }.padding(.top, 8)
+            }.font(.callout)
+        }
+    }
+
+    private var learningRateSettings: some View {
+        Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 11) {
+            row("Schedule", detail: model.settings.training.learningRateSchedule == .constant ? "Keeps the rate steady after warmup." : "Gradually lowers the rate after warmup.") {
+                Picker("Learning-rate schedule", selection: $model.settings.training.learningRateSchedule) {
+                    ForEach(TrainingLearningRateSchedule.allCases) { Text($0.displayName).tag($0) }
+                }.labelsHidden().accessibilityIdentifier("training.learningRateSchedule")
+            }
+            numberRow("Warmup epochs", value: $model.settings.training.warmupEpochs, detail: "Start with smaller updates. 0 skips warmup.", identifier: "training.warmupEpochs")
+            if model.settings.training.learningRateSchedule == .cosine {
+                numberRow("Final rate ratio", value: $model.settings.training.minimumLearningRateRatio, detail: "Fraction of the starting rate at the end; 0.1 means 10%.", identifier: "training.minimumLearningRateRatio")
+            }
+        }
+    }
+
+    private var cropSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 11) {
+                row("New crop positions", detail: refreshDescription(model.settings.training.cropRefresh, transform: false)) {
+                    refreshPicker("New crop positions", selection: $model.settings.training.cropRefresh)
+                        .accessibilityIdentifier("training.cropRefresh")
+                }
+            }
+            Toggle("Randomize image order each epoch", isOn: $model.settings.training.shuffleEachEpoch)
+                .help("Off keeps the image order the same for every epoch.")
+                .accessibilityIdentifier("training.shuffle")
+            HStack(spacing: 24) {
+                Toggle("Randomly flip crops", isOn: $model.settings.training.flipCrops)
+                    .accessibilityIdentifier("training.flip")
+                Toggle("Randomly rotate crops", isOn: $model.settings.training.rotateCrops)
+                    .accessibilityIdentifier("training.rotate")
+            }
+            if model.settings.training.flipCrops || model.settings.training.rotateCrops {
+                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 11) {
+                    row("New flips and rotations", detail: refreshDescription(model.settings.training.augmentationRefresh, transform: true)) {
+                        refreshPicker("New flips and rotations", selection: $model.settings.training.augmentationRefresh)
+                            .accessibilityIdentifier("training.augmentationRefresh")
+                    }
+                }
+                Text("Random flips choose horizontal and vertical directions. Rotations use quarter turns; normal-map vectors follow the same transforms.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if model.selectedMap == .depth {
+                Toggle("Exaggerate features", isOn: exaggerationBinding).disabled(continuing)
+                    .help("Apply nonlinear contrast to depth values during training. Original images are unchanged.")
+                    .accessibilityIdentifier("training.exaggerateFeatures")
+                if model.effectiveTrainingSettings.exaggerateFeatures {
+                    Text("Nonlinear contrast emphasizes depth features while preserving the map’s range.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }.toggleStyle(.checkbox)
+    }
+
+    private var validationSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 11) {
+                row("Validation holdout", detail: "Percent of material folders reserved for validation. 0 uses all pairs for training.") {
+                    HStack(spacing: 4) {
+                        TextField("Validation holdout percent", value: validationPercentBinding, format: .number)
+                            .textFieldStyle(.roundedBorder).accessibilityIdentifier("training.validationFraction")
+                        Text("%").foregroundStyle(.secondary)
+                    }
+                }
+                if model.settings.training.validationFraction > 0 {
+                    numberRow("Validation seed", value: $model.settings.training.validationSeed, detail: "Keeps the same material folders in the holdout.", identifier: "training.validationSeed")
+                }
+                if model.settings.training.validationFraction > 0 || model.settings.training.earlyStoppingPatience > 0 {
+                    numberRow("Early stopping", value: $model.settings.training.earlyStoppingPatience,
+                              detail: model.settings.training.validationFraction > 0
+                                ? "Stop after N epochs without validation improvement. 0 keeps all epochs."
+                                : "Set to 0 to train without validation, or enable a validation holdout.",
+                              identifier: "training.earlyStopping")
+                }
+                numberRow("Checkpoint every", value: $model.settings.training.checkpointEveryEpochs, detail: "Save weights every N epochs, and at the end.", identifier: "training.checkpointEveryEpochs")
+            }
+            if model.settings.training.validationFraction > 0 {
+                Toggle("Export weights with the best validation loss", isOn: $model.settings.training.exportBestWeights)
+                    .toggleStyle(.checkbox).accessibilityIdentifier("training.exportBest")
+                    .help("Off exports the final training weights.")
+            }
+        }
+    }
+
+    private var runSummary: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("This run").font(.subheadline.weight(.semibold))
+            Text("\(model.settings.training.optimizer.displayName) · \(effectiveBatchDescription)")
+                .font(.callout).monospacedDigit()
+            if let plan = model.trainingPlan {
+                Text("\(countLabel(plan.trainingPairCount, singular: "training pair", plural: "training pairs")) in \(countLabel(plan.trainingMaterialCount, singular: "material", plural: "materials")) · \(countLabel(plan.validationPairCount, singular: "validation pair", plural: "validation pairs")) in \(countLabel(plan.validationMaterialCount, singular: "material", plural: "materials"))")
+                    .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                Text("\(countLabel(model.settings.training.optimizerStepsPerEpoch(pairCount: plan.trainingPairCount), singular: "optimizer update", plural: "optimizer updates")) per epoch")
+                    .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                if model.settings.training.validationFraction > 0 && plan.validationPairCount == 0 {
+                    Text("This dataset needs at least two source materials for a validation holdout. All available pairs will train.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Text("Crop positions: \(model.settings.training.cropRefresh.displayName.lowercased()) · Image order: \(model.settings.training.shuffleEachEpoch ? "reshuffled each epoch" : "same each epoch")")
+                .font(.caption).foregroundStyle(.secondary)
+            if model.settings.training.flipCrops || model.settings.training.rotateCrops {
+                Text("Flips and rotations: \(model.settings.training.augmentationRefresh.displayName.lowercased())")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Text("Validation reserves whole material folders so their maps stay together.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
+            .accessibilityIdentifier("training.summary")
+    }
+
+    @ViewBuilder private var trainedModels: some View {
+        if !model.selectedArtifacts.isEmpty {
+            Divider()
+            Text("Trained models").font(.subheadline.weight(.semibold))
+            ForEach(model.selectedArtifacts.prefix(3), id: \.id) { artifact in
+                HStack(spacing: 12) {
+                    Image(systemName: "cube").foregroundStyle(FactoryStyle.accent)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("\(artifact.datasetName ?? "Dataset") · \(artifact.map?.displayName ?? "Model")")
+                            .font(.callout.weight(.medium))
+                        Text("\(artifact.epochs) epochs · \(artifact.createdAt.formatted(date: .abbreviated, time: .shortened))")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Show") { model.reveal(artifact.directory) }
+                }
+            }
+        }
+    }
+
+    private var effectiveBatchDescription: String {
+        let batch = model.settings.training.batchSize
+        let accumulation = model.settings.training.gradientAccumulationSteps
+        let (total, overflow) = batch.multipliedReportingOverflow(by: accumulation)
+        guard batch > 0, accumulation > 0, !overflow else { return "Check batch and accumulation settings" }
+        return "batch \(batch) × \(accumulation) accumulation = up to \(countLabel(total, singular: "image", plural: "images")) per update"
+    }
+
+    private func countLabel(_ count: Int, singular: String, plural: String) -> String {
+        "\(count.formatted()) \(count == 1 ? singular : plural)"
+    }
+
+    private var continuing: Bool { model.settings.training.continueLatestWeights == true }
+
+    private var imageSizeBinding: Binding<Int> {
+        Binding(get: { model.effectiveTrainingSettings.imageSize }, set: { model.settings.training.imageSize = $0 })
+    }
+
+    private var exaggerationBinding: Binding<Bool> {
+        Binding(get: { model.effectiveTrainingSettings.exaggerateFeatures }, set: { model.settings.training.exaggerateFeatures = $0 })
+    }
+
+    private var presetBinding: Binding<TrainingModelPreset> {
+        Binding(get: {
+            customArchitecture ? .custom : (TrainingModelPreset.allCases.first { $0.width == model.effectiveTrainingSettings.modelWidth && model.effectiveTrainingSettings.modelBlocks == 4 } ?? .custom)
+        }, set: { preset in
+            guard let width = preset.width else { customArchitecture = true; return }
+            customArchitecture = false
+            model.settings.training.modelWidth = width
+            model.settings.training.modelBlocks = 4
+        })
+    }
+
+    private var architectureWidthBinding: Binding<Int> {
+        Binding(get: { model.effectiveTrainingSettings.modelWidth }, set: { model.settings.training.modelWidth = $0 })
+    }
+
+    private var architectureBlocksBinding: Binding<Int> {
+        Binding(get: { model.effectiveTrainingSettings.modelBlocks }, set: { model.settings.training.modelBlocks = $0 })
+    }
+
+    private var validationPercentBinding: Binding<Double> {
+        Binding(get: { model.settings.training.validationFraction * 100 }, set: { model.settings.training.validationFraction = $0 / 100 })
+    }
+
+    private var optimizerDescription: String {
+        switch model.settings.training.optimizer {
+        case .adamW: "Adaptive updates with decoupled weight decay."
+        case .adam: "Adaptive updates with L2 regularization."
+        case .sgd: "Momentum-based gradient descent."
+        case .lion: "Sign-based updates with a smaller optimizer state."
+        }
+    }
+
+    private func refreshPicker(_ title: String, selection: Binding<TrainingRefresh>) -> some View {
+        Picker(title, selection: selection) {
+            ForEach(TrainingRefresh.allCases) { Text($0.displayName).tag($0) }
+        }.labelsHidden()
+    }
+
+    private func refreshDescription(_ refresh: TrainingRefresh, transform: Bool) -> String {
+        let choices = transform ? "transforms" : "positions"
+        return switch refresh {
+        case .perSample: "Choose fresh \(choices) every time an image is used."
+        case .perEpoch: "Choose \(choices) once per image each epoch."
+        case .perRun: "Choose \(choices) once per image for this run."
+        }
+    }
+
+    @ViewBuilder private func trainingSection<Content: View>(_ title: String, symbol: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: symbol).font(.subheadline.weight(.semibold))
+            content()
+        }.padding(.top, 5)
+        Divider()
+    }
+
+    private func row<Control: View>(_ title: String, detail: String, @ViewBuilder control: () -> Control) -> some View {
+        GridRow(alignment: .top) {
+            Text(title).font(.callout).frame(width: 150, alignment: .leading).padding(.top, 4)
+            control().frame(width: 165, alignment: .leading).font(.callout)
+            Text(detail).font(.caption).foregroundStyle(.secondary)
+                .frame(minWidth: 130, maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true).padding(.top, 4)
+        }
+    }
+
+    private func numberRow(_ title: String, value: Binding<Int>, detail: String, identifier: String) -> some View {
+        row(title, detail: detail) {
+            TextField(title, value: value, format: .number).textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier(identifier)
+        }
+    }
+
+    private func numberRow(_ title: String, value: Binding<Double>, detail: String, identifier: String) -> some View {
+        row(title, detail: detail) {
+            TextField(title, value: value, format: .number).textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier(identifier)
+        }
+    }
+}
+
+enum TrainingModelPreset: String, CaseIterable, Identifiable {
+    case compact, small, medium, large, extraLarge, huge, custom
+    var id: String { rawValue }
+    var width: Int? {
+        switch self {
+        case .compact: 24
+        case .small: 84
+        case .medium: 116
+        case .large: 164
+        case .extraLarge: 204
+        case .huge: 236
+        case .custom: nil
+        }
+    }
+    func label(map: MapRole) -> String {
+        guard let width else { return "Custom" }
+        let count = TrainingSettings(modelWidth: width).parameterCount(map: map)
+        return count.formatted(.number.notation(.compactName)) + " parameters"
+    }
+}
+
+struct TrainingOverviewPanel: View {
+    @Bindable var model: FactoryModel
+
+    var body: some View {
+        FactoryPanel("This run") {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(model.selectedDataset?.name ?? "Choose a dataset").font(.headline)
+                Text("\(model.selectedMap.displayName) model").font(.callout).foregroundStyle(.secondary)
+            }
+            Divider()
+            summary("Parameters", model.effectiveTrainingSettings.parameterCount(map: model.selectedMap).formatted())
+            summary("Optimizer", model.settings.training.optimizer.displayName)
+            summary("Learning rate", model.settings.training.learningRate.formatted(.number.precision(.significantDigits(1...4))))
+            summary("Effective batch", "Up to \(model.settings.training.effectiveBatchSize.formatted()) images")
+            if let plan = model.trainingPlan {
+                summary("Training pairs", plan.trainingPairCount.formatted())
+                summary("Validation pairs", plan.validationPairCount.formatted())
+                if model.settings.training.validationFraction > 0 && plan.validationPairCount == 0 {
+                    Text("Validation needs at least two source materials.").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Text("Crop positions: \(model.settings.training.cropRefresh.displayName.lowercased())")
+                .font(.caption).foregroundStyle(.secondary)
+            if model.settings.training.flipCrops || model.settings.training.rotateCrops {
+                Text("Flips and rotations: \(model.settings.training.augmentationRefresh.displayName.lowercased())")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let issue = model.trainingOptionsIssue {
+                Label(issue, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            FactoryActionButton(title: "Train \(model.selectedMap.displayName) Model", symbol: "play.fill", prominent: true) { model.trainMap() }
+                .disabled(!model.canTrain).accessibilityIdentifier("training.overviewStart")
+        }
+    }
+
+    private func summary(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title).foregroundStyle(.secondary)
+            Spacer()
+            Text(value).monospacedDigit().multilineTextAlignment(.trailing)
+        }.font(.callout)
     }
 }
 
@@ -206,11 +550,17 @@ struct RunPanel: View {
             if let progress = model.progress {
                 ProgressView(value: progress).progressViewStyle(.linear)
             }
-            if let latest = model.events.last, let loss = latest.loss {
-                HStack {
-                    if let epoch = latest.epoch { Text("Epoch \(epoch)") }
-                    Text("Loss \(loss.formatted(.number.precision(.significantDigits(5))))")
-                }.font(.caption).foregroundStyle(.secondary).monospacedDigit()
+            let metrics = TrainingRunMetrics(events: model.events)
+            VStack(alignment: .leading, spacing: 7) {
+                if let epoch = metrics.epoch { metric("Epoch", epoch.formatted()) }
+                if let loss = metrics.trainingLoss { metric("Training loss", loss.formatted(.number.precision(.significantDigits(5)))) }
+                if let loss = metrics.validationLoss { metric("Validation loss", loss.formatted(.number.precision(.significantDigits(5)))) }
+                if let update = metrics.update {
+                    metric("Optimizer update", "\(update.formatted())\(metrics.totalUpdates.map { " / " + $0.formatted() } ?? "")")
+                }
+                if let rate = metrics.learningRate { metric("Learning rate", rate.formatted(.number.precision(.significantDigits(1...4)))) }
+                if let batch = metrics.effectiveBatchSize { metric("Images per update", "Up to \(batch.formatted())") }
+                if let count = metrics.parameterCount { metric("Parameters", count.formatted()) }
             }
             if !model.events.isEmpty {
                 DisclosureGroup("Run details", isExpanded: $showLog) {
@@ -225,5 +575,37 @@ struct RunPanel: View {
                 }
             }
         }
+    }
+
+    private func metric(_ title: String, _ value: String) -> some View {
+        HStack {
+            Text(title)
+            Spacer(minLength: 8)
+            Text(value).monospacedDigit()
+        }.font(.caption).foregroundStyle(.secondary)
+    }
+
+}
+
+/// Status and checkpoint events keep the last reported measurements visible.
+struct TrainingRunMetrics {
+    let epoch: Int?
+    let trainingLoss: Double?
+    let validationLoss: Double?
+    let learningRate: Double?
+    let update: Int?
+    let totalUpdates: Int?
+    let parameterCount: Int?
+    let effectiveBatchSize: Int?
+
+    init(events: [TrainingEvent]) {
+        epoch = events.last { $0.epoch != nil }?.epoch
+        trainingLoss = events.last { $0.loss != nil }?.loss
+        validationLoss = events.last { $0.validationLoss != nil }?.validationLoss
+        learningRate = events.last { $0.learningRate != nil }?.learningRate
+        update = events.last { $0.update != nil }?.update
+        totalUpdates = events.last { $0.totalUpdates != nil }?.totalUpdates
+        parameterCount = events.last { $0.parameterCount != nil }?.parameterCount
+        effectiveBatchSize = events.last { $0.effectiveBatchSize != nil }?.effectiveBatchSize
     }
 }

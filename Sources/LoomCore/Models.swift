@@ -16,30 +16,6 @@ public enum MapRole: String, Codable, CaseIterable, Sendable, Identifiable {
     public static var targets: [MapRole] { [.depth, .roughness, .normal] }
 }
 
-public struct TrainingSettings: Codable, Sendable, Equatable {
-    public var imageSize: Int
-    public var epochs: Int
-    public var batchSize: Int
-    public var learningRate: Double
-    public var shuffleEachEpoch: Bool
-    public var flipCrops: Bool
-    public var rotateCrops: Bool
-    public var exaggerateFeatures: Bool
-    public var seed: Int
-    public var modelWidth: Int
-    public var continueLatestWeights: Bool?
-    public init(imageSize: Int = 2048, epochs: Int = 10, batchSize: Int = 1,
-                learningRate: Double = 0.001, shuffleEachEpoch: Bool = true,
-                flipCrops: Bool = false, rotateCrops: Bool = false,
-                exaggerateFeatures: Bool = false, seed: Int = 0, modelWidth: Int = 24, continueLatestWeights: Bool = false) {
-        self.imageSize = imageSize; self.epochs = epochs; self.batchSize = batchSize
-        self.learningRate = learningRate; self.shuffleEachEpoch = shuffleEachEpoch
-        self.flipCrops = flipCrops; self.rotateCrops = rotateCrops
-        self.exaggerateFeatures = exaggerateFeatures; self.seed = seed; self.modelWidth = modelWidth
-        self.continueLatestWeights = continueLatestWeights
-    }
-}
-
 public struct ProjectSettings: Codable, Sendable, Equatable {
     public var modelName: String
     public var modelVersion: String
@@ -119,10 +95,12 @@ public struct ProjectSnapshot: Sendable {
     public let images: [SourceImage]
     public let datasets: [DatasetCategory]
     public let artifacts: [ModelArtifact]
+    public let checkpoints: [TrainingCheckpoint]
     public init(sourceURL: URL, projectID: String, settings: ProjectSettings,
-                images: [SourceImage], datasets: [DatasetCategory], artifacts: [ModelArtifact]) {
+                images: [SourceImage], datasets: [DatasetCategory], artifacts: [ModelArtifact], checkpoints: [TrainingCheckpoint] = []) {
         self.sourceURL = sourceURL; self.projectID = projectID; self.settings = settings
         self.images = images; self.datasets = datasets; self.artifacts = artifacts
+        self.checkpoints = checkpoints
     }
     public func eligiblePairCount(datasetID: String, map: MapRole, imageSize: Int) -> Int {
         guard let dataset = datasets.first(where: { $0.id == datasetID }) else { return 0 }
@@ -136,8 +114,18 @@ public struct TrainingEvent: Sendable {
     public let progress: Double?
     public let epoch: Int?
     public let loss: Double?
-    public init(type: String, message: String, progress: Double? = nil, epoch: Int? = nil, loss: Double? = nil) {
+    public let validationLoss: Double?
+    public let learningRate: Double?
+    public let update: Int?
+    public let totalUpdates: Int?
+    public let parameterCount: Int?
+    public let effectiveBatchSize: Int?
+    public init(type: String, message: String, progress: Double? = nil, epoch: Int? = nil, loss: Double? = nil,
+                validationLoss: Double? = nil, learningRate: Double? = nil, update: Int? = nil, totalUpdates: Int? = nil,
+                parameterCount: Int? = nil, effectiveBatchSize: Int? = nil) {
         self.type = type; self.message = message; self.progress = progress; self.epoch = epoch; self.loss = loss
+        self.validationLoss = validationLoss; self.learningRate = learningRate; self.update = update
+        self.totalUpdates = totalUpdates; self.parameterCount = parameterCount; self.effectiveBatchSize = effectiveBatchSize
     }
 }
 

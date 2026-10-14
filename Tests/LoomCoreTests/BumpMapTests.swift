@@ -6,6 +6,45 @@ import XCTest
 @testable import LoomCore
 
 final class BumpMapTests: XCTestCase {
+    func testPrimaryProviderColorVariantsPairAndRepairWithoutHumanReview() throws {
+        let root = URL(fileURLWithPath: "/source")
+        let target = ImageMetadataStore.initialMetadata(file: root.appendingPathComponent("leather_red_02_disp_1k.png"),
+                                                       sourceRoot: root, width: 1024, height: 1024)
+        for alias in ["col1", "coll1", "col_1", "coll_1"] {
+            let file = root.appendingPathComponent("leather_red_02_\(alias)_1k.png")
+            let tag = ImageMetadataStore.initialMetadata(file: file, sourceRoot: root, width: 1024, height: 1024)
+            XCTAssertEqual(tag.role, .diffuse, alias)
+            XCTAssertEqual(tag.pairingKey, target.pairingKey, alias)
+        }
+        let file = root.appendingPathComponent("leather_red_02_col_1_1k.png")
+        let oldKey = SHA256.hash(data: Data("/leather_red_02_1_1k:1024x1024".utf8)).map { String(format: "%02x", $0) }.joined()
+        let old = ImageMetadata(id: "same-file", pairingKey: oldKey, role: .diffuse, category: "Leather")
+        let repaired = ImageMetadataStore.repairingLegacyInference(old, file: file, sourceRoot: root, width: 1024, height: 1024)
+        XCTAssertEqual(repaired.pairingKey, target.pairingKey)
+        XCTAssertEqual(repaired.id, old.id); XCTAssertFalse(repaired.verified)
+        var manual = old; manual.pairingWasManuallySelected = true
+        XCTAssertEqual(ImageMetadataStore.repairingLegacyInference(manual, file: file, sourceRoot: root, width: 1024, height: 1024), manual)
+        let alternate = ImageMetadataStore.initialMetadata(file: root.appendingPathComponent("leather_red_02_coll2_1k.png"),
+                                                          sourceRoot: root, width: 1024, height: 1024)
+        XCTAssertEqual(alternate.role, .unknown)
+    }
+
+    func testMaterialNameRoleWordCannotKeepAnOldNormalMapTaggedAsRoughness() throws {
+        let root = URL(fileURLWithPath: "/source")
+        let file = root.appendingPathComponent("white_rough_plaster_nor_gl_1k.png")
+        let oldKey = SHA256.hash(data: Data("/white_plaster_nor_gl_1k:64x64".utf8)).map { String(format: "%02x", $0) }.joined()
+        let saved = ImageMetadata(id: "same-image", pairingKey: oldKey, role: .roughness,
+                                  category: "Plaster", verified: true, note: "Keep this review")
+        let repaired = ImageMetadataStore.repairingLegacyInference(saved, file: file, sourceRoot: root, width: 64, height: 64)
+        let diffuse = ImageMetadataStore.initialMetadata(file: root.appendingPathComponent("white_rough_plaster_diff_1k.png"),
+                                                        sourceRoot: root, width: 64, height: 64)
+        XCTAssertEqual(repaired.role, .normal); XCTAssertEqual(repaired.pairingKey, diffuse.pairingKey)
+        XCTAssertEqual(repaired.id, saved.id); XCTAssertEqual(repaired.category, saved.category)
+        XCTAssertEqual(repaired.verified, saved.verified); XCTAssertEqual(repaired.note, saved.note)
+        var manual = saved; manual.roleWasManuallySelected = true
+        XCTAssertEqual(ImageMetadataStore.repairingLegacyInference(manual, file: file, sourceRoot: root, width: 64, height: 64), manual)
+    }
+
     func testProviderNormalNamesAndDirectXExclusion() async throws {
         let root = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
         _ = try image(root, "Bark_1K-PNG_Color.png")
@@ -65,12 +104,13 @@ final class BumpMapTests: XCTestCase {
         XCTAssertEqual(remaining.eligiblePairCount(datasetID: ImageMetadataStore.categoryID("Bark"), map: .depth, imageSize: 32), 0)
     }
 
-    func testUnreviewedDepthDoesNotSilentlySwitchTrainingToBump() throws {
+    func testTaggedDepthCanTrainWithoutReviewAndNeverSubstitutesBump() throws {
         let folder = URL(fileURLWithPath: "/test/material")
         let diffuse = member(folder, role: .diffuse)
         let bump = member(folder, role: .bump)
         let displacement = member(folder, role: .depth, verified: false)
-        XCTAssertTrue(try TrainingPairSelector.select(images: [diffuse, bump, displacement], dataset: "Bark", map: .depth, size: 32).isEmpty)
+        let pairs = try TrainingPairSelector.select(images: [diffuse, bump, displacement], dataset: "Bark", map: .depth, size: 32)
+        XCTAssertEqual(pairs.count, 1); XCTAssertEqual(pairs.first?.target.id, displacement.id)
     }
 
     func testIgnoredFilesStayVisibleButCannotFormADatasetOrTrainingPair() async throws {

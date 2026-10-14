@@ -8,13 +8,15 @@ extension LoomProject {
         guard let dataset = current.datasets.first(where: { $0.id == datasetID }) else {
             throw LoomError("This dataset no longer has images in the source folder. Choose a current dataset.")
         }
-        let pairs = try TrainingPairSelector.select(images: current.images, dataset: dataset.name, map: map, size: settings.imageSize)
-        let samples: [[String: Any]] = pairs.map { pair in
+        guard let plan = try current.trainingPlan(datasetID: datasetID, map: map, settings: settings) else { throw LoomError("Choose a current dataset.") }
+        let validationIDs = Set(plan.validation.map(\.id))
+        let samples: [[String: Any]] = (plan.training + plan.validation).map { pair in
             var item: [String: Any] = ["id": pair.id, "input": pair.input.url.path, "target": pair.target.url.path]
+            item["split"] = validationIDs.contains(pair.id) ? "validation" : "training"
             if map == .normal { item["normal_convention"] = pair.target.normalConvention == "directx" ? "DirectX" : "OpenGL" }
             return item
         }
-        guard !samples.isEmpty else { throw LoomError("\(dataset.name) has no reviewed diffuse/\(map.displayName.lowercased()) pairs at \(settings.imageSize) × \(settings.imageSize). Review the images or choose a crop size that fits.") }
+        guard !samples.isEmpty else { throw LoomError("\(dataset.name) has no matching diffuse/\(map.displayName.lowercased()) pairs at \(settings.imageSize) × \(settings.imageSize). Check the dataset and map types, or choose a crop size that fits.") }
         return try await runTraining(dataset: dataset, map: map, samples: samples, settings: settings, progress: progress)
     }
 
@@ -23,10 +25,7 @@ extension LoomProject {
         guard !operationActive else { throw LoomError("An operation is already running in this source project. Stop it before starting another.") }
         operationActive = true
         defer { operationActive = false }
-        guard (32...8192).contains(settings.imageSize), (1...100_000).contains(settings.epochs),
-              (1...64).contains(settings.batchSize), settings.learningRate.isFinite, settings.learningRate > 0 else {
-            throw LoomError("Choose a positive epoch count, learning rate and supported image size.")
-        }
+        if let issue = settings.validationIssue { throw LoomError(issue) }
         let id = UUID().uuidString.lowercased()
         let output = projectFolder.appendingPathComponent("runs/" + id, isDirectory: true)
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
@@ -36,26 +35,24 @@ extension LoomProject {
             "learning_rate": settings.learningRate, "shuffle_each_epoch": settings.shuffleEachEpoch,
             "flip_crops": settings.flipCrops, "rotate_crops": settings.rotateCrops,
             "exaggerate_features": map == .depth && settings.exaggerateFeatures,
-            "seed": settings.seed, "width": settings.modelWidth, "device": "auto"]
+            "seed": settings.seed, "width": settings.modelWidth, "blocks": settings.modelBlocks, "device": settings.device.rawValue,
+            "optimizer": settings.optimizer.rawValue, "weight_decay": settings.weightDecay,
+            "beta1": settings.beta1, "beta2": settings.beta2, "momentum": settings.momentum,
+            "gradient_accumulation_steps": settings.gradientAccumulationSteps, "gradient_clip_norm": settings.gradientClipNorm,
+            "lr_schedule": settings.learningRateSchedule.rawValue, "warmup_epochs": settings.warmupEpochs,
+            "minimum_lr_ratio": settings.minimumLearningRateRatio, "crop_refresh": settings.cropRefresh.rawValue,
+            "augmentation_refresh": settings.augmentationRefresh.rawValue, "validation_fraction": settings.validationFraction,
+            "validation_seed": settings.validationSeed, "early_stopping_patience": settings.earlyStoppingPatience,
+            "export_best_weights": settings.exportBestWeights, "checkpoint_every_epochs": settings.checkpointEveryEpochs]
         request["dataset_id"] = dataset.id; request["display_name"] = dataset.name
         request["map_kind"] = map.rawValue
         if settings.continueLatestWeights == true {
-            let runs = projectFolder.appendingPathComponent("runs", isDirectory: true)
-            let previous = try FileManager.default.contentsOfDirectory(at: runs, includingPropertiesForKeys: [.contentModificationDateKey])
-                .filter { $0 != output }
-                .sorted { ((try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
-                    > ((try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) }
-            for directory in previous {
-                let descriptor = directory.appendingPathComponent("checkpoint.json")
-                guard let bytes = try? Data(contentsOf: descriptor),
-                      let checkpoint = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
-                      checkpoint["project_id"] as? String == document.id,
-                      checkpoint["dataset_id"] as? String == dataset.id,
-                      checkpoint["map"] as? String == map.rawValue,
-                      checkpoint["kind"] as? String == "map",
-                      FileManager.default.fileExists(atPath: directory.appendingPathComponent("checkpoint.safetensors").path) else { continue }
-                request["resume_weights"] = directory.appendingPathComponent("checkpoint.safetensors").path
-                break
+            if let checkpoint = try loadCheckpoints().first(where: { $0.datasetID == dataset.id && $0.map == map }) {
+                guard settings.modelWidth == checkpoint.modelWidth, settings.modelBlocks == checkpoint.modelBlocks,
+                      settings.imageSize == checkpoint.imageSize, settings.exaggerateFeatures == checkpoint.exaggerateFeatures else {
+                    throw LoomError("Continue with the saved model size, native crop dimensions and depth transform. Choose a new model to change them.")
+                }
+                request["resume_weights"] = checkpoint.directory.appendingPathComponent("checkpoint.safetensors").path
             }
             guard request["resume_weights"] != nil else { throw LoomError("This dataset has no saved weights for this training type yet. Turn off Continue latest run to start a new model.") }
         }
@@ -71,7 +68,7 @@ extension LoomProject {
                               environment: [:], log: output.appendingPathComponent("setup.log"), progress: progress)
         }
         try Task.checkCancellation()
-        progress(.init(type: "start", message: "Training \(dataset.name) from reviewed image metadata"))
+        progress(.init(type: "start", message: "Training \(dataset.name) from current image tags"))
         try await execute(executable: python, arguments: ["-m", "loom_factory", "train-map", "--request", file.path],
                           environment: ["PYTHONPATH": runtime.path], log: output.appendingPathComponent("training.log"), progress: progress)
         let descriptor = output.appendingPathComponent("model.json")
@@ -84,8 +81,9 @@ extension LoomProject {
               FileManager.default.fileExists(atPath: output.appendingPathComponent(weights).path) else {
             throw LoomError("The native model export did not finish. The original maps and run weights are preserved.")
         }
+        let trainedEpochs = (result["training"] as? [String: Any])?["epochs"] as? Int ?? settings.epochs
         let artifact = ModelArtifact(id: id, kind: "map", datasetID: dataset.id, datasetName: dataset.name,
-            map: map, directory: output, epochs: settings.epochs,
+            map: map, directory: output, epochs: trainedEpochs,
             loss: (result["final_loss"] as? NSNumber)?.doubleValue ?? ((result["training"] as? [String: Any])?["history"] as? [[String: Any]])?.last?["loss"] as? Double,
             coreMLPath: coreML, weightsPath: weights, architecture: (result["architecture"] as? [String: Any])?["id"] as? String ?? result["architecture"] as? String ?? "loom-native-v1")
         try JSONEncoder().encode(artifact).write(to: output.appendingPathComponent("artifact.json"), options: .atomic)
@@ -130,7 +128,12 @@ extension LoomProject {
                     if let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any] {
                         progress(TrainingEvent(type: json["type"] as? String ?? json["event"] as? String ?? "progress",
                             message: json["message"] as? String ?? "Training…", progress: (json["progress"] as? NSNumber)?.doubleValue,
-                            epoch: json["epoch"] as? Int, loss: (json["loss"] as? NSNumber)?.doubleValue))
+                            epoch: json["epoch"] as? Int,
+                            loss: ((json["mean_training_loss"] ?? json["loss"]) as? NSNumber)?.doubleValue,
+                            validationLoss: (json["validation_loss"] as? NSNumber)?.doubleValue,
+                            learningRate: (json["learning_rate"] as? NSNumber)?.doubleValue,
+                            update: json["update"] as? Int, totalUpdates: json["total_updates"] as? Int,
+                            parameterCount: json["parameter_count"] as? Int, effectiveBatchSize: json["effective_batch_size"] as? Int))
                     }
                 }
             }

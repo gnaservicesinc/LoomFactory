@@ -8,6 +8,10 @@ Loom Room is the only starting workspace. Datasets are the categories discovered
 
 Preserve original image bytes and precision. Training must check current file/tag membership, report real progress, support cancellation, and export native CoreML plus architecture/weights for compatible LoRA training. Never represent a smoke test or an untrained model as a qualified production model.
 
+Manual review flags and notes are informational; they never determine training
+membership. Current physical files, dataset tags, map roles, pairing, ignore
+state and native dimensions determine usable pairs.
+
 Texture Loom packages carry one classifier, category models, identities, versions and checksums. They contain no source images, credentials, virtual dataset membership, or references to another project. Texture Studio consumes the package at build time; Loom Workshop trains adapters for that exact installed base.
 
 Before adding or changing a model product, read `Docs/ModelProductExtensions.md`.

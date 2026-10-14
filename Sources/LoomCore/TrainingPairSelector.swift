@@ -8,7 +8,7 @@ struct TrainingPair: Sendable {
 
 enum TrainingPairSelector {
     static func select(images: [SourceImage], dataset: String, map: MapRole, size: Int) throws -> [TrainingPair] {
-        let members = images.filter { $0.category == dataset && $0.verified && !$0.ignored }
+        let members = images.filter { $0.category == dataset && !$0.ignored }
         let families = Dictionary(grouping: members, by: \.pairingKey)
         var pairs: [TrainingPair] = []
         for key in families.keys.sorted() {

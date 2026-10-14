@@ -7,37 +7,39 @@ struct LoomRoomView: View {
     @State private var pairingSheet = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: FactoryStyle.spacing) {
-                header
-                if let issue = model.sourceIssue {
-                    FactoryPanel("Source folder needs attention") {
-                        Text(issue).foregroundStyle(.secondary).textSelection(.enabled)
-                        if let folder = model.sourceFolder {
-                            Text(folder.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+        VStack(spacing: 0) {
+            if model.snapshot != nil { workspaceNavigation }
+            if model.workspaceSection == .training, let snapshot = model.snapshot {
+                trainingWorkspace(snapshot)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: FactoryStyle.spacing) {
+                        header
+                        sourceIssuePanel
+                        if let snapshot = model.snapshot {
+                            sourcePanel(snapshot)
+                            switch model.workspaceSection {
+                            case .materials:
+                                datasetPanel(snapshot)
+                                if model.busy || !model.events.isEmpty { RunPanel(model: model) }
+                            case .training:
+                                EmptyView()
+                            case .package:
+                                HStack(alignment: .top, spacing: FactoryStyle.spacing) {
+                                    CreateMLPanel(model: model).frame(maxWidth: .infinity)
+                                    PackagePanel(model: model).frame(maxWidth: .infinity)
+                                }
+                                RunPanel(model: model)
+                            }
+                        } else {
+                            sourceWelcome
                         }
-                        Button("Try Again", systemImage: "arrow.clockwise") { model.refresh() }
-                            .disabled(model.busy)
                     }
-                }
-                if let snapshot = model.snapshot {
-                    sourcePanel(snapshot)
-                    datasetPanel(snapshot)
-                    HStack(alignment: .top, spacing: FactoryStyle.spacing) {
-                        TrainingPanel(model: model).frame(maxWidth: .infinity)
-                        VStack(spacing: FactoryStyle.spacing) {
-                            CreateMLPanel(model: model)
-                            PackagePanel(model: model)
-                        }.frame(width: 390)
-                    }
-                    if model.busy || !model.events.isEmpty { RunPanel(model: model) }
-                } else {
-                    sourceWelcome
+                    .padding(28)
+                    .frame(maxWidth: 1600)
+                    .frame(maxWidth: .infinity)
                 }
             }
-            .padding(28)
-            .frame(maxWidth: 1600)
-            .frame(maxWidth: .infinity)
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .toolbar {
@@ -65,6 +67,56 @@ struct LoomRoomView: View {
                 await model.pollFolder()
             }
         }
+    }
+
+    private var workspaceNavigation: some View {
+        HStack {
+            Picker("Loom Room workspace", selection: $model.workspaceSection) {
+                ForEach(LoomWorkspaceSection.allCases) { section in
+                    Text(section.displayName).tag(section)
+                }
+            }.pickerStyle(.segmented).labelsHidden().frame(width: 430, alignment: .leading)
+                .accessibilityIdentifier("loom.workspaceSection")
+            Spacer()
+        }
+        .padding(.horizontal, 28).padding(.vertical, 12)
+        .background(.bar)
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    @ViewBuilder private var sourceIssuePanel: some View {
+        if let issue = model.sourceIssue {
+            FactoryPanel("Source folder needs attention") {
+                Text(issue).foregroundStyle(.secondary).textSelection(.enabled)
+                if let folder = model.sourceFolder {
+                    Text(folder.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                }
+                Button("Try Again", systemImage: "arrow.clockwise") { model.refresh() }
+                    .disabled(model.busy)
+            }
+        }
+    }
+
+    private func trainingWorkspace(_ snapshot: ProjectSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: FactoryStyle.spacing) {
+            header
+            sourcePanel(snapshot)
+            HStack(alignment: .top, spacing: FactoryStyle.spacing) {
+                ScrollView {
+                    TrainingPanel(model: model).frame(maxWidth: .infinity)
+                }.accessibilityIdentifier("loom.trainingControls")
+                ScrollView {
+                    VStack(alignment: .leading, spacing: FactoryStyle.spacing) {
+                        RunPanel(model: model)
+                        TrainingOverviewPanel(model: model)
+                    }
+                }.frame(width: 330)
+                    .accessibilityIdentifier("loom.trainingProgress")
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .padding(28)
+        .frame(maxWidth: 1600)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private var header: some View {
@@ -249,14 +301,15 @@ private struct ImageReviewPanel: View {
             }
             Toggle("Ignore this file", isOn: $ignored).toggleStyle(.checkbox)
                 .help("Keep this image available for inspection and leave it out of categorization, Create ML export and model training.")
-            Toggle("Reviewed and verified", isOn: $verified).toggleStyle(.checkbox)
+            Toggle("Reviewed", isOn: $verified).toggleStyle(.checkbox)
+                .help("Optional record that you checked this material. Training uses its dataset tag and matching maps.")
             VStack(alignment: .leading, spacing: 5) {
                 Text("Review note").font(.caption.weight(.medium)).foregroundStyle(.secondary)
                 TextEditor(text: $note).font(.callout).frame(minHeight: 60, maxHeight: 90)
                     .scrollContentBackground(.hidden).padding(6)
                     .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 7))
             }
-            Text("Dataset and review apply to this material folder. Map type and Ignore apply to this file.")
+            Text("Review is optional. Dataset and review apply to this material folder. Map type and Ignore apply to this file.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
             HStack {
@@ -311,5 +364,17 @@ extension SourceImage {
     var previewRevision: String {
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         return "\(attributes?[.modificationDate] ?? "")|\(attributes?[.size] ?? "")"
+    }
+}
+
+enum LoomWorkspaceSection: String, CaseIterable, Identifiable {
+    case materials, training, package
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .materials: "Materials"
+        case .training: "Training"
+        case .package: "Package"
+        }
     }
 }

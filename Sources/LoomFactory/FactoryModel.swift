@@ -13,6 +13,7 @@ final class FactoryModel {
     var selectedMap: MapRole = .depth
     var imageSearch = ""
     var fileFilter: MaterialBrowserFilter = .all
+    var workspaceSection: LoomWorkspaceSection = .materials
     private(set) var busy = false
     private(set) var activityTitle = ""
     private(set) var progress: Double?
@@ -71,13 +72,38 @@ final class FactoryModel {
         snapshot?.artifacts.filter { $0.kind == "map" && $0.datasetID == selectedDatasetID } ?? []
     }
     var eligiblePairCount: Int {
-        snapshot?.eligiblePairCount(datasetID: selectedDatasetID, map: selectedMap, imageSize: settings.training.imageSize) ?? 0
+        trainingPlan?.totalPairCount ?? 0
+    }
+    var selectedCheckpoint: TrainingCheckpoint? {
+        snapshot?.checkpoints.first { $0.datasetID == selectedDatasetID && $0.map == selectedMap }
+    }
+    var effectiveTrainingSettings: TrainingSettings {
+        var value = settings.training
+        if value.continueLatestWeights == true, let checkpoint = selectedCheckpoint {
+            value.modelWidth = checkpoint.modelWidth; value.modelBlocks = checkpoint.modelBlocks
+            value.imageSize = checkpoint.imageSize; value.exaggerateFeatures = checkpoint.exaggerateFeatures
+        }
+        return value
+    }
+    var trainingOptionsIssue: String? {
+        if let issue = effectiveTrainingSettings.validationIssue { return issue }
+        do {
+            if let plan = try snapshot?.trainingPlan(datasetID: selectedDatasetID, map: selectedMap, settings: effectiveTrainingSettings),
+               effectiveTrainingSettings.earlyStoppingPatience > 0, plan.validationPairCount == 0 {
+                return "Early stopping needs held-out pairs from another material folder. Disable early stopping or add another tagged material folder."
+            }
+        } catch { return error.localizedDescription }
+        return nil
+    }
+    var trainingPlan: TrainingDataPlan? {
+        guard effectiveTrainingSettings.validationIssue == nil else { return nil }
+        return try? snapshot?.trainingPlan(datasetID: selectedDatasetID, map: selectedMap, settings: effectiveTrainingSettings)
     }
     var canContinueMap: Bool {
-        selectedArtifacts.contains { $0.map == selectedMap && hasWeights($0) }
+        selectedCheckpoint != nil
     }
     var canTrain: Bool {
-        project != nil && selectedDataset != nil && eligiblePairCount > 0 && !busy &&
+        project != nil && selectedDataset != nil && trainingOptionsIssue == nil && (trainingPlan?.trainingPairCount ?? 0) > 0 && !busy &&
         (!(settings.training.continueLatestWeights ?? false) || canContinueMap)
     }
 
@@ -128,6 +154,7 @@ final class FactoryModel {
         selectedMap = .depth
         imageSearch = ""
         fileFilter = .all
+        workspaceSection = .materials
         settings = ProjectSettings()
         exportedPackage = nil
         publishedURL = nil
@@ -243,9 +270,10 @@ final class FactoryModel {
 
     func trainMap() {
         guard let dataset = selectedDataset, canTrain else { return }
+        workspaceSection = .training
         let value = settings
         let map = selectedMap
-        var training = value.training
+        var training = effectiveTrainingSettings
         training.exaggerateFeatures = map == .depth && training.exaggerateFeatures
         let configuredTraining = training
         let onProgress = progressHandler()
@@ -459,8 +487,4 @@ final class FactoryModel {
         sourceIssue = error.localizedDescription
     }
 
-    private func hasWeights(_ artifact: ModelArtifact) -> Bool {
-        guard let path = artifact.weightsPath else { return false }
-        return FileManager.default.fileExists(atPath: artifact.directory.appendingPathComponent(path).path)
-    }
 }

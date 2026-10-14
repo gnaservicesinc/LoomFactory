@@ -77,12 +77,13 @@ public enum ImageMetadataStore {
         guard metadata.roleWasManuallySelected != true,
               metadata.pairingWasManuallySelected != true else { return metadata }
         let inferred = initialMetadata(file: file, sourceRoot: sourceRoot, width: width, height: height)
-        guard inferred.role == .bump || inferred.role == .diffuse else { return metadata }
+        guard inferred.role != .unknown else { return metadata }
         let legacy = inferredMetadata(file: file, sourceRoot: sourceRoot, width: width, height: height, currentNaming: false)
         guard metadata.role == legacy.role, metadata.pairingKey == legacy.pairingKey,
               metadata.role != inferred.role || metadata.pairingKey != inferred.pairingKey else { return metadata }
         var repaired = metadata
         repaired.role = inferred.role; repaired.pairingKey = inferred.pairingKey
+        if metadata.role != .normal && inferred.role == .normal { repaired.normalConvention = inferred.normalConvention }
         repaired.roleWasManuallySelected = false; repaired.pairingWasManuallySelected = false
         return repaired
     }
@@ -92,7 +93,7 @@ public enum ImageMetadataStore {
         let stem = file.deletingPathExtension().lastPathComponent.lowercased()
         let tokens = stem.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
         var roles: [(MapRole, Set<String>)] = [
-            (.diffuse, currentNaming ? ["diff", "diffuse", "albedo", "basecolor", "basecolour", "basecol", "basecolo", "color", "colour", "col", "colo"]
+            (.diffuse, currentNaming ? ["diff", "diffuse", "albedo", "basecolor", "basecolour", "basecol", "basecolo", "color", "colour", "col", "colo", "col1", "coll1", "coll"]
                                     : ["diff", "diffuse", "albedo", "basecolor", "color", "colour", "col"]),
             (.depth, ["disp", "displacement", "height", "depth"]),
             (.roughness, ["rough", "roughness"]),
@@ -111,6 +112,16 @@ public enum ImageMetadataStore {
         let choice = currentNaming ? choices.max { $0.1 < $1.1 } : choices.first
         if let (candidate, index) = choice {
             role = candidate; family.remove(at: index)
+            // Poly Haven's first colour variant is the primary paired input.
+            // Strip its variant marker as well as the role, keeping resolution.
+            if currentNaming, candidate == .diffuse, ["col", "coll"].contains(tokens[index]),
+               index + 1 < tokens.count, tokens[index + 1] == "1" {
+                family.remove(at: index)
+            }
+            if currentNaming, candidate == .diffuse, tokens[index] == "coll",
+               !(index + 1 < tokens.count && tokens[index + 1] == "1") {
+                role = .unknown; family = tokens
+            }
             if currentNaming, candidate == .diffuse, index > 0, tokens[index - 1] == "base",
                ["color", "colour", "col", "colo"].contains(tokens[index]) {
                 family.remove(at: index - 1)

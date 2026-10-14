@@ -1,5 +1,6 @@
 """Optimization must preserve current files, precision and fresh random crops."""
 from pathlib import Path
+import os
 import random
 import sys
 import tempfile
@@ -13,6 +14,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "Runtime"))
 from loom_factory import images
 from loom_factory.pixel_cache import DecodedImageCache
+from loom_factory.metadata import write_fixture_metadata
 
 
 class DecodedPixelsTests(unittest.TestCase):
@@ -87,6 +89,54 @@ class DecodedPixelsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "changed while"):
                 cache.read(path, "rgb", changing_loader)
             self.assertEqual(cache.cached_bytes, 0)
+
+    def test_metadata_note_change_during_decode_retries_once_and_returns_stable_pixels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pixels"
+            path.write_bytes(b"unchanged pixels")
+            original_mtime = path.stat().st_mtime_ns
+            calls = []
+            def metadata_loader(current):
+                calls.append(current)
+                if len(calls) == 1:
+                    write_fixture_metadata(current, {"note": "New review note"})
+                return np.array([len(calls)], dtype=np.float32)
+            cache = DecodedImageCache(1024)
+            self.assertEqual(cache.read(path, "rgb", metadata_loader).tolist(), [2])
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(cache.read(path, "rgb", metadata_loader).tolist(), [2])
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(path.stat().st_mtime_ns, original_mtime)
+            self.assertEqual(path.read_bytes(), b"unchanged pixels")
+            self.assertEqual((cache.misses, cache.hits), (1, 1))
+
+    def test_repeated_metadata_changes_during_decode_fail_after_one_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pixels"
+            path.write_bytes(b"unchanged pixels")
+            calls = []
+            def changing_metadata_loader(current):
+                calls.append(current)
+                write_fixture_metadata(current, {"note": f"Review note {len(calls)}"})
+                return np.ones(4, dtype=np.float32)
+            cache = DecodedImageCache(1024)
+            with self.assertRaisesRegex(ValueError, "changed while"):
+                cache.read(path, "rgb", changing_metadata_loader)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(cache.cached_bytes, 0)
+
+    def test_pixel_edit_with_restored_mtime_still_invalidates_cached_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pixels"
+            path.write_bytes(b"a")
+            stat = path.stat()
+            cache = DecodedImageCache(1024)
+            loader = lambda current: np.frombuffer(Path(current).read_bytes(), dtype=np.uint8).copy()
+            self.assertEqual(cache.read(path, "rgb", loader).tolist(), [97])
+            path.write_bytes(b"b")
+            os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            self.assertEqual(cache.read(path, "rgb", loader).tolist(), [98])
+            self.assertEqual(cache.misses, 2)
 
     def test_normal_conventions_have_distinct_cache_entries(self):
         with tempfile.TemporaryDirectory() as directory:

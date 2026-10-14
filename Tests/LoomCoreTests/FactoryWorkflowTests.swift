@@ -18,7 +18,7 @@ final class FactoryWorkflowTests: XCTestCase {
         let project = try LoomProject(sourceFolder: root)
         let current = try await project.snapshot()
         let diffuse = try XCTUnwrap(current.images.first { $0.role == .diffuse })
-        try await project.updateImage(id: diffuse.id, category: "Bricks", verified: true, note: "Integration fixture")
+        try await project.updateImage(id: diffuse.id, category: "Bricks", verified: false, note: "Integration fixture")
         let runtimeLink = root.appendingPathComponent(".loom-factory/runtime")
         try FileManager.default.createSymbolicLink(at: runtimeLink, withDestinationURL: URL(fileURLWithPath: runtime))
         let settings = TrainingSettings(imageSize: 64, epochs: 1, batchSize: 1, shuffleEachEpoch: false,
