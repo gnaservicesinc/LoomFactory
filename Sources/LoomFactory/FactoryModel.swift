@@ -4,13 +4,49 @@ import LoomCore
 import Observation
 import UniformTypeIdentifiers
 
+enum FactoryTrainingStartMode: String, CaseIterable, Identifiable {
+    case fresh, exportedModel, checkpoint
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .fresh: "Replace with a fresh model"
+        case .exportedModel: "Continue exported model weights"
+        case .checkpoint: "Continue final checkpoint"
+        }
+    }
+}
+
 @MainActor @Observable
 final class FactoryModel {
     private(set) var snapshot: ProjectSnapshot?
     var settings = ProjectSettings()
-    var selectedDatasetID = ""
+    var selectedDatasetID = "" {
+        didSet {
+            if selectedDatasetID != oldValue { selectedTrainingVersionID = ""; invalidateComparisonSelection() }
+        }
+    }
     var selectedImageID: String?
-    var selectedMap: MapRole = .depth
+    var selectedMap: MapRole = .depth {
+        didSet {
+            if selectedMap != oldValue { selectedTrainingVersionID = ""; invalidateComparisonSelection() }
+        }
+    }
+    var trainingStartMode: FactoryTrainingStartMode = .checkpoint
+    var selectedTrainingVersionID = ""
+    var runLabel = ""
+    var comparisonFirstVersionID = "" {
+        didSet { if comparisonFirstVersionID != oldValue { invalidateComparisonSelection() } }
+    }
+    var comparisonSecondVersionID = "" {
+        didSet { if comparisonSecondVersionID != oldValue { invalidateComparisonSelection() } }
+    }
+    var comparisonPairID = "" {
+        didSet { if comparisonPairID != oldValue { comparisonResult = nil } }
+    }
+    private(set) var comparisonPairs: [ModelComparisonPair] = []
+    private(set) var comparisonResult: ModelComparisonResult?
+    private(set) var comparisonIssue: String?
+    private(set) var loadingComparisonPairs = false
     var imageSearch = ""
     var fileFilter: MaterialBrowserFilter = .all
     var workspaceSection: LoomWorkspaceSection = .materials
@@ -28,6 +64,9 @@ final class FactoryModel {
     @ObservationIgnored private var saveOperation: Task<Void, Never>?
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var polling = false
+    @ObservationIgnored private var loadedComparisonKey = ""
+    @ObservationIgnored private var packageNeedsExport = false
+    @ObservationIgnored private var comparisonImageRevisions: [String: String] = [:]
     @ObservationIgnored private let rememberSourceFolder: Bool
 
     var sourceFolder: URL? { project?.sourceFolder }
@@ -71,21 +110,92 @@ final class FactoryModel {
     var selectedArtifacts: [ModelArtifact] {
         snapshot?.artifacts.filter { $0.kind == "map" && $0.datasetID == selectedDatasetID } ?? []
     }
+    var selectedModelVersions: [ModelVersion] {
+        snapshot?.modelVersions.filter { $0.datasetID == selectedDatasetID && $0.map == selectedMap } ?? []
+    }
+    var exportedModelVersions: [ModelVersion] {
+        selectedModelVersions.filter { $0.artifact?.weightsPath != nil }
+    }
+    var activeMapVersions: [ModelVersion] { snapshot?.modelVersions.filter { $0.isActive && $0.artifact != nil } ?? [] }
+    var continuableModelVersions: [ModelVersion] {
+        effectiveStartMode == .exportedModel ? exportedModelVersions : selectedModelVersions.filter { $0.checkpoint != nil }
+    }
+    var effectiveStartMode: FactoryTrainingStartMode {
+        settings.training.continueLatestWeights == true ? trainingStartMode : .fresh
+    }
+    var selectedTrainingVersion: ModelVersion? {
+        let versions = continuableModelVersions
+        if !selectedTrainingVersionID.isEmpty { return versions.first { $0.id == selectedTrainingVersionID } }
+        if effectiveStartMode == .exportedModel, let active = versions.first(where: \.isActive) { return active }
+        return versions.first
+    }
+    var continuingTraining: Bool { effectiveStartMode != .fresh }
+    var trainingStart: TrainingStart? {
+        guard continuingTraining else { return .fresh }
+        guard let version = selectedTrainingVersion else {
+            if effectiveStartMode == .checkpoint, selectedTrainingVersionID.isEmpty, let checkpoint = selectedCheckpoint {
+                return .checkpoint(runID: checkpoint.directory.lastPathComponent)
+            }
+            return nil
+        }
+        return effectiveStartMode == .exportedModel ? .model(runID: version.id) : .checkpoint(runID: version.id)
+    }
+    var firstComparisonVersion: ModelVersion? {
+        exportedModelVersions.first { $0.id == comparisonFirstVersionID } ??
+            exportedModelVersions.first(where: \.isActive) ?? exportedModelVersions.first
+    }
+    var secondComparisonVersion: ModelVersion? {
+        let remaining = exportedModelVersions.filter { $0.id != firstComparisonVersion?.id }
+        return remaining.first { $0.id == comparisonSecondVersionID } ?? remaining.first
+    }
+    var comparisonSelectionKey: String {
+        var membership = Hasher()
+        for image in snapshot?.images ?? [] where image.category == selectedDataset?.name {
+            membership.combine(image.id); membership.combine(image.url); membership.combine(image.role)
+            membership.combine(image.pairingKey); membership.combine(image.ignored)
+            membership.combine(image.width); membership.combine(image.height)
+            membership.combine(comparisonImageRevisions[image.id])
+        }
+        return [selectedDatasetID, selectedMap.rawValue, firstComparisonVersion?.id ?? "", secondComparisonVersion?.id ?? "",
+                String(membership.finalize())].joined(separator: "|")
+    }
+    var selectedComparisonPair: ModelComparisonPair? {
+        comparisonPairs.first { $0.id == comparisonPairID } ?? comparisonPairs.first
+    }
+    var canCompareModels: Bool {
+        !busy && !loadingComparisonPairs && loadedComparisonKey == comparisonSelectionKey &&
+        firstComparisonVersion?.artifact != nil && secondComparisonVersion?.artifact != nil && selectedComparisonPair != nil
+    }
     var eligiblePairCount: Int {
         trainingPlan?.totalPairCount ?? 0
     }
     var selectedCheckpoint: TrainingCheckpoint? {
-        snapshot?.checkpoints.first { $0.datasetID == selectedDatasetID && $0.map == selectedMap }
+        guard effectiveStartMode != .exportedModel else { return nil }
+        if !selectedTrainingVersionID.isEmpty { return selectedTrainingVersion?.checkpoint }
+        if let checkpoint = selectedTrainingVersion?.checkpoint { return checkpoint }
+        return snapshot?.checkpoints.first { $0.datasetID == selectedDatasetID && $0.map == selectedMap }
     }
     var effectiveTrainingSettings: TrainingSettings {
         var value = settings.training
-        if value.continueLatestWeights == true, let checkpoint = selectedCheckpoint {
-            value.modelWidth = checkpoint.modelWidth; value.modelBlocks = checkpoint.modelBlocks
-            value.imageSize = checkpoint.imageSize; value.exaggerateFeatures = checkpoint.exaggerateFeatures
+        if continuingTraining {
+            if effectiveStartMode == .exportedModel, let saved = selectedTrainingVersion?.settings {
+                value.modelWidth = saved.modelWidth; value.modelBlocks = saved.modelBlocks
+                value.imageSize = saved.imageSize; value.exaggerateFeatures = saved.exaggerateFeatures
+            } else if effectiveStartMode == .checkpoint, let checkpoint = selectedCheckpoint {
+                value.modelWidth = checkpoint.modelWidth; value.modelBlocks = checkpoint.modelBlocks
+                value.imageSize = checkpoint.imageSize; value.exaggerateFeatures = checkpoint.exaggerateFeatures
+            }
         }
         return value
     }
     var trainingOptionsIssue: String? {
+        if continuingTraining && !selectedTrainingVersionID.isEmpty && selectedTrainingVersion == nil {
+            return "The selected saved version is no longer available. Choose another version or replace with a fresh model."
+        }
+        if effectiveStartMode == .exportedModel, let version = selectedTrainingVersion, version.settings == nil {
+            return "This saved model has no readable architecture and training settings. Choose another version or replace with a fresh model."
+        }
+        if continuingTraining && !canContinueMap { return "Choose saved weights for this dataset and map, or replace with a fresh model." }
         if let issue = effectiveTrainingSettings.validationIssue { return issue }
         do {
             if let plan = try snapshot?.trainingPlan(datasetID: selectedDatasetID, map: selectedMap, settings: effectiveTrainingSettings),
@@ -100,11 +210,12 @@ final class FactoryModel {
         return try? snapshot?.trainingPlan(datasetID: selectedDatasetID, map: selectedMap, settings: effectiveTrainingSettings)
     }
     var canContinueMap: Bool {
-        selectedCheckpoint != nil
+        if effectiveStartMode == .exportedModel { return selectedTrainingVersion?.artifact?.weightsPath != nil && selectedTrainingVersion?.settings != nil }
+        return selectedCheckpoint != nil
     }
     var canTrain: Bool {
         project != nil && selectedDataset != nil && trainingOptionsIssue == nil && (trainingPlan?.trainingPairCount ?? 0) > 0 && !busy &&
-        (!(settings.training.continueLatestWeights ?? false) || canContinueMap)
+        (!continuingTraining || canContinueMap)
     }
 
     init(rememberSourceFolder: Bool = true) {
@@ -148,6 +259,19 @@ final class FactoryModel {
         selectedImageID = nil
         selectedDatasetID = ""
         selectedMap = .depth
+        trainingStartMode = .checkpoint
+        selectedTrainingVersionID = ""
+        runLabel = ""
+        comparisonFirstVersionID = ""
+        comparisonSecondVersionID = ""
+        comparisonPairID = ""
+        comparisonPairs = []
+        comparisonResult = nil
+        comparisonIssue = nil
+        loadingComparisonPairs = false
+        loadedComparisonKey = ""
+        packageNeedsExport = false
+        comparisonImageRevisions = [:]
         imageSearch = ""
         fileFilter = .all
         workspaceSection = .materials
@@ -272,11 +396,95 @@ final class FactoryModel {
         var training = effectiveTrainingSettings
         training.exaggerateFeatures = map == .depth && training.exaggerateFeatures
         let configuredTraining = training
+        let start = trainingStart
+        let label = runLabel
         let onProgress = progressHandler()
-        perform("Training \(dataset.name) · \(map.displayName)", clearEvents: true) { project in
+        let current = generation
+        perform("Training \(dataset.name) · \(map.displayName)", clearEvents: true) { [weak self] project in
             try await project.updateSettings(value)
-            _ = try await project.trainMap(datasetID: dataset.id, map: map, settings: configuredTraining, progress: onProgress)
+            _ = try await project.trainMap(datasetID: dataset.id, map: map, settings: configuredTraining,
+                                          start: start, runLabel: label, progress: onProgress)
+            guard let self, self.generation == current else { return }
+            self.invalidateExportedPackage()
         }
+    }
+
+    func setTrainingStartMode(_ mode: FactoryTrainingStartMode) {
+        trainingStartMode = mode == .fresh ? .checkpoint : mode
+        settings.training.continueLatestWeights = mode != .fresh
+        selectedTrainingVersionID = ""
+    }
+
+    func continueModelVersion(_ version: ModelVersion, source: FactoryTrainingStartMode) {
+        setTrainingStartMode(source)
+        selectedTrainingVersionID = version.id
+    }
+
+    func useModelVersionForExport(_ version: ModelVersion) {
+        guard version.artifact != nil else { return }
+        let current = generation
+        perform("Selecting model for export") { [weak self] project in
+            try await project.selectModelVersion(runID: version.id, datasetID: version.datasetID, map: version.map)
+            guard let self, self.generation == current else { return }
+            self.invalidateExportedPackage()
+        }
+    }
+
+    func loadComparisonPairs() async {
+        let key = comparisonSelectionKey
+        guard key != loadedComparisonKey else { return }
+        comparisonResult = nil
+        comparisonIssue = nil
+        comparisonPairs = []
+        guard let project, let first = firstComparisonVersion?.artifact, let second = secondComparisonVersion?.artifact else {
+            loadedComparisonKey = key
+            loadingComparisonPairs = false
+            return
+        }
+        let current = generation
+        loadingComparisonPairs = true
+        do {
+            let pairs = try await project.comparePairOptions(datasetID: selectedDatasetID, map: selectedMap,
+                                                             artifactIDs: [first.id, second.id])
+            guard !Task.isCancelled, current == generation, key == comparisonSelectionKey else { return }
+            comparisonPairs = pairs
+            if !pairs.contains(where: { $0.id == comparisonPairID }) { comparisonPairID = pairs.first?.id ?? "" }
+            if pairs.isEmpty { comparisonIssue = "No current paired material can supply a common crop for these versions." }
+            loadedComparisonKey = key
+            loadingComparisonPairs = false
+        } catch {
+            guard !Task.isCancelled, current == generation, key == comparisonSelectionKey else { return }
+            comparisonIssue = error.localizedDescription
+            loadedComparisonKey = key
+            loadingComparisonPairs = false
+        }
+    }
+
+    func compareModels() {
+        guard canCompareModels, let first = firstComparisonVersion?.artifact, let second = secondComparisonVersion?.artifact,
+              let pair = selectedComparisonPair else { return }
+        let current = generation
+        comparisonResult = nil
+        let onProgress = progressHandler()
+        perform("Comparing saved models", clearEvents: true) { [weak self] project in
+            let result = try await project.compareModels(firstArtifactID: first.id, secondArtifactID: second.id,
+                                                        pairID: pair.id, progress: onProgress)
+            guard let self, self.generation == current else { return }
+            self.comparisonResult = result
+        }
+    }
+
+    private func invalidateComparisonSelection() {
+        comparisonResult = nil
+        comparisonPairs = []
+        comparisonIssue = nil
+        loadedComparisonKey = ""
+    }
+
+    private func invalidateExportedPackage() {
+        exportedPackage = nil
+        publishedURL = nil
+        packageNeedsExport = true
     }
 
     func exportClassifierData() {
@@ -369,6 +577,7 @@ final class FactoryModel {
             let url = try await project.exportPackage(name: value.modelName, version: value.modelVersion)
             guard let self, self.generation == current else { return }
             self.exportedPackage = url
+            self.packageNeedsExport = false
             NSWorkspace.shared.activateFileViewerSelecting([url])
         }
     }
@@ -450,6 +659,13 @@ final class FactoryModel {
     }
 
     private func adopt(_ value: ProjectSnapshot, restoreSettings: Bool) {
+        let previousModels = Set(snapshot?.modelVersions.filter { $0.isActive }.map(\.id) ?? [])
+        let currentModels = Set(value.modelVersions.filter { $0.isActive }.map(\.id))
+        if snapshot != nil, previousModels != currentModels { invalidateExportedPackage() }
+        comparisonImageRevisions = Dictionary(uniqueKeysWithValues: value.images.map { image in
+            let attributes = try? image.url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+            return (image.id, "\(attributes?.contentModificationDate?.timeIntervalSince1970 ?? 0)|\(attributes?.fileSize ?? 0)")
+        })
         snapshot = value
         sourceIssue = nil
         if restoreSettings { settings = value.settings }
@@ -457,11 +673,16 @@ final class FactoryModel {
            !value.datasets.contains(where: { $0.id == selectedDatasetID }) { selectedDatasetID = "" }
         selectVisibleImageIfNeeded()
         if let url = exportedPackage, !FileManager.default.fileExists(atPath: url.path) { exportedPackage = nil }
-        if exportedPackage == nil {
+        if exportedPackage == nil && !packageNeedsExport {
             let exports = value.sourceURL.appendingPathComponent(".loom-factory/exports", isDirectory: true)
+            let selectionDate = (try? value.sourceURL.appendingPathComponent(".loom-factory/model-selection.json")
+                .resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
             exportedPackage = (try? FileManager.default.contentsOfDirectory(at: exports,
                 includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]))?
-                .filter { $0.pathExtension == "textureloom" }
+                .filter {
+                    $0.pathExtension == "textureloom" &&
+                    ((try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast) >= selectionDate
+                }
                 .sorted {
                     let left = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
                     let right = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast

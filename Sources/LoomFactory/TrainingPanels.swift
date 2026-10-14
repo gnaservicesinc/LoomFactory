@@ -6,6 +6,7 @@ struct TrainingPanel: View {
     @Bindable var model: FactoryModel
     @State private var customArchitecture = false
     @State private var optimizerTuning = false
+    @State private var comparingModels = false
 
     init(model: FactoryModel, showTuning: Bool = false) {
         self.model = model
@@ -30,13 +31,14 @@ struct TrainingPanel: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("training.optionsIssue")
             }
-            FactoryActionButton(title: "Train \(model.selectedMap.displayName) Model", symbol: "play.fill", prominent: true) {
+            FactoryActionButton(title: startButtonTitle, symbol: "play.fill", prominent: true) {
                 model.trainMap()
             }.disabled(!model.canTrain)
                 .accessibilityIdentifier("training.start")
             trainedModels
         }
         .disabled(model.busy)
+        .sheet(isPresented: $comparingModels) { ModelComparisonView(model: model) }
     }
 
     private var datasetSelection: some View {
@@ -98,27 +100,30 @@ struct TrainingPanel: View {
 
     private var architectureSettings: some View {
         VStack(alignment: .leading, spacing: 11) {
-            if model.canContinueMap || continuing {
-                Toggle("Continue latest weights", isOn: Binding(
-                    get: { model.settings.training.continueLatestWeights ?? false },
-                    set: { model.settings.training.continueLatestWeights = $0 }
-                ))
-                .help("Continue saved weights with a fresh optimizer. The saved model architecture is retained.")
-                .accessibilityIdentifier("training.continue")
-            }
-            if model.settings.training.continueLatestWeights == true {
-                if model.canContinueMap {
-                    Text("Saved model architecture and training dimensions are retained. Optimizer and learning-rate settings apply to this new run.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    if let checkpoint = model.selectedCheckpoint {
-                        Text("\(checkpoint.epochsCompleted.formatted()) completed epochs · \(checkpoint.imageSize.formatted()) × \(checkpoint.imageSize.formatted()) pixels")
-                            .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+            Picker("Start this run", selection: Binding(get: { model.effectiveStartMode }, set: { model.setTrainingStartMode($0) })) {
+                ForEach(FactoryTrainingStartMode.allCases) { Text($0.displayName).tag($0) }
+            }.accessibilityIdentifier("training.startMode")
+            if continuing {
+                Picker("Saved version", selection: Binding(
+                    get: { model.selectedTrainingVersion?.id ?? "" }, set: { model.selectedTrainingVersionID = $0 }
+                )) {
+                    if model.continuableModelVersions.isEmpty { Text("No saved weights for this map").tag("") }
+                    ForEach(model.continuableModelVersions) { version in
+                        Text(ModelVersionPresentation.title(version)).tag(version.id)
                     }
-                } else {
-                    Text("There are no saved weights for this dataset and map. Turn off Continue latest weights to train a new model.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
+                }.accessibilityIdentifier("training.continueVersion")
+                Text(model.effectiveStartMode == .exportedModel
+                     ? "Starts from the exported weights of this version, including lowest validation loss weights when that run exported them. A fresh optimizer uses the settings below."
+                     : "Starts from this run’s final saved checkpoint, which can differ from its exported weights. A fresh optimizer uses the settings below.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text("Saved architecture, training dimensions and depth transform are retained. This continuation creates another saved version.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("Starts new weights and keeps every previous version. A successful replacement becomes the model used for package export.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
+            TextField("Run label (optional), e.g. lower learning rate", text: $model.runLabel)
+                .textFieldStyle(.roundedBorder).accessibilityIdentifier("training.runLabel")
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 11) {
                 row("Model size", detail: "Larger models use more memory and take longer to train.") {
                     Picker("Model size", selection: presetBinding) {
@@ -127,7 +132,7 @@ struct TrainingPanel: View {
                         }
                     }.labelsHidden().accessibilityIdentifier("training.modelPreset")
                 }
-            }.disabled(model.settings.training.continueLatestWeights == true)
+            }.disabled(continuing)
             HStack(spacing: 8) {
                 Image(systemName: "number.square").foregroundStyle(FactoryStyle.accent)
                 Text("\(model.effectiveTrainingSettings.parameterCount(map: model.selectedMap).formatted()) trainable parameters")
@@ -156,6 +161,18 @@ struct TrainingPanel: View {
                 numberRow("Learning rate", value: $model.settings.training.learningRate, detail: model.settings.training.optimizer == .lion ? "For Lion, consider starting at 0.0001." : "The starting update size.", identifier: "training.learningRate")
                 numberRow("Batch size", value: $model.settings.training.batchSize, detail: "Images processed together; raises memory use.", identifier: "training.batchSize")
                 numberRow("Gradient accumulation", value: $model.settings.training.gradientAccumulationSteps, detail: "Batches per update; increases effective batch size without a larger image batch.", identifier: "training.gradientAccumulation")
+                row("Gradient clipping", detail: "Clips the global L2 norm after all accumulated gradients are averaged, before the optimizer update.") {
+                    Picker("Gradient clipping", selection: $model.settings.training.gradientClipPolicy) {
+                        ForEach(TrainingGradientClipping.allCases) { Text($0.displayName).tag($0) }
+                    }.labelsHidden().accessibilityIdentifier("training.gradientClipPolicy")
+                }
+                if model.settings.training.gradientClipPolicy != .off {
+                    numberRow("Max norm", value: $model.settings.training.gradientClipNorm, detail: "Maximum global norm; warmup increases toward this cap. 0 disables clipping.", identifier: "training.gradientClipping")
+                    if model.settings.training.gradientClipPolicy == .warmup {
+                        numberRow("Initial max norm", value: $model.settings.training.gradientClipWarmupStartNorm, detail: "Smaller cap for the first update; must be at most Max norm.", identifier: "training.gradientClipWarmupStartNorm")
+                        numberRow("Warmup updates", value: $model.settings.training.gradientClipWarmupUpdates, detail: "Optimizer updates until the cap reaches Max norm. Separate from learning-rate warmup.", identifier: "training.gradientClipWarmupUpdates")
+                    }
+                }
             }
             DisclosureGroup("Optimizer tuning", isExpanded: $optimizerTuning) {
                 Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 11) {
@@ -166,7 +183,6 @@ struct TrainingPanel: View {
                         numberRow("Beta 1", value: $model.settings.training.beta1, detail: "First-moment decay.", identifier: "training.beta1")
                         numberRow("Beta 2", value: $model.settings.training.beta2, detail: model.settings.training.optimizer == .lion ? "Momentum decay for Lion; 0.99 is a usual starting value." : "Second-moment decay.", identifier: "training.beta2")
                     }
-                    numberRow("Gradient clipping", value: $model.settings.training.gradientClipNorm, detail: "Maximum gradient norm. 0 disables clipping.", identifier: "training.gradientClipping")
                 }.padding(.top, 8)
             }.font(.callout)
         }
@@ -248,9 +264,9 @@ struct TrainingPanel: View {
                 numberRow("Checkpoint every", value: $model.settings.training.checkpointEveryEpochs, detail: "Save weights every N epochs, and at the end.", identifier: "training.checkpointEveryEpochs")
             }
             if model.settings.training.validationFraction > 0 {
-                Toggle("Export weights with the best validation loss", isOn: $model.settings.training.exportBestWeights)
+                Toggle("Export weights with the lowest validation loss", isOn: $model.settings.training.exportBestWeights)
                     .toggleStyle(.checkbox).accessibilityIdentifier("training.exportBest")
-                    .help("Off exports the final training weights.")
+                    .help("Off exports the final training weights. Lowest loss does not always produce the best-looking material.")
             }
         }
     }
@@ -284,23 +300,25 @@ struct TrainingPanel: View {
     }
 
     @ViewBuilder private var trainedModels: some View {
-        if !model.selectedArtifacts.isEmpty {
+        if !model.selectedModelVersions.isEmpty {
             Divider()
-            Text("Trained models").font(.subheadline.weight(.semibold))
-            ForEach(model.selectedArtifacts.prefix(3), id: \.id) { artifact in
-                HStack(spacing: 12) {
-                    Image(systemName: "cube").foregroundStyle(FactoryStyle.accent)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("\(artifact.datasetName ?? "Dataset") · \(artifact.map?.displayName ?? "Model")")
-                            .font(.callout.weight(.medium))
-                        Text("\(artifact.epochs) epochs · \(artifact.createdAt.formatted(date: .abbreviated, time: .shortened))")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Show") { model.reveal(artifact.directory) }
-                }
+            HStack {
+                Text("Saved \(model.selectedMap.displayName.lowercased()) versions").font(.subheadline.weight(.semibold))
+                Spacer()
+                Button("A/B Compare", systemImage: "rectangle.split.2x1") { comparingModels = true }
+                    .disabled(model.exportedModelVersions.count < 2).accessibilityIdentifier("training.compare")
+            }
+            Text("Training losses describe optimization. Compare outputs on held-out materials to assess quality.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            ForEach(model.selectedModelVersions) { version in
+                ModelVersionRow(model: model, version: version)
             }
         }
+    }
+
+    private var startButtonTitle: String {
+        if continuing { return "Continue \(model.selectedMap.displayName) Training" }
+        return model.selectedModelVersions.isEmpty ? "Train \(model.selectedMap.displayName) Model" : "Train Replacement \(model.selectedMap.displayName) Model"
     }
 
     private var effectiveBatchDescription: String {
@@ -315,7 +333,7 @@ struct TrainingPanel: View {
         "\(count.formatted()) \(count == 1 ? singular : plural)"
     }
 
-    private var continuing: Bool { model.settings.training.continueLatestWeights == true }
+    private var continuing: Bool { model.continuingTraining }
 
     private var imageSizeBinding: Binding<Int> {
         Binding(get: { model.effectiveTrainingSettings.imageSize }, set: { model.settings.training.imageSize = $0 })
@@ -440,6 +458,11 @@ struct TrainingOverviewPanel: View {
             summary("Optimizer", model.settings.training.optimizer.displayName)
             summary("Learning rate", model.settings.training.learningRate.formatted(.number.precision(.significantDigits(1...4))))
             summary("Effective batch", "Up to \(model.settings.training.effectiveBatchSize.formatted()) images")
+            summary("Gradient clipping", model.settings.training.gradientClipPolicy.displayName)
+            if model.continuingTraining, let version = model.selectedTrainingVersion {
+                Text("Continuing \(model.effectiveStartMode == .exportedModel ? "exported model" : "final checkpoint") · \(ModelVersionPresentation.title(version))")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             if let plan = model.trainingPlan {
                 summary("Training pairs", plan.trainingPairCount.formatted())
                 summary("Validation pairs", plan.validationPairCount.formatted())
@@ -509,8 +532,12 @@ struct PackagePanel: View {
             HStack {
                 Text("Included models").foregroundStyle(.secondary)
                 Spacer()
-                Text("\(model.snapshot?.artifacts.filter { $0.kind == "map" }.count ?? 0)").fontWeight(.semibold)
+                Text(model.activeMapVersions.count.formatted()).fontWeight(.semibold)
             }.font(.callout)
+            ForEach(model.activeMapVersions) { version in
+                Text("\(version.datasetName) · \(version.map.displayName) · \(ModelVersionPresentation.title(version))")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             FactoryActionButton(title: "Export Texture Loom", symbol: "shippingbox", prominent: true) { model.exportPackage() }
                 .disabled(model.busy || model.classifier == nil || (model.snapshot?.artifacts.filter { $0.kind == "map" }.isEmpty ?? true) ||
                           model.settings.modelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.settings.modelVersion.isEmpty)
@@ -560,6 +587,8 @@ struct RunPanel: View {
                     metric("Optimizer update", "\(update.formatted())\(metrics.totalUpdates.map { " / " + $0.formatted() } ?? "")")
                 }
                 if let rate = metrics.learningRate { metric("Learning rate", rate.formatted(.number.precision(.significantDigits(1...4)))) }
+                if let norm = metrics.gradientNorm { metric("Global gradient norm", ModelVersionPresentation.number(norm)) }
+                if let threshold = metrics.gradientClipThreshold { metric("Current clipping cap", ModelVersionPresentation.number(threshold)) }
                 if let batch = metrics.effectiveBatchSize { metric("Images per update", "Up to \(batch.formatted())") }
                 if let count = metrics.parameterCount { metric("Parameters", count.formatted()) }
             }
@@ -598,6 +627,8 @@ struct TrainingRunMetrics {
     let totalUpdates: Int?
     let parameterCount: Int?
     let effectiveBatchSize: Int?
+    let gradientNorm: Double?
+    let gradientClipThreshold: Double?
 
     init(events: [TrainingEvent]) {
         epoch = events.last { $0.epoch != nil }?.epoch
@@ -608,5 +639,7 @@ struct TrainingRunMetrics {
         totalUpdates = events.last { $0.totalUpdates != nil }?.totalUpdates
         parameterCount = events.last { $0.parameterCount != nil }?.parameterCount
         effectiveBatchSize = events.last { $0.effectiveBatchSize != nil }?.effectiveBatchSize
+        gradientNorm = events.last { $0.gradientNorm != nil }?.gradientNorm
+        gradientClipThreshold = events.last { $0.gradientClipThreshold != nil }?.gradientClipThreshold
     }
 }

@@ -2,6 +2,7 @@ import Foundation
 
 public struct TrainingCheckpoint: Identifiable, Sendable, Equatable {
     public var id: String { directory.path }
+    public var runID: String { directory.lastPathComponent }
     public let directory: URL
     public let datasetID: String
     public let map: MapRole
@@ -20,6 +21,7 @@ extension LoomProject {
         let runs = projectFolder.appendingPathComponent("runs", isDirectory: true)
         guard FileManager.default.fileExists(atPath: runs.path) else { return [] }
         return try FileManager.default.contentsOfDirectory(at: runs, includingPropertiesForKeys: nil).compactMap { directory in
+            guard (try? TrainingRunFiles.ownedRun(directory, projectFolder: projectFolder)) != nil else { return nil }
             let path = directory.appendingPathComponent("checkpoint.json")
             guard let data = try? Data(contentsOf: path),
                   let descriptor = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

@@ -9,6 +9,12 @@ enum NativeFactoryTraining {
                     map: MapRole, plan: TrainingDataPlan, settings: TrainingSettings, resume: URL?,
                     cancellation: NativeCancellation, progress: @escaping @Sendable (TrainingEvent) -> Void) throws -> ModelArtifact {
         let started = Date()
+        let runMetadata = try TrainingRunFiles.metadata(at: output)
+        var versionJSON: [String: Any] = ["run_id": id, "run_label": runMetadata?.label ?? ""]
+        if let lineage = runMetadata?.lineage {
+            versionJSON["lineage"] = ["parent_run_id": lineage.parentRunID, "source": lineage.source.rawValue,
+                "weights_sha256": lineage.weightsSHA256]
+        }
         defer { NativeImages.clearDecodedPixelCache() }
         let logURL = output.appendingPathComponent("training.log")
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
@@ -21,6 +27,8 @@ enum NativeFactoryTraining {
             if let v = event.update { json["update"] = v }; if let v = event.totalUpdates { json["total_updates"] = v }
             if let v = event.learningRate { json["learning_rate"] = v }; if let v = event.parameterCount { json["parameter_count"] = v }
             if let v = event.effectiveBatchSize { json["effective_batch_size"] = v }
+            if let v = event.gradientNorm { json["gradient_norm"] = v }
+            if let v = event.gradientClipThreshold { json["gradient_clip_threshold"] = v }
             if var data = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]) {
                 data.append(10); try? log.write(contentsOf: data)
             }
@@ -28,6 +36,7 @@ enum NativeFactoryTraining {
         let all = plan.training + plan.validation
         let validationIDs = Set(plan.validation.map(\.id))
         var request = settingsJSON(settings)
+        request.merge(versionJSON) { _, new in new }
         request.merge(["schema": "loom-factory-training-v1", "backend": "swift-mpsgraph-metal", "source_root": root.path,
                        "output_directory": output.path, "project_id": projectID, "dataset_id": dataset.id,
                        "display_name": dataset.name, "map_kind": map.rawValue,
@@ -46,19 +55,15 @@ enum NativeFactoryTraining {
         }
         let architecture = try NativeArchitecture(mapKind: map.rawValue, width: settings.modelWidth, blocks: settings.modelBlocks)
         let options = try NativeTrainingOptions(optimizer: settings.optimizer.rawValue, weightDecay: settings.weightDecay,
-            beta1: settings.beta1, beta2: settings.beta2, momentum: settings.momentum, gradientClipNorm: settings.gradientClipNorm)
+            beta1: settings.beta1, beta2: settings.beta2, momentum: settings.momentum, gradientClipNorm: settings.gradientClipNorm,
+            gradientClipPolicy: settings.gradientClipPolicy.rawValue,
+            gradientClipWarmupStartNorm: settings.gradientClipWarmupStartNorm,
+            gradientClipWarmupUpdates: settings.gradientClipWarmupUpdates)
         var initial: [String: NativeTensor]?
         if let resume {
-            let checkpoint = try json(resume.deletingLastPathComponent().appendingPathComponent("checkpoint.json"))
-            let config = checkpoint["architecture_config"] as? [String: Any]
-            guard checkpoint["project_id"] as? String == projectID, checkpoint["dataset_id"] as? String == dataset.id,
-                  checkpoint["map"] as? String == map.rawValue,
-                  checkpoint["architecture"] as? String == NativeArchitecture.identifier,
-                  config?["id"] as? String == NativeArchitecture.identifier,
-                  config?["width"] as? Int == settings.modelWidth, config?["blocks"] as? Int == settings.modelBlocks,
-                  checkpoint["weights_sha256"] as? String == (try sha(resume, cancellation: cancellation)) else {
-                throw LoomError("The saved checkpoint does not match this project, dataset, map or checksum.")
-            }
+            _ = try TrainingRunFiles.resume(weights: resume, projectFolder: root.appendingPathComponent(".loom-factory"),
+                projectID: projectID, datasetID: dataset.id, map: map, settings: settings,
+                expectedSHA256: runMetadata?.lineage?.weightsSHA256)
             initial = try NativeWeights.read(from: resume)
             emit(.init(type: "status", message: "Continuing saved weights with a fresh native optimizer"))
         }
@@ -90,6 +95,7 @@ enum NativeFactoryTraining {
                 "weights_path": "checkpoint.safetensors", "backend": "swift-mpsgraph-metal",
                 "continuation": "saved weights with a fresh optimizer and current source metadata"]
             descriptor["weights_sha256"] = try sha(output.appendingPathComponent("checkpoint.safetensors"))
+            descriptor.merge(versionJSON) { _, new in new }
             try writeJSON(descriptor, to: output.appendingPathComponent("checkpoint.json"))
             emit(.init(type: "checkpoint", message: "Native training weights saved", epoch: history.count, update: update))
         }
@@ -99,6 +105,7 @@ enum NativeFactoryTraining {
                 var order = plan.training
                 if settings.shuffleEachEpoch { order.shuffle(using: &rng) }
                 var epochLoss = 0.0, count = 0, learningRate = settings.learningRate
+                var epochUpdates = 0, clippedUpdates = 0, normSum = 0.0, peakNorm = 0.0
                 for window in stride(from: 0, to: order.count, by: settings.effectiveBatchSize) {
                     try cancellation.check(); session.resetAccumulatedGradients()
                     let end = min(window + settings.effectiveBatchSize, order.count)
@@ -126,10 +133,15 @@ enum NativeFactoryTraining {
                         guard loss.isFinite else { throw LoomError("Native training produced a non-finite loss. The last finite checkpoint was preserved.") }
                         epochLoss += Double(loss) * Double(batch.count); count += batch.count
                     }
-                    try cancellation.check(); _ = try session.applyGradients(learningRate: learningRate); update += 1
+                    try cancellation.check()
+                    let cap = options.gradientClipThreshold(updateCount: update)
+                    let norm = try session.applyGradients(learningRate: learningRate); update += 1
+                    epochUpdates += 1; normSum += norm; peakNorm = max(peakNorm, norm)
+                    if cap > 0 && norm > cap { clippedUpdates += 1 }
                     emit(.init(type: "progress", message: "Epoch \(epoch + 1) of \(settings.epochs) · step \(update) of \(totalUpdates) · loss \(String(format: "%.5f", epochLoss / Double(count)))",
                         progress: Double(update) / Double(totalUpdates), epoch: epoch + 1, loss: epochLoss / Double(count),
-                        learningRate: learningRate, update: update, totalUpdates: totalUpdates))
+                        learningRate: learningRate, update: update, totalUpdates: totalUpdates,
+                        gradientNorm: norm, gradientClipThreshold: cap))
                     // Preserve the first real update even when an epoch spans thousands of pairs.
                     if update == 1 { try checkpoint("training") }
                 }
@@ -154,7 +166,11 @@ enum NativeFactoryTraining {
                         try NativeWeights.write(bestWeights!, to: output.appendingPathComponent("best.safetensors"))
                     } else { stale += 1 }
                 }
-                var record: [String: Any] = ["epoch": epoch + 1, "loss": epochLoss / Double(count), "learning_rate": learningRate]
+                var record: [String: Any] = ["epoch": epoch + 1, "loss": epochLoss / Double(count), "learning_rate": learningRate,
+                    "update": update,
+                    "mean_gradient_norm": normSum / Double(max(1, epochUpdates)), "peak_gradient_norm": peakNorm,
+                    "clipped_updates": clippedUpdates, "optimizer_updates": epochUpdates,
+                    "gradient_clip_threshold": options.gradientClipThreshold(updateCount: max(0, update - 1))]
                 record["validation_loss"] = validation ?? NSNull(); history.append(record)
                 emit(.init(type: "epoch_completed", message: "Epoch \(epoch + 1) complete", epoch: epoch + 1,
                     loss: epochLoss / Double(count), validationLoss: validation, update: update, totalUpdates: totalUpdates))
@@ -189,7 +205,7 @@ enum NativeFactoryTraining {
                 "validation_crop": plan.validation.isEmpty ? NSNull() : "fixed-center-native-no-augmentation",
                 "device": "metal", "backend": "swift-mpsgraph-metal", "duration_seconds": Date().timeIntervalSince(started)]) { _, new in new }
             let finalLoss = history[exportEpoch - 1]["loss"] as! Double
-            let descriptor: [String: Any] = ["schema": "loom-factory-model-v1", "status": "completed", "kind": "map",
+            var descriptor: [String: Any] = ["schema": "loom-factory-model-v1", "status": "completed", "kind": "map",
                 "project_id": projectID, "dataset_id": dataset.id, "dataset_name": dataset.name, "map": map.rawValue,
                 "architecture": NativeArchitecture.identifier, "architecture_config": architectureJSON(architecture), "final_loss": finalLoss,
                 "final_validation_loss": history[exportEpoch - 1]["validation_loss"] ?? NSNull(),
@@ -197,8 +213,11 @@ enum NativeFactoryTraining {
                 "image_size": settings.imageSize, "input_name": "rgb", "output_name": "material_map",
                 "input_type": "multiarray", "input_shape": [1, 3, settings.imageSize, settings.imageSize],
                 "coreml_path": "model.mlmodel", "weights_path": "model.safetensors", "training": training,
+                "weights_sha256": try sha(output.appendingPathComponent("model.safetensors")),
+                "coreml_sha256": try sha(output.appendingPathComponent("model.mlmodel")),
                 "parameter_count": settings.parameterCount(map: map), "sources": proofs.map { path, proof in proof.json(path: String(path.dropFirst(root.path.count + 1))) },
                 "quality_note": "Training completion does not qualify prediction quality on unseen materials."]
+            descriptor.merge(versionJSON) { _, new in new }
             try writeJSON(["status": "completed", "history": history, "updates": update], to: output.appendingPathComponent("progress.json"))
             try cancellation.check()
             try writeJSON(descriptor, to: output.appendingPathComponent("model.json"))
@@ -241,6 +260,9 @@ enum NativeFactoryTraining {
          "flip_crops": s.flipCrops, "rotate_crops": s.rotateCrops, "exaggerate_features": s.exaggerateFeatures,
          "seed": s.seed, "device": s.device.rawValue, "optimizer": s.optimizer.rawValue, "weight_decay": s.weightDecay,
          "beta1": s.beta1, "beta2": s.beta2, "momentum": s.momentum, "gradient_clip_norm": s.gradientClipNorm,
+         "gradient_clip_policy": s.gradientClipPolicy.rawValue,
+         "gradient_clip_warmup_start_norm": s.gradientClipWarmupStartNorm,
+         "gradient_clip_warmup_updates": s.gradientClipWarmupUpdates,
          "gradient_accumulation_steps": s.gradientAccumulationSteps, "lr_schedule": s.learningRateSchedule.rawValue,
          "warmup_epochs": s.warmupEpochs, "minimum_lr_ratio": s.minimumLearningRateRatio,
          "crop_refresh": s.cropRefresh.rawValue, "augmentation_refresh": s.augmentationRefresh.rawValue,

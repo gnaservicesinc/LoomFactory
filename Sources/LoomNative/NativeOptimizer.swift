@@ -8,19 +8,45 @@ public struct NativeTrainingOptions: Sendable, Equatable {
     public let beta2: Double
     public let momentum: Double
     public let gradientClipNorm: Double
+    public let gradientClipPolicy: String
+    public let gradientClipWarmupStartNorm: Double
+    public let gradientClipWarmupUpdates: Int
     public init(optimizer: String = "adamw", weightDecay: Double = 0.01, beta1: Double = 0.9,
-                beta2: Double = 0.999, momentum: Double = 0.9, gradientClipNorm: Double = 1) throws {
+                beta2: Double = 0.999, momentum: Double = 0.9, gradientClipNorm: Double = 1,
+                gradientClipPolicy: String = "fixed", gradientClipWarmupStartNorm: Double = 0.25,
+                gradientClipWarmupUpdates: Int = 100) throws {
         let activeBeta1 = optimizer == "sgd" ? 0.9 : beta1
         let activeBeta2 = optimizer == "sgd" ? 0.999 : beta2
         let activeMomentum = optimizer == "sgd" ? momentum : 0.9
+        let activeClipNorm = gradientClipPolicy == "off" ? 0 : gradientClipNorm
+        let usesWarmup = gradientClipPolicy == "warmup" && activeClipNorm > 0
+        let activeWarmupStart = usesWarmup ? gradientClipWarmupStartNorm : 0.25
+        let activeWarmupUpdates = usesWarmup ? gradientClipWarmupUpdates : 100
         guard ["adamw", "adam", "sgd", "lion"].contains(optimizer), weightDecay.isFinite,
-              (0...10).contains(weightDecay), gradientClipNorm.isFinite, (0...1_000_000).contains(gradientClipNorm),
+              (0...10).contains(weightDecay), ["fixed", "warmup", "off"].contains(gradientClipPolicy),
+              activeClipNorm.isFinite, (0...1_000_000).contains(activeClipNorm),
+              activeWarmupStart.isFinite, activeWarmupStart > 0,
+              !usesWarmup || activeWarmupStart <= activeClipNorm,
+              (1...1_000_000).contains(activeWarmupUpdates),
               activeBeta1.isFinite, activeBeta2.isFinite, (0..<1).contains(activeBeta1), (0..<1).contains(activeBeta2),
               activeMomentum.isFinite, (0...1).contains(activeMomentum) else {
             throw NativeTrainingError.invalid("Invalid native optimizer settings.")
         }
         self.optimizer = optimizer; self.weightDecay = weightDecay; self.beta1 = activeBeta1
-        self.beta2 = activeBeta2; self.momentum = activeMomentum; self.gradientClipNorm = gradientClipNorm
+        self.beta2 = activeBeta2; self.momentum = activeMomentum; self.gradientClipNorm = activeClipNorm
+        self.gradientClipPolicy = gradientClipPolicy; self.gradientClipWarmupStartNorm = activeWarmupStart
+        self.gradientClipWarmupUpdates = activeWarmupUpdates
+    }
+    /// The threshold for the next update. Warmup starts tight and reaches the
+    /// final cap after this many successful updates. Restored step counts keep
+    /// their progress; accumulated batches and skipped updates do not advance it.
+    /// This is a tunable global-norm schedule, not delta-GClip or a lower bound.
+    public func gradientClipThreshold(updateCount: Int) -> Double {
+        guard gradientClipPolicy != "off", gradientClipNorm > 0 else { return 0 }
+        guard gradientClipPolicy == "warmup" else { return gradientClipNorm }
+        let completed = min(max(0, updateCount), gradientClipWarmupUpdates)
+        let fraction = Double(completed) / Double(gradientClipWarmupUpdates)
+        return gradientClipWarmupStartNorm + (gradientClipNorm - gradientClipWarmupStartNorm) * fraction
     }
     public static func learningRate(base: Double, step: Int, totalSteps: Int, stepsPerEpoch: Int,
                                     warmupEpochs: Int, schedule: String, minimumRatio: Double) -> Double {
@@ -47,6 +73,7 @@ final class NativeOptimizerGraph {
     let rate: MPSGraphTensor
     let firstCorrection: MPSGraphTensor
     let secondCorrection: MPSGraphTensor
+    let clipThreshold: MPSGraphTensor
     let norm: MPSGraphTensor
     let valid: MPSGraphTensor
 
@@ -54,6 +81,7 @@ final class NativeOptimizerGraph {
         rate = graph.placeholder(shape: [], dataType: .float32, name: "learning_rate")
         firstCorrection = graph.placeholder(shape: [], dataType: .float32, name: "bias_correction_1")
         secondCorrection = graph.placeholder(shape: [], dataType: .float32, name: "bias_correction_2")
+        clipThreshold = graph.placeholder(shape: [], dataType: .float32, name: "gradient_clip_threshold")
         var sum = graph.scalar(0)
         for name in shapes.keys.sorted() {
             let shape = shapes[name]!.map(NSNumber.init(value:))
@@ -66,10 +94,12 @@ final class NativeOptimizerGraph {
             sum = graph.addition(sum, graph.reshape(reduce, shape: [], name: nil), name: nil)
         }
         norm = graph.squareRoot(with: sum, name: "gradient_norm")
-        let scale = options.gradientClipNorm > 0
-            ? graph.minimum(graph.scalar(1), graph.division(graph.scalar(options.gradientClipNorm),
-                graph.addition(norm, graph.scalar(1e-6), name: nil), name: nil), name: nil)
-            : graph.scalar(1)
+        // One scale for the entire accumulated gradient vector preserves its
+        // direction, and is applied exactly once before optimizer arithmetic.
+        let clippedScale = graph.minimum(graph.scalar(1), graph.division(clipThreshold,
+            graph.addition(norm, graph.scalar(1e-6), name: nil), name: nil), name: nil)
+        let scale = graph.select(predicate: graph.greaterThan(clipThreshold, graph.scalar(0), name: nil),
+            trueTensor: clippedScale, falseTensor: graph.scalar(1), name: nil)
         var finite = graph.scalar(0)
         for name in shapes.keys.sorted() {
             let parameter = parameters[name]!

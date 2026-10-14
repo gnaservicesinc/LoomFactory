@@ -19,6 +19,17 @@ public enum TrainingLearningRateSchedule: String, Codable, CaseIterable, Sendabl
     public var id: String { rawValue }
     public var displayName: String { self == .constant ? "Constant" : "Cosine decay" }
 }
+public enum TrainingGradientClipping: String, Codable, CaseIterable, Sendable, Identifiable {
+    case warmup, fixed, off
+    public var id: String { rawValue }
+    public var displayName: String {
+        switch self {
+        case .warmup: "Warmup global norm"
+        case .fixed: "Fixed global norm"
+        case .off: "Off"
+        }
+    }
+}
 public enum TrainingDevice: String, Codable, CaseIterable, Sendable, Identifiable {
     case automatic = "auto", metal = "mps", cpu
     public var id: String { rawValue }
@@ -47,6 +58,10 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     public var momentum: Double
     public var gradientAccumulationSteps: Int
     public var gradientClipNorm: Double
+    public var gradientClipPolicy: TrainingGradientClipping
+    public var gradientClipWarmupStartNorm: Double
+    /// Completed optimizer updates, rather than visits or microbatches.
+    public var gradientClipWarmupUpdates: Int
     public var learningRateSchedule: TrainingLearningRateSchedule
     public var warmupEpochs: Int
     public var minimumLearningRateRatio: Double
@@ -67,6 +82,8 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
                 optimizer: TrainingOptimizer = .adamW, weightDecay: Double = 0.01,
                 beta1: Double = 0.9, beta2: Double? = nil, momentum: Double = 0.9,
                 gradientAccumulationSteps: Int = 1, gradientClipNorm: Double = 1,
+                gradientClipPolicy: TrainingGradientClipping = .warmup,
+                gradientClipWarmupStartNorm: Double = 0.25, gradientClipWarmupUpdates: Int = 100,
                 learningRateSchedule: TrainingLearningRateSchedule = .constant, warmupEpochs: Int = 0,
                 minimumLearningRateRatio: Double = 0.1, cropRefresh: TrainingRefresh = .perEpoch,
                 augmentationRefresh: TrainingRefresh = .perEpoch, device: TrainingDevice = .automatic,
@@ -80,6 +97,8 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
         self.optimizer = optimizer; self.weightDecay = weightDecay; self.beta1 = beta1
         self.beta2 = beta2 ?? (optimizer == .lion ? 0.99 : 0.999); self.momentum = momentum
         self.gradientAccumulationSteps = gradientAccumulationSteps; self.gradientClipNorm = gradientClipNorm
+        self.gradientClipPolicy = gradientClipPolicy; self.gradientClipWarmupStartNorm = gradientClipWarmupStartNorm
+        self.gradientClipWarmupUpdates = gradientClipWarmupUpdates
         self.learningRateSchedule = learningRateSchedule; self.warmupEpochs = warmupEpochs
         self.minimumLearningRateRatio = minimumLearningRateRatio
         self.cropRefresh = cropRefresh; self.augmentationRefresh = augmentationRefresh; self.device = device
@@ -108,7 +127,13 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
         if !learningRate.isFinite || !(0 < learningRate && learningRate <= 1) { return "Learning rate must be greater than zero and at most one." }
         if !(8...256).contains(modelWidth) || !(1...12).contains(modelBlocks) { return "Model width must be 8–256 and residual blocks must be 1–12." }
         if !(1...1024).contains(gradientAccumulationSteps) { return "Gradient accumulation must be between 1 and 1,024 batches." }
-        if !gradientClipNorm.isFinite || !(0...1000).contains(gradientClipNorm) { return "Gradient clipping must be between zero and 1,000. Zero disables clipping." }
+        if gradientClipPolicy != .off {
+            if !gradientClipNorm.isFinite || !(0...1000).contains(gradientClipNorm) { return "Gradient clipping must be between zero and 1,000. Zero disables clipping." }
+            if gradientClipPolicy == .warmup && gradientClipNorm > 0 {
+                if !gradientClipWarmupStartNorm.isFinite || gradientClipWarmupStartNorm <= 0 || gradientClipWarmupStartNorm > gradientClipNorm { return "Initial gradient norm must be positive and at most the final maximum norm." }
+                if !(1...1_000_000).contains(gradientClipWarmupUpdates) { return "Clipping warmup must use one to 1,000,000 optimizer updates." }
+            }
+        }
         if !weightDecay.isFinite || !(0...10).contains(weightDecay) { return "Weight decay must be between zero and 10." }
         if !beta1.isFinite || !beta2.isFinite || !momentum.isFinite { return "Optimizer coefficients must be finite numbers." }
         if optimizer != .sgd && (!beta1.isFinite || !beta2.isFinite || !(0..<1).contains(beta1) || !(0..<1).contains(beta2)) { return "Optimizer betas must be between zero and one, excluding one." }
@@ -126,6 +151,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     enum CodingKeys: String, CodingKey {
         case imageSize, epochs, batchSize, learningRate, shuffleEachEpoch, flipCrops, rotateCrops, exaggerateFeatures, seed, modelWidth, continueLatestWeights
         case modelBlocks, optimizer, weightDecay, beta1, beta2, momentum, gradientAccumulationSteps, gradientClipNorm
+        case gradientClipPolicy, gradientClipWarmupStartNorm, gradientClipWarmupUpdates
         case learningRateSchedule, warmupEpochs, minimumLearningRateRatio, cropRefresh, augmentationRefresh, device
         case validationFraction, validationSeed, earlyStoppingPatience, exportBestWeights, checkpointEveryEpochs
     }
@@ -151,6 +177,10 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
         momentum = try c.decodeIfPresent(Double.self, forKey: .momentum) ?? d.momentum
         gradientAccumulationSteps = try c.decodeIfPresent(Int.self, forKey: .gradientAccumulationSteps) ?? d.gradientAccumulationSteps
         gradientClipNorm = try c.decodeIfPresent(Double.self, forKey: .gradientClipNorm) ?? d.gradientClipNorm
+        // Existing saved runs keep their fixed threshold, including zero/off.
+        gradientClipPolicy = try c.decodeIfPresent(TrainingGradientClipping.self, forKey: .gradientClipPolicy) ?? .fixed
+        gradientClipWarmupStartNorm = try c.decodeIfPresent(Double.self, forKey: .gradientClipWarmupStartNorm) ?? d.gradientClipWarmupStartNorm
+        gradientClipWarmupUpdates = try c.decodeIfPresent(Int.self, forKey: .gradientClipWarmupUpdates) ?? d.gradientClipWarmupUpdates
         learningRateSchedule = try c.decodeIfPresent(TrainingLearningRateSchedule.self, forKey: .learningRateSchedule) ?? d.learningRateSchedule
         warmupEpochs = try c.decodeIfPresent(Int.self, forKey: .warmupEpochs) ?? d.warmupEpochs
         minimumLearningRateRatio = try c.decodeIfPresent(Double.self, forKey: .minimumLearningRateRatio) ?? d.minimumLearningRateRatio

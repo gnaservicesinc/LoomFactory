@@ -180,6 +180,7 @@ public final class NativeTrainingSession {
             feeds[compiled.second[name]!] = second[name]!
         }
         feeds[compiled.rate] = try tensorData([Float(learningRate)], shape: [])
+        feeds[compiled.clipThreshold] = try tensorData([Float(options.gradientClipThreshold(updateCount: updateCount))], shape: [])
         feeds[compiled.firstCorrection] = try tensorData([Float(1 - pow(options.beta1, Double(updateCount + 1)))], shape: [])
         feeds[compiled.secondCorrection] = try tensorData([Float(1 - pow(options.beta2, Double(updateCount + 1)))], shape: [])
         let results = try runGraph(compiled.graph, feeds: feeds, targets: compiled.targets)

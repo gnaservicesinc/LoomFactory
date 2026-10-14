@@ -54,8 +54,10 @@ public actor LoomProject {
             return DatasetCategory(id: ImageMetadataStore.categoryID(category), name: category,
                 imageCount: members.count, verifiedCount: members.filter(\.verified).count, pairCounts: counts)
         }
+        let artifacts = try loadArtifacts(), checkpoints = try loadCheckpoints()
         return ProjectSnapshot(sourceURL: sourceFolder, projectID: document.id, settings: document.settings,
-            images: images, datasets: datasets, artifacts: try loadArtifacts(), checkpoints: try loadCheckpoints())
+            images: images, datasets: datasets, artifacts: artifacts, checkpoints: checkpoints,
+            modelVersions: try loadModelVersions(artifacts: artifacts, checkpoints: checkpoints))
     }
 
     public func updateSettings(_ settings: ProjectSettings) throws {

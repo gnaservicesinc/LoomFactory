@@ -56,7 +56,8 @@ extension LoomProject {
                 guard let id = label["id"], let categoryName = label["name"] else { throw LoomError("The classifier label format could not be read.") }
                 var models: [[String: Any]] = []
                 for map in MapRole.targets {
-                    guard let artifact = current.artifacts.first(where: { $0.datasetID == id && $0.map == map }) else { continue }
+                    guard let artifact = try selectedModelArtifact(datasetID: id, map: map, artifacts: current.artifacts) else { continue }
+                    try TrainingRunFiles.validateArtifact(artifact, projectFolder: projectFolder, projectID: document.id)
                     var model = try stageArtifact(artifact, destination: stage, prefix: "models/\(id)/\(map.rawValue)", projectID: document.id)
                     model["map"] = map.rawValue
                     models.append(model)

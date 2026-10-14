@@ -3,9 +3,19 @@ import LoomNative
 
 extension LoomProject {
     public func trainMap(datasetID: String, map: MapRole, settings: TrainingSettings,
+                         start: TrainingStart? = nil, runLabel: String = "",
                          progress: @escaping @Sendable (TrainingEvent) -> Void) async throws -> ModelArtifact {
         guard !operationActive else { throw LoomError("An operation is already running in this source project. Stop it before starting another.") }
         guard MapRole.targets.contains(map) else { throw LoomError("Choose depth, roughness or normal training.") }
+        var requestedStart = start ?? .fresh
+        if start == nil, settings.continueLatestWeights == true {
+            guard let checkpoint = try loadCheckpoints().first(where: { $0.datasetID == datasetID && $0.map == map }) else {
+                throw LoomError("This dataset has no saved weights for this training type yet. Choose a fresh model to start a new run.")
+            }
+            requestedStart = .checkpoint(runID: checkpoint.directory.lastPathComponent)
+        }
+        let prepared = try prepareTrainingStart(requestedStart, datasetID: datasetID, map: map, settings: settings)
+        let settings = prepared.settings
         if let issue = settings.validationIssue { throw LoomError(issue) }
         let current = try snapshot()
         guard let dataset = current.datasets.first(where: { $0.id == datasetID }),
@@ -15,33 +25,39 @@ extension LoomProject {
         guard !plan.training.isEmpty else {
             throw LoomError("\(dataset.name) has no matching diffuse/\(map.displayName.lowercased()) pairs at \(settings.imageSize) × \(settings.imageSize). Check the dataset and map types, or choose a crop size that fits.")
         }
-        var resume: URL?
-        if settings.continueLatestWeights == true {
-            guard let checkpoint = try loadCheckpoints().first(where: { $0.datasetID == datasetID && $0.map == map }) else {
-                throw LoomError("This dataset has no saved weights for this training type yet. Turn off Continue latest run to start a new model.")
-            }
-            guard settings.modelWidth == checkpoint.modelWidth, settings.modelBlocks == checkpoint.modelBlocks,
-                  settings.imageSize == checkpoint.imageSize, settings.exaggerateFeatures == checkpoint.exaggerateFeatures else {
-                throw LoomError("Continue with the saved model size, native crop dimensions and depth transform. Choose a new model to change them.")
-            }
-            resume = checkpoint.directory.appendingPathComponent("checkpoint.safetensors")
-        }
         let id = UUID().uuidString.lowercased()
         let output = projectFolder.appendingPathComponent("runs/" + id, isDirectory: true)
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        var metadata = TrainingRunMetadata(projectID: document.id, runID: id, datasetID: datasetID, map: map,
+            label: runLabel.trimmingCharacters(in: .whitespacesAndNewlines), createdAt: .now, settings: settings,
+            lineage: prepared.resume.map { TrainingLineage(parentRunID: $0.runID, source: $0.source, weightsSHA256: $0.sha256) },
+            status: "running")
+        try TrainingRunFiles.writeMetadata(metadata, at: output)
         let cancellation = NativeCancellation()
         operationActive = true; activeTraining = cancellation
         defer { operationActive = false; activeTraining = nil }
-        let root = sourceFolder, projectID = document.id, continued = resume
+        let root = sourceFolder, projectID = document.id, continued = prepared.resume?.weights
         // The actor remains available to Stop while the serial GPU worker runs.
-        return try await withTaskCancellationHandler {
-            try Task.checkCancellation()
-            return try await Task.detached(priority: .userInitiated) {
-                try NativeFactoryTraining.run(id: id, root: root, output: output, projectID: projectID,
-                    dataset: dataset, map: map, plan: plan, settings: settings, resume: continued,
-                    cancellation: cancellation, progress: progress)
-            }.value
-        } onCancel: { cancellation.cancel() }
+        do {
+            let artifact = try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                return try await Task.detached(priority: .userInitiated) {
+                    try NativeFactoryTraining.run(id: id, root: root, output: output, projectID: projectID,
+                        dataset: dataset, map: map, plan: plan, settings: settings, resume: continued,
+                        cancellation: cancellation, progress: progress)
+                }.value
+            } onCancel: { cancellation.cancel() }
+            metadata.status = "completed"
+            do { try TrainingRunFiles.writeMetadata(metadata, at: output) }
+            catch { progress(.init(type: "warning", message: "Model saved; its run label could not be refreshed: \(error.localizedDescription)")) }
+            do { try activateModelVersion(runID: id, datasetID: datasetID, map: map) }
+            catch { progress(.init(type: "warning", message: "Model saved; choose it for export manually: \(error.localizedDescription)")) }
+            return artifact
+        } catch {
+            metadata.status = error is CancellationError ? "cancelled" : "failed"
+            try? TrainingRunFiles.writeMetadata(metadata, at: output)
+            throw error
+        }
     }
 
     // Package assembly uses native system tools only. Training never starts a child process.

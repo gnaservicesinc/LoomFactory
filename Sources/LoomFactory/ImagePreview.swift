@@ -11,6 +11,7 @@ struct FactoryImage: View {
     let url: URL
     let revision: String
     var maximumPixels = 1400
+    var interpolation: Image.Interpolation = .high
     @State private var image: NSImage?
     @State private var couldNotRead = false
 
@@ -18,7 +19,7 @@ struct FactoryImage: View {
         ZStack {
             Color.primary.opacity(0.035)
             if let image {
-                Image(nsImage: image).resizable().interpolation(.high)
+                Image(nsImage: image).resizable().interpolation(interpolation)
                     .aspectRatio(contentMode: .fit)
             } else if couldNotRead {
                 Label("Image could not be read", systemImage: "photo.badge.exclamationmark")

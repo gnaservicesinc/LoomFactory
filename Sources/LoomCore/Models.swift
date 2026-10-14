@@ -96,11 +96,14 @@ public struct ProjectSnapshot: Sendable {
     public let datasets: [DatasetCategory]
     public let artifacts: [ModelArtifact]
     public let checkpoints: [TrainingCheckpoint]
+    public let modelVersions: [ModelVersion]
     public init(sourceURL: URL, projectID: String, settings: ProjectSettings,
-                images: [SourceImage], datasets: [DatasetCategory], artifacts: [ModelArtifact], checkpoints: [TrainingCheckpoint] = []) {
+                images: [SourceImage], datasets: [DatasetCategory], artifacts: [ModelArtifact], checkpoints: [TrainingCheckpoint] = [],
+                modelVersions: [ModelVersion] = []) {
         self.sourceURL = sourceURL; self.projectID = projectID; self.settings = settings
         self.images = images; self.datasets = datasets; self.artifacts = artifacts
         self.checkpoints = checkpoints
+        self.modelVersions = modelVersions
     }
     public func eligiblePairCount(datasetID: String, map: MapRole, imageSize: Int) -> Int {
         guard let dataset = datasets.first(where: { $0.id == datasetID }) else { return 0 }
@@ -120,12 +123,16 @@ public struct TrainingEvent: Sendable {
     public let totalUpdates: Int?
     public let parameterCount: Int?
     public let effectiveBatchSize: Int?
+    public let gradientNorm: Double?
+    public let gradientClipThreshold: Double?
     public init(type: String, message: String, progress: Double? = nil, epoch: Int? = nil, loss: Double? = nil,
                 validationLoss: Double? = nil, learningRate: Double? = nil, update: Int? = nil, totalUpdates: Int? = nil,
-                parameterCount: Int? = nil, effectiveBatchSize: Int? = nil) {
+                parameterCount: Int? = nil, effectiveBatchSize: Int? = nil,
+                gradientNorm: Double? = nil, gradientClipThreshold: Double? = nil) {
         self.type = type; self.message = message; self.progress = progress; self.epoch = epoch; self.loss = loss
         self.validationLoss = validationLoss; self.learningRate = learningRate; self.update = update
         self.totalUpdates = totalUpdates; self.parameterCount = parameterCount; self.effectiveBatchSize = effectiveBatchSize
+        self.gradientNorm = gradientNorm; self.gradientClipThreshold = gradientClipThreshold
     }
 }
 
