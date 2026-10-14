@@ -74,3 +74,26 @@ and 13 UI tests. Its exact-resume integration compares shuffled order,
 per-sample augmentation, accumulation, AdamW, warmup and cosine scheduling across
 a mid-epoch stop and resume. This also exposed and fixed canonical-path errors
 between macOS `/var` and `/private/var` in source signatures and package paths.
+
+## Native allocation and timing change
+
+Graph feeds and outputs reuse bounded, explicitly owned Metal buffers. Output
+buffers alternate when the previous result is an active input; every result is
+still initialized and the local autorelease drains remain. Each graph call gets
+a fresh MPSGraphTensorData wrapper. Reusing the wrapper itself failed a 1K test
+and was rejected before installation.
+
+All 41 native tests passed with two optional real-pair checks skipped, including
+the existing full-resolution width-164 gradient checks and the bounded-memory
+regression. The exact task-only Factory source also passed 20 related core tests
+and six quit/training UI tests.
+
+A matched synthetic 1024-pixel Pyramid width-55, four-block, batch-one AdamW
+benchmark completed 40 updates per binary after the user's app closed. Warm
+median update time was 0.64519 seconds before and 0.64136 seconds after, about
+0.6 percent lower. Losses, gradient norms and final weight hashes were identical.
+New feed/result buffer allocations stopped after warmup and Metal storage was
+constant through the measured run. The bounded cache used about 78 MiB more
+Metal storage. A separate 200-update 256-pixel check also produced identical
+weights. This is a small overhead reduction, not evidence that a multi-hour run
+will become substantially faster.
