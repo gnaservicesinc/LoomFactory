@@ -9,7 +9,7 @@ enum FactoryTrainingStartMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var displayName: String {
         switch self {
-        case .fresh: "Replace with a fresh model"
+        case .fresh: "Start a fresh model"
         case .exportedModel: "Continue exported model weights"
         case .checkpoint: "Continue saved checkpoint"
         }
@@ -125,7 +125,21 @@ final class FactoryModel {
         snapshot?.images.first { $0.id == selectedImageID }
     }
 
-    var classifier: ModelArtifact? { snapshot?.artifacts.first { $0.kind == "classifier" } }
+    var modelCoverage: [ModelCoverageEntry] { snapshot?.modelCoverage ?? [] }
+    var classifier: ModelArtifact? {
+        if let entry = modelCoverage.first(where: { $0.slot.product == .classifier }) {
+            return entry.candidates.first { $0.id == entry.effectiveRunID && $0.isAvailable }?.artifact
+        }
+        return snapshot?.artifacts.first { $0.kind == "classifier" }
+    }
+    var requiredModelCount: Int { modelCoverage.filter(\.isRequired).count }
+    var availableRequiredModelCount: Int { modelCoverage.filter { $0.isRequired && $0.availableCount > 0 }.count }
+    var approvedAssignmentCount: Int { modelCoverage.filter { $0.isRequired && $0.status == .approved }.count }
+    var hasIncompleteCoverage: Bool {
+        modelCoverage.contains { entry in
+            entry.isRequired && entry.candidates.first(where: { $0.id == entry.effectiveRunID })?.isAvailable != true
+        }
+    }
     var selectedArtifacts: [ModelArtifact] {
         snapshot?.artifacts.filter { $0.kind == "map" && $0.datasetID == selectedDatasetID } ?? []
     }
@@ -500,6 +514,53 @@ final class FactoryModel {
         }
     }
 
+    func useCoverageModel(artifact: ModelArtifact) {
+        let current = generation
+        perform("Choosing model to use") { [weak self] project in
+            let runID = artifact.directory.lastPathComponent
+            if artifact.kind == "classifier" {
+                try await project.selectClassifierVersion(runID: runID)
+            } else if let datasetID = artifact.datasetID, let map = artifact.map {
+                try await project.selectModelVersion(runID: runID, datasetID: datasetID, map: map)
+            } else { throw LoomError("Choose a model belonging to this group and product.") }
+            guard let self, self.generation == current else { return }
+            self.invalidateExportedPackage()
+        }
+    }
+
+    func setModelApproval(runID: String, approved: Bool) {
+        let current = generation
+        perform(approved ? "Approving model" : "Removing model approval") { [weak self] project in
+            try await project.setModelApproval(runID: runID, approved: approved)
+            guard let self, self.generation == current else { return }
+            self.invalidateExportedPackage()
+        }
+    }
+
+    func setModelRequirement(slot: ModelSlot, required: Bool) {
+        let current = generation
+        perform("Updating model requirements") { [weak self] project in
+            try await project.setModelRequirement(slot: slot, required: required)
+            guard let self, self.generation == current else { return }
+            self.invalidateExportedPackage()
+        }
+    }
+
+    func trainCoverageSlot(slot: ModelSlot) {
+        guard !busy else { return }
+        if let datasetID = slot.datasetID, let map = slot.product.map {
+            selectedDatasetID = datasetID; selectedMap = map
+            if !selectedModelVersions.contains(where: { $0.checkpoint != nil }) { setTrainingStartMode(.fresh) }
+            workspaceSection = .training
+        } else { workspaceSection = .package }
+    }
+
+    func testCoverageModel(artifact: ModelArtifact) {
+        guard let version = snapshot?.modelVersions.first(where: { $0.directory == artifact.directory }), !busy else { return }
+        selectedDatasetID = version.datasetID; selectedMap = version.map
+        showModelTesting(version)
+    }
+
     func confirmDeleteTrainingRun(_ version: ModelVersion) {
         guard !busy else { return }
         let alert = NSAlert()
@@ -719,17 +780,6 @@ final class FactoryModel {
 
     func categorize() {
         guard !busy, snapshot != nil else { return }
-        let modelURL: URL?
-        if let classifier, let path = classifier.coreMLPath {
-            modelURL = URL(fileURLWithPath: path, relativeTo: classifier.directory)
-        } else {
-            modelURL = Bundle.main.url(forResource: "DTTC3", withExtension: "mlmodelc") ??
-                Bundle.main.url(forResource: "DTTC3", withExtension: "mlmodel")
-        }
-        guard let modelURL else {
-            errorMessage = "The dataset classifier is unavailable. Import a Create ML classifier first."
-            return
-        }
         let current = generation
         let onProgress: @Sendable (Double, String) -> Void = { [weak self] fraction, message in
             Task { @MainActor [weak self] in
@@ -739,6 +789,17 @@ final class FactoryModel {
             }
         }
         perform("Categorizing material folders", clearEvents: true) { [weak self] project in
+            // A classifier can tag an uncategorized source folder before that
+            // folder has every category required by a deployment package.
+            let chosen = try await project.selectedClassifierArtifact()
+            let modelURL: URL?
+            if let chosen, let path = chosen.coreMLPath {
+                modelURL = URL(fileURLWithPath: path, relativeTo: chosen.directory)
+            } else {
+                modelURL = Bundle.main.url(forResource: "DTTC3", withExtension: "mlmodelc") ??
+                    Bundle.main.url(forResource: "DTTC3", withExtension: "mlmodel")
+            }
+            guard let modelURL else { throw LoomError("The dataset classifier is unavailable. Import a Create ML classifier first.") }
             let summary = try await project.categorize(using: modelURL, progress: onProgress)
             guard let self, self.generation == current else { return }
             self.events.append(TrainingEvent(type: "summary", message:
@@ -913,7 +974,7 @@ final class FactoryModel {
     private func adopt(_ value: ProjectSnapshot, restoreSettings: Bool) {
         let previousModels = Set(snapshot?.modelVersions.filter { $0.isActive }.map(\.id) ?? [])
         let currentModels = Set(value.modelVersions.filter { $0.isActive }.map(\.id))
-        if snapshot != nil, previousModels != currentModels { invalidateExportedPackage() }
+        if snapshot != nil, previousModels != currentModels || snapshot?.modelCoverage != value.modelCoverage { invalidateExportedPackage() }
         comparisonImageRevisions = Dictionary(uniqueKeysWithValues: value.images.map { image in
             let attributes = try? image.url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
             return (image.id, "\(attributes?.contentModificationDate?.timeIntervalSince1970 ?? 0)|\(attributes?.fileSize ?? 0)")
@@ -925,10 +986,16 @@ final class FactoryModel {
            !value.datasets.contains(where: { $0.id == selectedDatasetID }) { selectedDatasetID = "" }
         selectVisibleImageIfNeeded()
         if let url = exportedPackage, !FileManager.default.fileExists(atPath: url.path) { exportedPackage = nil }
-        if exportedPackage == nil && !packageNeedsExport {
+        let chosenFilesNeedAttention = value.modelCoverage.contains { entry in
+            entry.status == .unavailable || entry.status == .stale ||
+                entry.candidates.first(where: { $0.id == entry.effectiveRunID })?.approvalIsStale == true
+        }
+        if exportedPackage == nil && !packageNeedsExport && !chosenFilesNeedAttention {
             let exports = value.sourceURL.appendingPathComponent(".loom-factory/exports", isDirectory: true)
-            let selectionDate = (try? value.sourceURL.appendingPathComponent(".loom-factory/model-selection.json")
-                .resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let selectionDate = ["model-selection.json", "model-management.json"].compactMap { name in
+                try? value.sourceURL.appendingPathComponent(".loom-factory/\(name)")
+                    .resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            }.max() ?? .distantPast
             exportedPackage = (try? FileManager.default.contentsOfDirectory(at: exports,
                 includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]))?
                 .filter {

@@ -37,6 +37,7 @@ final class ModelVersionTrainingTests: XCTestCase {
         XCTAssertNil(replacementRequest["resume_weights"], "Explicit fresh replacement must override the legacy continuation setting")
         let selectedReplacement = try await project.selectedModelArtifact(datasetID: datasetID, map: .depth)
         XCTAssertEqual(selectedReplacement?.id, replacement.id)
+        try await project.selectModelVersion(runID: first.id, datasetID: datasetID, map: .depth)
 
         var continuation = initial
         continuation.imageSize = 64; continuation.modelWidth = 16; continuation.modelBlocks = 2
@@ -80,11 +81,11 @@ final class ModelVersionTrainingTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(epoch["gradient_clip_threshold"] as? Double), 0.1, accuracy: 1e-7)
 
         let selectedContinued = try await project.selectedModelArtifact(datasetID: datasetID, map: .depth)
-        XCTAssertEqual(selectedContinued?.id, continued.id)
+        XCTAssertEqual(selectedContinued?.id, first.id, "Training a candidate must preserve the user's chosen model")
         let reopened = try LoomProject(sourceFolder: root)
         let restored = try await reopened.modelVersions(datasetID: datasetID, map: .depth)
         XCTAssertEqual(restored.count, 3)
-        XCTAssertEqual(restored.filter(\.isActive).map(\.id), [continued.id])
+        XCTAssertEqual(restored.filter(\.isActive).map(\.id), [first.id])
         let savedContinued = try XCTUnwrap(restored.first { $0.id == continued.id })
         XCTAssertEqual(savedContinued.lineage?.parentRunID, first.id)
         XCTAssertEqual(savedContinued.lineage?.source, .model)

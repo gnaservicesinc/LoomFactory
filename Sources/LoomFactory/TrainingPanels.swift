@@ -564,6 +564,16 @@ struct PackagePanel: View {
                 labeledField("Model name", text: $model.settings.modelName, prompt: "Texture Loom")
                 labeledField("Version", text: $model.settings.modelVersion, prompt: "1.0.0")
             }
+            if !model.modelCoverage.isEmpty {
+                Text("\(model.availableRequiredModelCount) of \(model.requiredModelCount) required models available · \(model.approvedAssignmentCount) chosen and approved")
+                    .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if model.hasIncompleteCoverage {
+                    Text("This export has partial coverage. Review missing products in Models or mark intentionally omitted products optional.")
+                        .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                }
+                Button("Manage Models", systemImage: "checklist") { model.workspaceSection = .models }
+                    .accessibilityIdentifier("package.manageModels")
+            }
             HStack {
                 Text("Included models").foregroundStyle(.secondary)
                 Spacer()
@@ -573,7 +583,7 @@ struct PackagePanel: View {
                 Text("\(version.datasetName) · \(version.map.displayName) · \(ModelVersionPresentation.title(version))")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-            FactoryActionButton(title: "Export Texture Loom", symbol: "shippingbox", prominent: true) { model.exportPackage() }
+            FactoryActionButton(title: model.hasIncompleteCoverage ? "Export Partial Texture Loom" : "Export Texture Loom", symbol: "shippingbox", prominent: true) { model.exportPackage() }
                 .disabled(model.busy || model.classifier == nil || (model.snapshot?.artifacts.filter { $0.kind == "map" }.isEmpty ?? true) ||
                           model.settings.modelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.settings.modelVersion.isEmpty)
             if let package = model.exportedPackage {

@@ -17,6 +17,12 @@ Imports, review changes, pairing, training, and export also refresh the inventor
 after they finish. Generation checks prevent a response from an old source
 folder from being displayed in the newly opened project.
 
+The **Models** workspace shows a dataset-by-product coverage matrix and the
+shared classifier. Choose the version to use for each group, record approval
+independently, and mark intentionally omitted products optional. Missing models,
+approved candidates and approved assignments are distinct statuses. See
+[Model management](ModelManagement.md) for persistence and extension boundaries.
+
 The **Train a dataset** panel shows the selected dataset and target map, the
 current pair count, native training dimensions, epochs, crop augmentation, and
 image-order options. The **Exaggerate features** option appears for depth maps

@@ -4,7 +4,7 @@ import XCTest
 
 @MainActor
 final class RunDeletionTests: XCTestCase {
-    func testDeletingSelectedRunClearsSelectionAndPreservesOtherRunsOriginalsAndPackages() async throws {
+    func testDeletingSelectedRunPreservesExplicitChoiceOtherRunsOriginalsAndPackages() async throws {
         let fixture = try await Fixture(); defer { fixture.remove() }
         let old = try fixture.run("old"), keep = try fixture.run("keep")
         let original = fixture.root.appendingPathComponent("original.png")
@@ -26,7 +26,11 @@ final class RunDeletionTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: original), Data("original image bytes".utf8))
         XCTAssertEqual(try Data(contentsOf: package), Data("package bytes".utf8))
         let selection = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture.selectionFile)) as? [String: Any]
-        XCTAssertEqual((selection?["models"] as? [[String: Any]])?.count, 0)
+        XCTAssertEqual((selection?["models"] as? [[String: Any]])?.compactMap { $0["runID"] as? String }, ["old"])
+        do {
+            _ = try await fixture.project.selectedModelArtifact(datasetID: "bricks-0", map: .depth)
+            XCTFail("Deleting the selected model must not silently choose another version")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("selected depth version is missing")) }
         let versions = try await fixture.project.modelVersions()
         XCTAssertEqual(versions.map(\.id), ["keep"])
     }
@@ -118,7 +122,7 @@ final class RunDeletionTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: run.path))
     }
 
-    func testPartialTrashFailureCleansOnlySelectionForRunsThatActuallyMoved() async throws {
+    func testPartialTrashFailurePreservesEveryExplicitSelection() async throws {
         let fixture = try await Fixture(); defer { fixture.remove() }
         _ = try fixture.run("a-delete"); let retained = try fixture.run("b-fail")
         try fixture.selection(runIDs: ["a-delete", "b-fail"])
@@ -133,7 +137,7 @@ final class RunDeletionTests: XCTestCase {
             XCTFail("The failed move must be reported")
         } catch { XCTAssertTrue(error.localizedDescription.contains("Trash is unavailable")) }
         let selection = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture.selectionFile)) as? [String: Any]
-        XCTAssertEqual((selection?["models"] as? [[String: Any]])?.compactMap { $0["runID"] as? String }, ["b-fail"])
+        XCTAssertEqual((selection?["models"] as? [[String: Any]])?.compactMap { $0["runID"] as? String }, ["a-delete", "b-fail"])
         XCTAssertTrue(FileManager.default.fileExists(atPath: retained.path))
     }
 

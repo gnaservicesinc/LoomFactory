@@ -58,7 +58,8 @@ public actor LoomProject {
         let artifacts = try loadArtifacts(), checkpoints = try loadCheckpoints()
         return ProjectSnapshot(sourceURL: sourceFolder, projectID: document.id, settings: document.settings,
             images: images, datasets: datasets, artifacts: artifacts, checkpoints: checkpoints,
-            modelVersions: try loadModelVersions(artifacts: artifacts, checkpoints: checkpoints))
+            modelVersions: try loadModelVersions(artifacts: artifacts, checkpoints: checkpoints),
+            modelCoverage: try loadModelCoverage(datasets: datasets, artifacts: artifacts, checkpoints: checkpoints))
     }
 
     public func updateSettings(_ settings: ProjectSettings) throws {
@@ -159,7 +160,9 @@ public actor LoomProject {
             .compactMap { folder in
                 let path = folder.appendingPathComponent("artifact.json")
                 guard FileManager.default.fileExists(atPath: path.path) else { return nil }
-                let saved = try JSONDecoder().decode(ModelArtifact.self, from: Data(contentsOf: path))
+                // One damaged run must not hide the other groups' saved models.
+                // Explicit choices still surface as unavailable until replaced.
+                guard let saved = try? JSONDecoder().decode(ModelArtifact.self, from: Data(contentsOf: path)) else { return nil }
                 return ModelArtifact(id: saved.id, kind: saved.kind, datasetID: saved.datasetID,
                     datasetName: saved.datasetName, map: saved.map, directory: folder,
                     createdAt: saved.createdAt, epochs: saved.epochs, loss: saved.loss,

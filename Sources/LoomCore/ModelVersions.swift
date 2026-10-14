@@ -60,14 +60,18 @@ public struct ModelVersion: Identifiable, Sendable, Equatable {
     public let history: [TrainingMetric]
     public let lineage: TrainingLineage?
     public let isActive: Bool
+    public let isApproved: Bool
+    public let approvalIsStale: Bool
     public init(id: String, directory: URL, datasetID: String, datasetName: String, map: MapRole,
                 status: String, createdAt: Date = .now, label: String = "", settings: TrainingSettings? = nil,
                 checkpoint: TrainingCheckpoint? = nil, artifact: ModelArtifact? = nil,
-                history: [TrainingMetric] = [], lineage: TrainingLineage? = nil, isActive: Bool = false) {
+                history: [TrainingMetric] = [], lineage: TrainingLineage? = nil, isActive: Bool = false,
+                isApproved: Bool = false, approvalIsStale: Bool = false) {
         self.id = id; self.directory = directory; self.datasetID = datasetID; self.datasetName = datasetName
         self.map = map; self.status = status; self.createdAt = createdAt; self.label = label
         self.settings = settings; self.checkpoint = checkpoint; self.artifact = artifact
         self.history = history; self.lineage = lineage; self.isActive = isActive
+        self.isApproved = isApproved; self.approvalIsStale = approvalIsStale
     }
 }
 
@@ -91,7 +95,7 @@ struct TrainingResume: Sendable {
     let source: TrainingWeightSource
 }
 
-private struct ModelSelection: Codable {
+struct ModelSelection: Codable {
     var schema = "loom-factory-model-selection-v1"
     let projectID: String
     var models: [Entry]
@@ -150,6 +154,7 @@ extension LoomProject {
         let runs = projectFolder.appendingPathComponent("runs", isDirectory: true)
         guard FileManager.default.fileExists(atPath: runs.path) else { return [] }
         let selection = try loadModelSelection()
+        let management = try loadModelManagement()
         let folders = try FileManager.default.contentsOfDirectory(at: runs, includingPropertiesForKeys: nil)
         return folders.compactMap { folder -> ModelVersion? in
             guard (try? TrainingRunFiles.ownedRun(folder, projectFolder: projectFolder)) != nil else { return nil }
@@ -187,12 +192,14 @@ extension LoomProject {
             let recordedStatus = progress?["status"] as? String ?? checkpoint?.status ?? metadata?.status ?? "interrupted"
             let status = ["running", "training"].contains(recordedStatus) && activeTrainingControl?.runID != folder.lastPathComponent
                 ? "inactive in this window" : recordedStatus
+            let approval = artifact.map { modelApprovalState(for: $0, management: management) } ?? (approved: false, stale: false)
             return ModelVersion(id: folder.lastPathComponent, directory: folder, datasetID: datasetID,
                 datasetName: artifact?.datasetName ?? model?["dataset_name"] as? String ?? savedCheckpoint?["dataset_name"] as? String ?? request?["display_name"] as? String ?? datasetID,
                 map: map, status: artifact == nil ? status : "completed",
                 createdAt: created, label: metadata?.label ?? request?["run_label"] as? String ?? "", settings: settings,
                 checkpoint: checkpoint, artifact: artifact, history: history, lineage: metadata?.lineage,
-                isActive: artifact != nil && active == folder.lastPathComponent)
+                isActive: artifact != nil && active == folder.lastPathComponent,
+                isApproved: approval.approved, approvalIsStale: approval.stale)
         }.sorted { $0.createdAt > $1.createdAt }
     }
 
@@ -221,7 +228,7 @@ extension LoomProject {
             datasetID: datasetID, map: map, settings: resolved))
     }
 
-    private func loadModelSelection() throws -> ModelSelection {
+    func loadModelSelection() throws -> ModelSelection {
         let file = projectFolder.appendingPathComponent("model-selection.json")
         guard FileManager.default.fileExists(atPath: file.path) else { return ModelSelection(projectID: document.id, models: []) }
         let selection = try JSONDecoder().decode(ModelSelection.self, from: Data(contentsOf: file))

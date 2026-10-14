@@ -22,6 +22,8 @@ struct LoomRoomView: View {
                             case .materials:
                                 datasetPanel(snapshot)
                                 if model.busy || !model.events.isEmpty { RunPanel(model: model) }
+                            case .models:
+                                ModelCoverageView(model: model)
                             case .training:
                                 EmptyView()
                             case .testing:
@@ -80,7 +82,7 @@ struct LoomRoomView: View {
                 ForEach(LoomWorkspaceSection.allCases) { section in
                     Text(section.displayName).tag(section)
                 }
-            }.pickerStyle(.segmented).labelsHidden().frame(width: 540, alignment: .leading)
+            }.pickerStyle(.segmented).labelsHidden().frame(width: 660, alignment: .leading)
                 .accessibilityIdentifier("loom.workspaceSection")
             Spacer()
         }
@@ -129,7 +131,7 @@ struct LoomRoomView: View {
             LoomMark().frame(width: 48, height: 48)
             VStack(alignment: .leading, spacing: 3) {
                 Text("Loom Room").font(.system(size: 28, weight: .semibold))
-                Text("Review your images, train your models, and build Texture Loom.")
+                Text("Review your images, manage your models, and build Texture Loom.")
                     .foregroundStyle(.secondary)
             }
             Spacer()
@@ -373,11 +375,12 @@ extension SourceImage {
 }
 
 enum LoomWorkspaceSection: String, CaseIterable, Identifiable {
-    case materials, training, testing, package
+    case materials, models, training, testing, package
     var id: String { rawValue }
     var displayName: String {
         switch self {
         case .materials: "Materials"
+        case .models: "Models"
         case .training: "Training"
         case .testing: "Test Model"
         case .package: "Package"

@@ -40,9 +40,9 @@ extension LoomProject {
             try validateTrainingRunForDeletion(folder)
             return folder
         }
-        let selectionFile = projectFolder.appendingPathComponent("model-selection.json")
-        var selection = try deletionModelSelection(at: selectionFile)
-        let originalSelection = selection
+        // Keep an explicit deployment choice even when its run is removed.
+        // Coverage reports it as unavailable until the user chooses another model.
+        _ = try deletionModelSelection(at: projectFolder.appendingPathComponent("model-selection.json"))
         var removed: [String] = [], trash: [URL] = []
         var failure: Error?
         for folder in folders {
@@ -53,14 +53,6 @@ extension LoomProject {
                 if let destination = try moveToTrash(folder) { trash.append(destination) }
                 removed.append(folder.lastPathComponent)
             } catch { failure = error; break }
-        }
-        if var updated = selection {
-            updated.models.removeAll { removed.contains($0.runID) }
-            selection = updated
-        }
-        if selection != originalSelection, let selection {
-            let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            try encoder.encode(selection).write(to: selectionFile, options: .atomic)
         }
         if let failure { throw failure }
         return TrainingRunDeletion(runIDs: removed, trashURLs: trash)

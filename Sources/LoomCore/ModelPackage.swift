@@ -10,7 +10,7 @@ extension LoomProject {
         guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !version.isEmpty else {
             throw LoomError("Give Texture Loom a model name and version before exporting.")
         }
-        guard let classifier = current.artifacts.first(where: { $0.kind == "classifier" }) else {
+        guard let classifier = try selectedClassifierArtifact(artifacts: current.artifacts) else {
             throw LoomError("Import a classifier from Create ML before exporting Texture Loom.")
         }
         let descriptor = try readDescriptor(classifier, projectID: document.id)

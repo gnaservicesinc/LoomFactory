@@ -58,8 +58,8 @@ extension LoomProject {
             metadata.status = "completed"
             do { try TrainingRunFiles.writeMetadata(metadata, at: output) }
             catch { progress(.init(type: "warning", message: "Model saved; its run label could not be refreshed: \(error.localizedDescription)")) }
-            do { try activateModelVersion(runID: id, datasetID: datasetID, map: map) }
-            catch { progress(.init(type: "warning", message: "Model saved; choose it for export manually: \(error.localizedDescription)")) }
+            // A finished run is a candidate. Only a user's selection changes an
+            // explicit assignment; legacy unassigned groups still use the latest.
             return artifact
         } catch {
             metadata.status = error is TrainingSavedStop ? "saved_stopped" : error is CancellationError ? "cancelled" : "failed"

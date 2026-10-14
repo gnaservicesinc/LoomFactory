@@ -3,10 +3,11 @@
 Choose the material dataset and map in Loom Room's training workspace. Give
 each run a label that describes the experiment, such as `AdamW, LR 0.0003`.
 
-- **Replace with fresh model** starts from new weights and allows changing the
+- **Start a fresh model** starts from new weights and allows changing the
   architecture and crop dimensions. Every previous run stays in the source
-  folder's `.loom-factory/runs` directory. Only a completed replacement becomes
-  the version used for export; failed or cancelled runs preserve that choice.
+  folder's `.loom-factory/runs` directory. A completed run becomes a candidate;
+  training preserves your explicit choice of model to use. Groups without an
+  explicit choice continue to use their latest completed version.
 - **Continue exported model** starts from a selected completed version's deployed
   weights. These can come from the lowest-validation-loss epoch when that export
   option was enabled.
@@ -27,8 +28,9 @@ Core ML, trainable weights and run metadata. There is no automatic loss ranking.
 and history, to macOS Trash. **Delete all runs…** clears map-training history
 across every dataset and map in the current source folder. Original images,
 classifier outputs and existing package exports are preserved. Active project
-operations block deletion, and deleting a selected version clears its export
-selection. Stopped and failed runs can be deleted even without usable weights.
+operations block deletion. Deleting a selected version leaves that assignment
+unavailable until you choose another model, so another run cannot silently take
+its place. Stopped and failed runs can be deleted even without usable weights.
 
 **A/B Compare** takes two completed versions and a current diffuse/target pair.
 It runs both exported Core ML models on the same exact center crop, using the
