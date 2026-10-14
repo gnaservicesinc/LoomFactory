@@ -22,7 +22,7 @@ private struct ProbeArguments {
                 values[String(argument.dropFirst(2))] = arguments.removeFirst()
             }
         }
-        let allowed: Set<String> = ["input", "target", "map", "size", "width", "blocks", "updates", "visits", "seed", "learning-rate", "optimizer", "output", "weights-out", "weights-in", "initial-weights-out", "gradients-out", "cancel-after-ms"]
+        let allowed: Set<String> = ["input", "target", "map", "size", "width", "blocks", "updates", "visits", "seed", "learning-rate", "optimizer", "output", "weights-out", "weights-in", "initial-weights-out", "gradients-out", "cancel-after-ms", "architecture", "layout"]
         guard Set(values.keys).isSubset(of: allowed), synthetic || (values["input"] != nil && values["target"] != nil) else {
             throw NativeTrainingError.invalid("Use --synthetic, or --input IMAGE --target IMAGE. Supported options: \(allowed.sorted().joined(separator: ", ")).")
         }
@@ -37,6 +37,13 @@ private func emit(_ event: [String: Any]) {
     if let data = try? JSONSerialization.data(withJSONObject: event, options: [.sortedKeys]) {
         FileHandle.standardOutput.write(data); FileHandle.standardOutput.write(Data([10]))
     }
+}
+
+private func executionJSON(_ value: NativeGraphExecutionMeasurements) -> [String: Double] {
+    ["feed_seconds": value.feedSeconds, "result_setup_seconds": value.resultSetupSeconds,
+     "encoding_seconds": value.encodingSeconds, "wait_seconds": value.waitSeconds,
+     "gpu_span_seconds": value.gpuSpanSeconds, "scalar_read_seconds": value.scalarReadSeconds,
+     "total_seconds": value.totalSeconds]
 }
 private func memory() -> [String: Any] {
     var usage = rusage()
@@ -68,6 +75,9 @@ private func hash(_ weights: [String: NativeTensor]) -> String {
 
 private func run() throws {
     let args = try ProbeArguments()
+    guard args.values["layout"] == nil || ["nchw", "nhwc"].contains(args.values["layout"]!) else {
+        throw NativeTrainingError.invalid("Choose --layout nchw or nhwc.")
+    }
     let size = try args.integer("size", 1024, range: 1...8192)
     let width = try args.integer("width", 164, range: 1...512)
     let blocks = try args.integer("blocks", 4, range: 1...64)
@@ -134,7 +144,10 @@ private func run() throws {
     var stepRecords: [[String: Any]] = []
     var failure: Error?
     do {
-        let architecture = try NativeArchitecture(mapKind: map, width: width, blocks: blocks)
+        let architecture = try NativeArchitecture(mapKind: map, width: width, blocks: blocks,
+            identifier: args.values["architecture"] ?? NativeArchitecture.identifier)
+        report["architecture"] = architecture.identifier
+        report["decoded_pixel_cache_byte_limit"] = NativeImages.decodedPixelCacheByteLimit
         report["parameter_count"] = architecture.parameterCount
         emit(report.merging(["event": "started", "memory": memory()]) { _, new in new })
         let input: [Float], target: [Float]
@@ -168,7 +181,10 @@ private func run() throws {
         let supplied = try args.values["weights-in"].map { try NativeWeights.read(from: URL(fileURLWithPath: $0)) }
         let session = try NativeTrainingSession(architecture: architecture,
             options: NativeTrainingOptions(optimizer: args.values["optimizer"] ?? "adamw"), seed: UInt64(seed),
-            weights: supplied, cancellation: cancellation)
+            weights: supplied, cancellation: cancellation,
+            channelsLast: args.values["layout"].map { $0 == "nhwc" })
+        report["graph_execution"] = "synchronous"
+        report["gpu_activation_layout"] = session.channelsLast ? "NHWC" : "NCHW"
         model = session
         report["initialization_seconds"] = ProcessInfo.processInfo.systemUptime - initStart
         report["gpu"] = session.deviceName
@@ -183,6 +199,7 @@ private func run() throws {
             let trainStart = ProcessInfo.processInfo.systemUptime
             let loss = try session.train(input: input, target: target, batchSize: 1, height: size, width: size)
             let trainEnd = ProcessInfo.processInfo.systemUptime
+            let trainingExecution = session.lastExecutionMeasurements.map(executionJSON)
             var gradientParameters: [[String: Any]] = []
             if update == 1, let path = args.values["gradients-out"] {
                 let gradients = try session.accumulatedGradients()
@@ -195,10 +212,13 @@ private func run() throws {
             }
             let norm = try session.applyGradients(learningRate: rate)
             let end = ProcessInfo.processInfo.systemUptime
+            let optimizerExecution = session.lastExecutionMeasurements.map(executionJSON)
             var result: [String: Any] = ["event": "update", "update": update, "loss": loss, "gradient_norm": norm,
                 "forward_backward_seconds": trainEnd - trainStart, "optimizer_seconds": end - trainEnd,
                 "total_step_seconds": end - trainStart, "includes_first_graph_compile": update == 1, "memory": memory()]
             if !gradientParameters.isEmpty { result["gradient_parameters"] = gradientParameters }
+            result["training_execution"] = trainingExecution
+            result["optimizer_execution"] = optimizerExecution
             stepRecords.append(result); emit(result)
         }
         try cancellation.check()
@@ -224,7 +244,7 @@ private func run() throws {
         report["final_weights_sha256"] = hash(weights)
         report["weights_changed"] = report["initial_weights_sha256"] as? String != report["final_weights_sha256"] as? String
         if let path = args.values["weights-out"] {
-            try NativeWeights.write(weights, to: URL(fileURLWithPath: path), metadata: ["architecture": NativeArchitecture.identifier, "schema": "loom-native-probe-weights-v1"])
+            try NativeWeights.write(weights, to: URL(fileURLWithPath: path), metadata: ["architecture": model.architecture.identifier, "schema": "loom-native-probe-weights-v1"])
             report["weights_path"] = path
         }
     }

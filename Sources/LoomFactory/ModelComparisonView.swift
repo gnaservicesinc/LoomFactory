@@ -1,5 +1,6 @@
 import AppKit
 import LoomCore
+import LoomNative
 import SwiftUI
 
 enum ModelVersionPresentation {
@@ -15,6 +16,23 @@ enum ModelVersionPresentation {
 
     static func number(_ value: Double) -> String {
         value.formatted(.number.precision(.significantDigits(1...6)))
+    }
+}
+
+struct TrainingRunDeletionControl: View {
+    @Bindable var model: FactoryModel
+
+    var body: some View {
+        if model.hasTrainingRuns {
+            HStack {
+                Text("\(model.trainingRunCount.formatted()) saved training \(model.trainingRunCount == 1 ? "run" : "runs") in this source folder")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Delete all runs…", role: .destructive) { model.confirmDeleteAllTrainingRuns() }
+                    .disabled(model.busy)
+                    .accessibilityIdentifier("training.deleteAllRuns")
+            }.controlSize(.small)
+        }
     }
 }
 
@@ -72,6 +90,9 @@ struct ModelVersionRow: View {
                 Spacer(minLength: 0)
                 Button("Show folder") { model.reveal(version.directory) }
                     .accessibilityIdentifier("training.version.reveal.\(version.id)")
+                Button("Delete run…", role: .destructive) { model.confirmDeleteTrainingRun(version) }
+                    .disabled(model.busy)
+                    .accessibilityIdentifier("training.version.delete.\(version.id)")
             }.controlSize(.small)
             DisclosureGroup("Run settings and history") {
                 VStack(alignment: .leading, spacing: 10) {
@@ -270,6 +291,7 @@ struct TrainingSettingValue: Identifiable, Equatable {
         func number(_ value: Double) -> String { ModelVersionPresentation.number(value) }
         func yesNo(_ value: Bool) -> String { value ? "On" : "Off" }
         var values: [Self] = [
+            item("modelArchitecture", "Model architecture", settings.modelArchitecture == NativeArchitecture.pyramidIdentifier ? "Efficient multiscale" : "Full-resolution residual"),
             item("imageSize", "Training dimensions", "\(settings.imageSize) × \(settings.imageSize)"),
             item("modelWidth", "Channel width", "\(settings.modelWidth)"),
             item("modelBlocks", "Residual blocks", "\(settings.modelBlocks)"),

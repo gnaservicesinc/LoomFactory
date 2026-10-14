@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import LoomNative
 
 public enum TrainingStart: Sendable, Equatable {
     case fresh
@@ -207,6 +208,7 @@ extension LoomProject {
             throw LoomError("This saved version has no readable native model settings.")
         }
         var resolved = settings
+        resolved.modelArchitecture = saved.modelArchitecture
         resolved.modelWidth = saved.modelWidth; resolved.modelBlocks = saved.modelBlocks
         resolved.imageSize = saved.imageSize; resolved.exaggerateFeatures = saved.exaggerateFeatures
         let path = source == .checkpoint ? (descriptor["weights_path"] as? String ?? "checkpoint.safetensors") : descriptor["weights_path"] as? String
@@ -295,13 +297,13 @@ enum TrainingRunFiles {
         let directory = try ownedRun(weights.deletingLastPathComponent(), projectFolder: projectFolder)
         let source: TrainingWeightSource = weights.lastPathComponent == "checkpoint.safetensors" ? .checkpoint : .model
         let descriptor = try descriptor(at: directory, source: source)
-        let architecture = descriptor["architecture_config"] as? [String: Any]
+        let architecture = try nativeArchitecture(from: descriptor, map: map)
         let nativeSettings = (source == .checkpoint ? descriptor["settings"] : descriptor["training"]) as? [String: Any] ?? [:]
         guard descriptor["project_id"] as? String == projectID, descriptor["dataset_id"] as? String == datasetID,
               descriptor["kind"] as? String == "map", descriptor["map"] as? String == map.rawValue,
-              descriptor["architecture"] as? String == "loom-factory-material-residual-v1",
-              architecture?["id"] as? String == "loom-factory-material-residual-v1",
-              architecture?["width"] as? Int == settings.modelWidth, architecture?["blocks"] as? Int == settings.modelBlocks,
+              architecture.identifier == settings.modelArchitecture,
+              architecture.width == settings.modelWidth, architecture.blocks == settings.modelBlocks,
+              (nativeSettings["model_architecture"] as? String).map({ $0 == architecture.identifier }) ?? true,
               (nativeSettings["image_size"] as? Int ?? descriptor["image_size"] as? Int) == settings.imageSize,
               (nativeSettings["exaggerate_features"] as? Bool ?? false) == settings.exaggerateFeatures else {
             throw LoomError("The saved weights do not match this project, dataset, map or native model settings.")
@@ -332,6 +334,7 @@ enum TrainingRunFiles {
               let coreMLPath = artifact.coreMLPath, descriptor["coreml_path"] as? String == coreMLPath else {
             throw LoomError("The completed model does not match this source project's saved version.")
         }
+        _ = try nativeArchitecture(from: descriptor, map: map)
         let weights = try containedFile(weightsPath, directory: directory)
         let native = try containedFile(coreMLPath, directory: directory)
         if let hash = descriptor["weights_sha256"] as? String, hash != (try sha256(weights)) {
@@ -349,10 +352,27 @@ enum TrainingRunFiles {
 
     static func settings(from values: [String: Any], descriptor: [String: Any]?) -> TrainingSettings? {
         let architecture = descriptor?["architecture_config"] as? [String: Any]
+        let declared = descriptor?["architecture"] as? String
+        let configured = architecture?["id"] as? String
+        let recorded = values["model_architecture"] as? String ?? values["modelArchitecture"] as? String
+        let identity = declared ?? configured ?? recorded ?? NativeArchitecture.identifier
+        guard [declared, configured, values["model_architecture"] as? String,
+               values["modelArchitecture"] as? String].compactMap({ $0 }).allSatisfy({ $0 == identity }),
+              TrainingNetwork(rawValue: identity) != nil,
+              descriptor == nil || (declared != nil && configured != nil) else { return nil }
         let width = architecture?["width"] as? Int ?? values["width"] as? Int
+            ?? values["model_width"] as? Int ?? values["modelWidth"] as? Int
         let blocks = architecture?["blocks"] as? Int ?? values["blocks"] as? Int
+            ?? values["model_blocks"] as? Int ?? values["modelBlocks"] as? Int
         let size = values["image_size"] as? Int ?? descriptor?["image_size"] as? Int
         guard let width, let blocks, let size, (8...256).contains(width), (1...12).contains(blocks), (32...8192).contains(size) else { return nil }
+        guard ["width", "model_width", "modelWidth"].allSatisfy({ key in
+            guard let value = values[key] else { return true }
+            return value as? Int == width
+        }), ["blocks", "model_blocks", "modelBlocks"].allSatisfy({ key in
+            guard let value = values[key] else { return true }
+            return value as? Int == blocks
+        }) else { return nil }
         let aliases = ["width": "modelWidth", "blocks": "modelBlocks", "lr_schedule": "learningRateSchedule", "minimum_lr_ratio": "minimumLearningRateRatio"]
         var converted: [String: Any] = [:]
         for (key, value) in values {
@@ -361,12 +381,37 @@ enum TrainingRunFiles {
             converted[aliases[key] ?? camel] = value
         }
         converted["modelWidth"] = width; converted["modelBlocks"] = blocks; converted["imageSize"] = size
+        converted["modelArchitecture"] = identity
         if let requestedEpochs = values["requested_epochs"] as? Int { converted["epochs"] = requestedEpochs }
         // Completed native descriptors use the backend's display name, while settings store its stable raw value.
         if converted["device"] as? String == "metal" { converted["device"] = TrainingDevice.metal.rawValue }
         guard let data = try? JSONSerialization.data(withJSONObject: converted),
               let settings = try? JSONDecoder().decode(TrainingSettings.self, from: data) else { return nil }
         return settings
+    }
+
+    /// Resolve only registered immutable architectures, checking the outer
+    /// identity against its constructor settings before any saved model loads.
+    static func nativeArchitecture(from descriptor: [String: Any], map: MapRole) throws -> NativeArchitecture {
+        guard MapRole.targets.contains(map), let identity = descriptor["architecture"] as? String,
+              let configuration = descriptor["architecture_config"] as? [String: Any],
+              configuration["id"] as? String == identity,
+              let width = configuration["width"] as? Int, let blocks = configuration["blocks"] as? Int else {
+            throw LoomError("The saved model has an inconsistent native architecture identity.")
+        }
+        let architecture = try NativeArchitecture(mapKind: map.rawValue, width: width, blocks: blocks, identifier: identity)
+        guard (configuration["input_channels"] as? Int).map({ $0 == 3 }) ?? true,
+              (configuration["output_channels"] as? Int).map({ $0 == architecture.outputChannels }) ?? true else {
+            throw LoomError("The saved model's channels do not match its material map.")
+        }
+        if identity == NativeArchitecture.pyramidIdentifier {
+            guard configuration["scale_channels"] as? [Int] == [width, width * 2, width * 4],
+                  configuration["residual_scale"] as? Int == 4,
+                  configuration["upsampling"] as? String == "nearest-2x-trim-to-skip" else {
+                throw LoomError("The saved pyramid model's feature scales are inconsistent.")
+            }
+        }
+        return architecture
     }
 
     static func sha256(_ file: URL) throws -> String {

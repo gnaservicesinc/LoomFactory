@@ -14,6 +14,19 @@ public final class NativeCancellation: @unchecked Sendable {
     public func check() throws { if isCancelled { throw CancellationError() } }
 }
 
+/// Measurements of the latest training, optimizer, evaluation, or prediction
+/// call. The synchronous graph API does not expose its internal GPU timestamps;
+/// gpuSpanSeconds remains zero rather than inferring utilization from CPU waits.
+public struct NativeGraphExecutionMeasurements: Sendable {
+    public fileprivate(set) var feedSeconds: Double = 0
+    public fileprivate(set) var resultSetupSeconds: Double = 0
+    public fileprivate(set) var encodingSeconds: Double = 0
+    public fileprivate(set) var waitSeconds: Double = 0
+    public fileprivate(set) var gpuSpanSeconds: Double = 0
+    public fileprivate(set) var scalarReadSeconds: Double = 0
+    public fileprivate(set) var totalSeconds: Double = 0
+}
+
 private struct NativeBatchShape: Hashable { let batch: Int; let height: Int; let width: Int }
 
 /// Every feed and persistent result owns contiguous Metal storage through the
@@ -37,14 +50,15 @@ private final class NativeBatchGraph {
     var accumulators: [String: MPSGraphTensor] = [:]
     var accumulated: [String: MPSGraphTensor] = [:]
     init(shape: NativeBatchShape, architecture: NativeArchitecture, shapes: [String: [Int]],
-         trainable: Set<String>, adapter: NativeAdapterConfiguration?) {
+         trainable: Set<String>, adapter: NativeAdapterConfiguration?, channelsLast: Bool) {
         input = graph.placeholder(shape: [shape.batch, 3, shape.height, shape.width].map(NSNumber.init(value:)), dataType: .float32, name: "rgb")
         target = graph.placeholder(shape: [shape.batch, architecture.outputChannels, shape.height, shape.width].map(NSNumber.init(value:)), dataType: .float32, name: "target")
         weight = graph.placeholder(shape: [], dataType: .float32, name: "accumulation_weight")
         for name in shapes.keys.sorted() {
             parameters[name] = graph.placeholder(shape: shapes[name]!.map(NSNumber.init(value:)), dataType: .float32, name: name)
         }
-        prediction = graph.materialNetwork(input: input, architecture: architecture, parameters: parameters, adapter: adapter)
+        prediction = graph.materialNetwork(input: input, architecture: architecture, parameters: parameters,
+            adapter: adapter, channelsLast: channelsLast)
         loss = graph.materialLoss(prediction: prediction, target: target, mapKind: architecture.mapKind)
         let weightedLoss = graph.multiplication(loss, weight, name: nil)
         let names = trainable.sorted()
@@ -67,7 +81,9 @@ public final class NativeTrainingSession {
     public let adapter: NativeAdapterConfiguration?
     public let cancellation: NativeCancellation
     public let deviceName: String
+    public let channelsLast: Bool
     public private(set) var updateCount: Int
+    public private(set) var lastExecutionMeasurements: NativeGraphExecutionMeasurements?
     public var trainableParameterCount: Int { trainableShapes.values.reduce(0) { $0 + $1.reduce(1, *) } }
     private let device: MTLDevice
     private let queue: MTLCommandQueue
@@ -86,7 +102,8 @@ public final class NativeTrainingSession {
                 seed: UInt64, weights: [String: NativeTensor]? = nil,
                 adapter: NativeAdapterConfiguration? = nil, adapterWeights: [String: NativeTensor]? = nil,
                 optimizerState: [String: NativeTensor]? = nil, initialUpdateCount: Int = 0,
-                device: String = "auto", cancellation: NativeCancellation = NativeCancellation()) throws {
+                device: String = "auto", cancellation: NativeCancellation = NativeCancellation(),
+                channelsLast: Bool? = nil) throws {
         try cancellation.check()
         guard ["auto", "mps"].contains(device) else {
             throw NativeTrainingError.unavailable("Native training requires the Apple GPU. Select Automatic or Apple GPU (Metal).")
@@ -99,6 +116,10 @@ public final class NativeTrainingSession {
         if adapter == nil && adapterWeights != nil { throw NativeTrainingError.invalid("Adapter weights require a LoRA configuration.") }
         self.architecture = architecture; self.options = options; self.adapter = adapter
         self.cancellation = cancellation; self.device = metal; self.queue = queue
+        // The full-resolution residual convolution path is faster in NHWC and
+        // avoids the allocation-sensitive large NCHW gradient implementation.
+        // Pyramid's smaller feature grids are faster and validated in NCHW.
+        self.channelsLast = channelsLast ?? !architecture.isPyramid
         deviceName = metal.name; updateCount = initialUpdateCount
         var allShapes = architecture.parameterShapes
         var trainedShapes = allShapes
@@ -147,6 +168,7 @@ public final class NativeTrainingSession {
     /// accumulation window with a smaller final batch, matching sample means.
     @discardableResult
     public func train(input: [Float], target: [Float], batchSize: Int, height: Int, width: Int, weight: Float = 1) throws -> Double {
+        let executionStart = ProcessInfo.processInfo.systemUptime
         try cancellation.check()
         guard weight.isFinite, weight > 0 else { throw NativeTrainingError.invalid("Gradient accumulation weight must be positive and finite.") }
         let compiled = try batchGraph(input: input, target: target, batchSize: batchSize, height: height, width: width)
@@ -156,17 +178,20 @@ public final class NativeTrainingSession {
         feeds[compiled.weight] = try tensorData([weight], shape: [])
         for (name, placeholder) in compiled.accumulators { feeds[placeholder] = accumulation[name]! }
         try cancellation.check()
-        let results = try runGraph(compiled.graph, feeds: feeds, targets: compiled.trainingTargets)
-        let loss = Double(read(results[compiled.loss]!, count: 1)[0])
+        let results = try runGraph(compiled.graph, feeds: feeds, targets: compiled.trainingTargets,
+                                   feedSeconds: ProcessInfo.processInfo.systemUptime - executionStart)
+        let loss = Double(readScalar(results[compiled.loss]!))
         guard loss.isFinite else { throw NativeTrainingError.nonFinite("Training produced a non-finite loss. The previous checkpoint remains intact.") }
         try cancellation.check()
         for (name, result) in compiled.accumulated { accumulation[name] = results[result]! }
         accumulatedBatches += 1
+        lastExecutionMeasurements?.totalSeconds = ProcessInfo.processInfo.systemUptime - executionStart
         return loss
     }
 
     @discardableResult
     public func applyGradients(learningRate: Double) throws -> Double {
+        let executionStart = ProcessInfo.processInfo.systemUptime
         try cancellation.check()
         guard learningRate.isFinite, learningRate >= 0, learningRate <= 1, accumulatedBatches > 0 else {
             throw NativeTrainingError.invalid("A finite learning rate and accumulated gradients are required for an optimizer step.")
@@ -183,9 +208,10 @@ public final class NativeTrainingSession {
         feeds[compiled.clipThreshold] = try tensorData([Float(options.gradientClipThreshold(updateCount: updateCount))], shape: [])
         feeds[compiled.firstCorrection] = try tensorData([Float(1 - pow(options.beta1, Double(updateCount + 1)))], shape: [])
         feeds[compiled.secondCorrection] = try tensorData([Float(1 - pow(options.beta2, Double(updateCount + 1)))], shape: [])
-        let results = try runGraph(compiled.graph, feeds: feeds, targets: compiled.targets)
-        let norm = Double(read(results[compiled.norm]!, count: 1)[0])
-        let invalidWeights = read(results[compiled.valid]!, count: 1)[0]
+        let results = try runGraph(compiled.graph, feeds: feeds, targets: compiled.targets,
+                                   feedSeconds: ProcessInfo.processInfo.systemUptime - executionStart)
+        let norm = Double(readScalar(results[compiled.norm]!))
+        let invalidWeights = readScalar(results[compiled.valid]!)
         guard norm.isFinite, invalidWeights == 0 else {
             throw NativeTrainingError.nonFinite("Training produced non-finite gradients or weights. The last finite checkpoint was preserved.")
         }
@@ -195,6 +221,7 @@ public final class NativeTrainingSession {
         for (name, result) in compiled.updatedSecond { second[name] = results[result]! }
         updateCount += 1
         resetAccumulatedGradients()
+        lastExecutionMeasurements?.totalSeconds = ProcessInfo.processInfo.systemUptime - executionStart
         return norm
     }
 
@@ -204,28 +231,34 @@ public final class NativeTrainingSession {
     }
 
     public func evaluate(input: [Float], target: [Float], batchSize: Int, height: Int, width: Int) throws -> Double {
+        let executionStart = ProcessInfo.processInfo.systemUptime
         try cancellation.check()
         let compiled = try batchGraph(input: input, target: target, batchSize: batchSize, height: height, width: width)
         var feeds = parameterFeeds(compiled)
         feeds[compiled.input] = try tensorData(input, shape: [batchSize, 3, height, width])
         feeds[compiled.target] = try tensorData(target, shape: [batchSize, architecture.outputChannels, height, width])
-        let result = try runGraph(compiled.graph, feeds: feeds, targets: [compiled.loss])
-        let loss = Double(read(result[compiled.loss]!, count: 1)[0])
+        let result = try runGraph(compiled.graph, feeds: feeds, targets: [compiled.loss],
+                                  feedSeconds: ProcessInfo.processInfo.systemUptime - executionStart)
+        let loss = Double(readScalar(result[compiled.loss]!))
         try cancellation.check()
         guard loss.isFinite else { throw NativeTrainingError.nonFinite("Held-out evaluation produced a non-finite loss.") }
+        lastExecutionMeasurements?.totalSeconds = ProcessInfo.processInfo.systemUptime - executionStart
         return loss
     }
 
     public func predict(input: [Float], batchSize: Int, height: Int, width: Int) throws -> [Float] {
+        let executionStart = ProcessInfo.processInfo.systemUptime
         try cancellation.check()
         let count = try validateBatch(input: input, target: nil, batchSize: batchSize, height: height, width: width)
         let compiled = try batchGraph(input: input, target: nil, batchSize: batchSize, height: height, width: width)
         var feeds = parameterFeeds(compiled)
         feeds[compiled.input] = try tensorData(input, shape: [batchSize, 3, height, width])
-        let result = try runGraph(compiled.graph, feeds: feeds, targets: [compiled.prediction])
+        let result = try runGraph(compiled.graph, feeds: feeds, targets: [compiled.prediction],
+                                  feedSeconds: ProcessInfo.processInfo.systemUptime - executionStart)
         let values = read(result[compiled.prediction]!, count: count * architecture.outputChannels)
         try cancellation.check()
         guard values.allSatisfy(\.isFinite) else { throw NativeTrainingError.nonFinite("Prediction produced non-finite pixels.") }
+        lastExecutionMeasurements?.totalSeconds = ProcessInfo.processInfo.systemUptime - executionStart
         return values
     }
 
@@ -287,17 +320,21 @@ public final class NativeTrainingSession {
         guard let buffer else { throw NativeTrainingError.unavailable("The Apple GPU could not allocate native training tensor storage.") }
         return NativeTensorStorage(data: MPSGraphTensorData(buffer, shape: shape.map(NSNumber.init(value:)), dataType: .float32), backingBuffer: buffer)
     }
-    private func runGraph(_ graph: MPSGraph, feeds: [MPSGraphTensor: NativeTensorStorage], targets: [MPSGraphTensor]) throws -> [MPSGraphTensor: NativeTensorStorage] {
+    private func runGraph(_ graph: MPSGraph, feeds: [MPSGraphTensor: NativeTensorStorage],
+                          targets: [MPSGraphTensor], feedSeconds: Double) throws -> [MPSGraphTensor: NativeTensorStorage] {
         // Automatically allocated target data, fed into another graph without
         // CPU materialization, produced allocation-dependent gradients at full
-        // resolution despite an identical loss. Explicit output buffers keep graph results
-        // independent of the allocator and require no CPU gradient readback.
+        // resolution despite an identical loss. Preserve explicit, zeroed output
+        // buffers; no CPU gradient readback is required.
+        let setupStart = ProcessInfo.processInfo.systemUptime
+        var measurements = NativeGraphExecutionMeasurements()
+        measurements.feedSeconds = feedSeconds
         var results: [MPSGraphTensor: NativeTensorStorage] = [:]
         guard let initialization = queue.makeCommandBuffer(), let blit = initialization.makeBlitCommandEncoder() else {
             throw NativeTrainingError.unavailable("The Apple GPU could not initialize native training result storage.")
         }
         for tensor in targets {
-            guard let shape = tensor.shape, tensor.dataType == .float32 else {
+            guard let shape = tensor.shape, shape.allSatisfy({ $0.intValue > 0 }), tensor.dataType == .float32 else {
                 blit.endEncoding()
                 throw NativeTrainingError.invalid("Native training requires fixed float32 result shapes.")
             }
@@ -310,17 +347,32 @@ public final class NativeTrainingSession {
             results[tensor] = NativeTensorStorage(data: MPSGraphTensorData(buffer, shape: shape, dataType: .float32), backingBuffer: buffer)
         }
         blit.endEncoding()
+        let graphFeeds = feeds.mapValues(\.data)
+        let graphResults = results.mapValues(\.data)
+        measurements.resultSetupSeconds = ProcessInfo.processInfo.systemUptime - setupStart
+        let waitStart = ProcessInfo.processInfo.systemUptime
         initialization.commit()
         initialization.waitUntilCompleted()
+        measurements.waitSeconds = ProcessInfo.processInfo.systemUptime - waitStart
         guard initialization.status == .completed else {
             throw NativeTrainingError.unavailable("The Apple GPU could not initialize native training results: \(initialization.error?.localizedDescription ?? "command did not complete").")
         }
-        // This MPSGraph API is synchronous: all output buffers are complete
-        // before callers publish the next accumulation or optimizer state.
+        let runStart = ProcessInfo.processInfo.systemUptime
         withExtendedLifetime((feeds, results)) {
-            graph.run(with: queue, feeds: feeds.mapValues(\.data), targetOperations: nil, resultsDictionary: results.mapValues(\.data))
+            graph.run(with: queue, feeds: graphFeeds, targetOperations: nil, resultsDictionary: graphResults)
         }
+        // The reference API includes execution in this blocking call and
+        // does not expose the graph's underlying GPU command buffers.
+        measurements.encodingSeconds = ProcessInfo.processInfo.systemUptime - runStart
+        measurements.totalSeconds = feedSeconds + ProcessInfo.processInfo.systemUptime - setupStart
+        lastExecutionMeasurements = measurements
         return results
+    }
+    private func readScalar(_ tensor: NativeTensorStorage) -> Float {
+        let start = ProcessInfo.processInfo.systemUptime
+        let value = read(tensor, count: 1)[0]
+        lastExecutionMeasurements?.scalarReadSeconds += ProcessInfo.processInfo.systemUptime - start
+        return value
     }
     private func read(_ tensor: NativeTensorStorage, count: Int) -> [Float] {
         withExtendedLifetime(tensor) { read(tensor.data, count: count) }
@@ -349,7 +401,7 @@ public final class NativeTrainingSession {
         if let compiled = batchGraphs[shape] { return compiled }
         try cancellation.check()
         let compiled = NativeBatchGraph(shape: shape, architecture: architecture, shapes: shapes,
-            trainable: Set(trainableShapes.keys), adapter: adapter)
+            trainable: Set(trainableShapes.keys), adapter: adapter, channelsLast: channelsLast)
         // Native-resolution batches normally have one or two sizes. Bound graph
         // cache growth when a caller evaluates many differing dimensions.
         if batchGraphs.count >= 4 { batchGraphs.removeAll() }

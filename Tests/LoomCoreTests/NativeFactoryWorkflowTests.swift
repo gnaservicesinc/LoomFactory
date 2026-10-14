@@ -11,7 +11,7 @@ final class NativeFactoryWorkflowTests: XCTestCase {
     func testNativeTrainingPublishesRealCoreMLAndCompatibleWeightsPreservingOriginals() async throws {
         let (project, root) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
         let before = try pixels(root)
-        let settings = TrainingSettings(imageSize: 32, epochs: 1, shuffleEachEpoch: false, modelWidth: 8, modelBlocks: 1, validationFraction: 0)
+        let settings = TrainingSettings(imageSize: 32, epochs: 1, shuffleEachEpoch: false, modelWidth: 8, modelBlocks: 1, validationFraction: 0, modelArchitecture: NativeArchitecture.identifier)
         let artifact = try await project.trainMap(datasetID: ImageMetadataStore.categoryID("Bricks"), map: .depth,
                                                 settings: settings, progress: { _ in })
         let weights = try NativeWeights.read(from: artifact.directory.appendingPathComponent(artifact.weightsPath!))

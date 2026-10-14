@@ -1,4 +1,17 @@
 import Foundation
+import LoomNative
+
+public enum TrainingNetwork: String, Codable, CaseIterable, Sendable, Identifiable {
+    case pyramid = "loom-factory-material-pyramid-v1"
+    case residual = "loom-factory-material-residual-v1"
+    public var id: String { rawValue }
+    public var displayName: String { self == .pyramid ? "Pyramid" : "Original residual" }
+    public var detail: String {
+        self == .pyramid
+            ? "Learns at several scales, with the main blocks on a smaller feature grid. Recommended for new models."
+            : "Runs every residual block at full image resolution. Retained for existing models and comparisons."
+    }
+}
 
 public enum TrainingOptimizer: String, Codable, CaseIterable, Sendable, Identifiable {
     case adamW = "adamw", adam, sgd, lion
@@ -48,6 +61,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     public var rotateCrops: Bool
     public var exaggerateFeatures: Bool
     public var seed: Int
+    public var modelArchitecture: String
     public var modelWidth: Int
     public var continueLatestWeights: Bool?
     public var modelBlocks: Int
@@ -77,7 +91,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     public init(imageSize: Int = 1024, epochs: Int = 10, batchSize: Int = 1,
                 learningRate: Double = 0.001, shuffleEachEpoch: Bool = true,
                 flipCrops: Bool = false, rotateCrops: Bool = false,
-                exaggerateFeatures: Bool = false, seed: Int = 0, modelWidth: Int = 84,
+                exaggerateFeatures: Bool = false, seed: Int = 0, modelWidth: Int = 38,
                 continueLatestWeights: Bool = false, modelBlocks: Int = 4,
                 optimizer: TrainingOptimizer = .adamW, weightDecay: Double = 0.01,
                 beta1: Double = 0.9, beta2: Double? = nil, momentum: Double = 0.9,
@@ -88,11 +102,13 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
                 minimumLearningRateRatio: Double = 0.1, cropRefresh: TrainingRefresh = .perEpoch,
                 augmentationRefresh: TrainingRefresh = .perEpoch, device: TrainingDevice = .automatic,
                 validationFraction: Double = 0.1, validationSeed: Int = 42, earlyStoppingPatience: Int = 0,
-                exportBestWeights: Bool = true, checkpointEveryEpochs: Int = 1) {
+                exportBestWeights: Bool = true, checkpointEveryEpochs: Int = 1,
+                modelArchitecture: String = NativeArchitecture.pyramidIdentifier) {
         self.imageSize = imageSize; self.epochs = epochs; self.batchSize = batchSize
         self.learningRate = learningRate; self.shuffleEachEpoch = shuffleEachEpoch
         self.flipCrops = flipCrops; self.rotateCrops = rotateCrops
         self.exaggerateFeatures = exaggerateFeatures; self.seed = seed; self.modelWidth = modelWidth
+        self.modelArchitecture = modelArchitecture
         self.continueLatestWeights = continueLatestWeights; self.modelBlocks = modelBlocks
         self.optimizer = optimizer; self.weightDecay = weightDecay; self.beta1 = beta1
         self.beta2 = beta2 ?? (optimizer == .lion ? 0.99 : 0.999); self.momentum = momentum
@@ -117,8 +133,23 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     }
     public func parameterCount(map: MapRole) -> Int {
         guard (8...256).contains(modelWidth), (1...12).contains(modelBlocks), MapRole.targets.contains(map) else { return 0 }
-        let channels = map == .normal ? 3 : 1
-        return 18 * modelBlocks * modelWidth * modelWidth + (28 + 2 * modelBlocks + 9 * channels) * modelWidth + channels
+        return (try? NativeArchitecture(mapKind: map.rawValue, width: modelWidth, blocks: modelBlocks,
+            identifier: modelArchitecture).parameterCount) ?? 0
+    }
+    /// Switching a saved project's fresh run keeps its approximate capacity,
+    /// while its saved checkpoints keep their exact recorded architecture.
+    public mutating func usePyramidForFreshRun(map: MapRole) {
+        guard modelArchitecture != NativeArchitecture.pyramidIdentifier else { return }
+        let budget = parameterCount(map: map)
+        modelArchitecture = NativeArchitecture.pyramidIdentifier
+        guard budget > 0 else { modelWidth = 38; return }
+        modelWidth = (8...256).min { left, right in
+            let a = try? NativeArchitecture(mapKind: map.rawValue, width: left, blocks: modelBlocks,
+                identifier: modelArchitecture).parameterCount
+            let b = try? NativeArchitecture(mapKind: map.rawValue, width: right, blocks: modelBlocks,
+                identifier: modelArchitecture).parameterCount
+            return abs((a ?? 0) - budget) < abs((b ?? 0) - budget)
+        } ?? 38
     }
     public var validationIssue: String? {
         if !(32...8192).contains(imageSize) { return "Training dimensions must be between 32 and 8,192 pixels." }
@@ -126,6 +157,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
         if !(1...64).contains(batchSize) { return "Batch size must be between 1 and 64." }
         if !learningRate.isFinite || !(0 < learningRate && learningRate <= 1) { return "Learning rate must be greater than zero and at most one." }
         if !(8...256).contains(modelWidth) || !(1...12).contains(modelBlocks) { return "Model width must be 8–256 and residual blocks must be 1–12." }
+        if TrainingNetwork(rawValue: modelArchitecture) == nil { return "This model uses an unsupported network architecture. Choose Pyramid or Original residual." }
         if !(1...1024).contains(gradientAccumulationSteps) { return "Gradient accumulation must be between 1 and 1,024 batches." }
         if gradientClipPolicy != .off {
             if !gradientClipNorm.isFinite || !(0...1000).contains(gradientClipNorm) { return "Gradient clipping must be between zero and 1,000. Zero disables clipping." }
@@ -150,7 +182,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case imageSize, epochs, batchSize, learningRate, shuffleEachEpoch, flipCrops, rotateCrops, exaggerateFeatures, seed, modelWidth, continueLatestWeights
-        case modelBlocks, optimizer, weightDecay, beta1, beta2, momentum, gradientAccumulationSteps, gradientClipNorm
+        case modelArchitecture, modelBlocks, optimizer, weightDecay, beta1, beta2, momentum, gradientAccumulationSteps, gradientClipNorm
         case gradientClipPolicy, gradientClipWarmupStartNorm, gradientClipWarmupUpdates
         case learningRateSchedule, warmupEpochs, minimumLearningRateRatio, cropRefresh, augmentationRefresh, device
         case validationFraction, validationSeed, earlyStoppingPatience, exportBestWeights, checkpointEveryEpochs
@@ -167,7 +199,11 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
         rotateCrops = try c.decodeIfPresent(Bool.self, forKey: .rotateCrops) ?? d.rotateCrops
         exaggerateFeatures = try c.decodeIfPresent(Bool.self, forKey: .exaggerateFeatures) ?? d.exaggerateFeatures
         seed = try c.decodeIfPresent(Int.self, forKey: .seed) ?? d.seed
-        modelWidth = try c.decodeIfPresent(Int.self, forKey: .modelWidth) ?? d.modelWidth
+        // Absence identifies the original full-resolution architecture. Never
+        // reinterpret an existing run's width as a pyramid channel count.
+        modelArchitecture = try c.decodeIfPresent(String.self, forKey: .modelArchitecture) ?? NativeArchitecture.identifier
+        modelWidth = try c.decodeIfPresent(Int.self, forKey: .modelWidth)
+            ?? (modelArchitecture == NativeArchitecture.identifier ? 84 : d.modelWidth)
         continueLatestWeights = try c.decodeIfPresent(Bool.self, forKey: .continueLatestWeights) ?? false
         modelBlocks = try c.decodeIfPresent(Int.self, forKey: .modelBlocks) ?? d.modelBlocks
         optimizer = try c.decodeIfPresent(TrainingOptimizer.self, forKey: .optimizer) ?? d.optimizer

@@ -43,7 +43,12 @@ public struct NativeImagePair: Sendable {
 }
 
 public enum NativeImages {
-    private static let rawPixelCache = NativeRawPixelCache(limit: 512 * 1024 * 1024)
+    /// Keep a bounded share of unified memory for unchanged decoded originals.
+    /// A fixed 512 MiB cache repeatedly evicted 8K pairs between epochs, forcing
+    /// their decode and full-source validation to run again on each visit.
+    public static let decodedPixelCacheByteLimit = Int(min(UInt64(8 * 1024 * 1024 * 1024),
+        max(UInt64(512 * 1024 * 1024), ProcessInfo.processInfo.physicalMemory / 8)))
+    private static let rawPixelCache = NativeRawPixelCache(limit: decodedPixelCacheByteLimit)
 
     /// Releases the bounded, in-memory cache of decoded original numeric codes.
     public static func clearDecodedPixelCache() { rawPixelCache.clear() }

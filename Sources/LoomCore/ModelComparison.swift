@@ -108,7 +108,8 @@ private enum ComparisonWorker {
                   descriptor["project_id"] as? String == projectID,
                   descriptor["dataset_id"] as? String == datasetID,
                   descriptor["map"] as? String == map.rawValue,
-                  descriptor["architecture"] as? String == NativeArchitecture.identifier,
+                  descriptor["architecture"] as? String == artifact.architecture,
+                  [NativeArchitecture.identifier, NativeArchitecture.pyramidIdentifier].contains(artifact.architecture),
                   let size = descriptor["image_size"] as? Int, (32...8192).contains(size) else {
                 throw LoomError("The saved model descriptor does not match this source project.")
             }

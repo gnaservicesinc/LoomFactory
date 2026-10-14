@@ -23,6 +23,13 @@ The history lists every run for the selected dataset and map, its settings,
 epoch measurements and parent. Folder access includes checkpoints, exported
 Core ML, trainable weights and run metadata. There is no automatic loss ranking.
 
+**Delete run…** moves that run's whole folder, including its model, checkpoints
+and history, to macOS Trash. **Delete all runs…** clears map-training history
+across every dataset and map in the current source folder. Original images,
+classifier outputs and existing package exports are preserved. Active project
+operations block deletion, and deleting a selected version clears its export
+selection. Stopped and failed runs can be deleted even without usable weights.
+
 **A/B Compare** takes two completed versions and a current diffuse/target pair.
 It runs both exported Core ML models on the same exact center crop, using the
 smaller of their recorded training dimensions. It neither resizes nor rewrites

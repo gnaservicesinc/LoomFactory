@@ -74,7 +74,7 @@ enum NativeFactoryTraining {
         }
         tracker.begin(stage: .preparingModel, now: clock())
         emit(.init(type: "status", message: "Preparing model…"))
-        let architecture = try NativeArchitecture(mapKind: map.rawValue, width: settings.modelWidth, blocks: settings.modelBlocks)
+        let architecture = try NativeArchitecture(mapKind: map.rawValue, width: settings.modelWidth, blocks: settings.modelBlocks, identifier: settings.modelArchitecture)
         let options = try NativeTrainingOptions(optimizer: settings.optimizer.rawValue, weightDecay: settings.weightDecay,
             beta1: settings.beta1, beta2: settings.beta2, momentum: settings.momentum, gradientClipNorm: settings.gradientClipNorm,
             gradientClipPolicy: settings.gradientClipPolicy.rawValue,
@@ -89,7 +89,8 @@ enum NativeFactoryTraining {
             emit(.init(type: "status", message: "Continuing saved weights with a fresh native optimizer"))
         }
         let session = try NativeTrainingSession(architecture: architecture, options: options, seed: UInt64(settings.seed),
-            weights: initial, device: settings.device.rawValue, cancellation: cancellation)
+            weights: initial, device: settings.device.rawValue, cancellation: cancellation,
+            channelsLast: !architecture.isPyramid)
         var update = 0, history: [[String: Any]] = [], bestLoss: Double?, bestEpoch: Int?, stale = 0
         var stoppedEarly = false
         var bestWeights: [String: NativeTensor]?
@@ -110,10 +111,10 @@ enum NativeFactoryTraining {
             emit(.init(type: "status", message: "Saving checkpoint at step \(update)…", update: update, totalUpdates: totalUpdates))
             let weights = try session.weights()
             try NativeWeights.write(weights, to: output.appendingPathComponent("checkpoint.safetensors"),
-                                    metadata: ["schema": "loom-factory-checkpoint-v1", "architecture": NativeArchitecture.identifier])
+                                    metadata: ["schema": "loom-factory-checkpoint-v1", "architecture": architecture.identifier])
             var descriptor: [String: Any] = ["schema": "loom-factory-checkpoint-v1", "status": status, "project_id": projectID,
                 "dataset_id": dataset.id, "dataset_name": dataset.name, "kind": "map", "map": map.rawValue,
-                "architecture": NativeArchitecture.identifier, "architecture_config": architectureJSON(architecture),
+                "architecture": architecture.identifier, "architecture_config": architectureJSON(architecture),
                 "settings": settingsJSON(settings), "epochs_completed": history.count, "updates": update, "history": history,
                 "weights_path": "checkpoint.safetensors", "backend": "swift-mpsgraph-metal",
                 "continuation": "saved weights with a fresh optimizer and current source metadata"]
@@ -264,7 +265,7 @@ enum NativeFactoryTraining {
             let deployment: [String: NativeTensor]
             if settings.exportBestWeights, let bestWeights { deployment = bestWeights } else { deployment = try session.weights() }
             try NativeWeights.write(deployment, to: output.appendingPathComponent("model.safetensors"),
-                metadata: ["schema": "loom-factory-model-v1", "architecture": NativeArchitecture.identifier])
+                metadata: ["schema": "loom-factory-model-v1", "architecture": architecture.identifier])
             try cancellation.check()
             let compiled = try NativeCoreML.export(weights: deployment, architecture: architecture, imageSize: settings.imageSize,
                 to: output.appendingPathComponent("model.mlmodel"))
@@ -287,7 +288,7 @@ enum NativeFactoryTraining {
             let finalLoss = history[exportEpoch - 1]["loss"] as! Double
             var descriptor: [String: Any] = ["schema": "loom-factory-model-v1", "status": "completed", "kind": "map",
                 "project_id": projectID, "dataset_id": dataset.id, "dataset_name": dataset.name, "map": map.rawValue,
-                "architecture": NativeArchitecture.identifier, "architecture_config": architectureJSON(architecture), "final_loss": finalLoss,
+                "architecture": architecture.identifier, "architecture_config": architectureJSON(architecture), "final_loss": finalLoss,
                 "final_validation_loss": history[exportEpoch - 1]["validation_loss"] ?? NSNull(),
                 "created_at": ISO8601DateFormatter().string(from: Date()), "duration_seconds": Date().timeIntervalSince(started),
                 "image_size": settings.imageSize, "input_name": "rgb", "output_name": "material_map",
@@ -302,7 +303,7 @@ enum NativeFactoryTraining {
             try cancellation.check()
             try writeJSON(descriptor, to: output.appendingPathComponent("model.json"))
             let artifact = ModelArtifact(id: id, kind: "map", datasetID: dataset.id, datasetName: dataset.name, map: map,
-                directory: output, epochs: history.count, loss: finalLoss, coreMLPath: "model.mlmodel", weightsPath: "model.safetensors", architecture: NativeArchitecture.identifier)
+                directory: output, epochs: history.count, loss: finalLoss, coreMLPath: "model.mlmodel", weightsPath: "model.safetensors", architecture: architecture.identifier)
             try JSONEncoder().encode(artifact).write(to: output.appendingPathComponent("artifact.json"), options: .atomic)
             tracker.begin(stage: .completed, now: clock())
             emit(.init(type: "completed", message: "Training complete · model saved", progress: 1))
@@ -333,12 +334,11 @@ enum NativeFactoryTraining {
         }
     }
     static func architectureJSON(_ a: NativeArchitecture) -> [String: Any] {
-        ["id": NativeArchitecture.identifier, "width": a.width, "blocks": a.blocks, "input_channels": 3,
-         "output_channels": a.mapKind == "normal" ? 3 : 1, "padding": "zero", "input": "RGB sRGB float32 NCHW [0,1]",
-         "output": "float32 NCHW [0,1]", "normal_convention": a.mapKind == "normal" ? "OpenGL" : NSNull()]
+        a.descriptor
     }
     static func settingsJSON(_ s: TrainingSettings) -> [String: Any] {
-        ["image_size": s.imageSize, "width": s.modelWidth, "blocks": s.modelBlocks, "epochs": s.epochs,
+        ["image_size": s.imageSize, "model_architecture": s.modelArchitecture,
+         "width": s.modelWidth, "blocks": s.modelBlocks, "epochs": s.epochs,
          "batch_size": s.batchSize, "learning_rate": s.learningRate, "shuffle_each_epoch": s.shuffleEachEpoch,
          "flip_crops": s.flipCrops, "rotate_crops": s.rotateCrops, "exaggerate_features": s.exaggerateFeatures,
          "seed": s.seed, "device": s.device.rawValue, "optimizer": s.optimizer.rawValue, "weight_decay": s.weightDecay,

@@ -35,6 +35,7 @@ struct TrainingPanel: View {
                 model.trainMap()
             }.disabled(!model.canTrain)
                 .accessibilityIdentifier("training.start")
+            TrainingRunDeletionControl(model: model)
             trainedModels
         }
         .disabled(model.busy)
@@ -125,10 +126,17 @@ struct TrainingPanel: View {
             TextField("Run label (optional), e.g. lower learning rate", text: $model.runLabel)
                 .textFieldStyle(.roundedBorder).accessibilityIdentifier("training.runLabel")
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 11) {
+                row("Network", detail: selectedNetwork.detail) {
+                    Picker("Network", selection: networkBinding) {
+                        ForEach(TrainingNetwork.allCases) { network in
+                            Text(network.displayName).tag(network)
+                        }
+                    }.labelsHidden().accessibilityIdentifier("training.network")
+                }
                 row("Model size", detail: "Larger models use more memory and take longer to train.") {
                     Picker("Model size", selection: presetBinding) {
                         ForEach(TrainingModelPreset.allCases) { preset in
-                            Text(preset.label(map: model.selectedMap)).tag(preset)
+                            Text(preset.label(map: model.selectedMap, network: selectedNetwork)).tag(preset)
                         }
                     }.labelsHidden().accessibilityIdentifier("training.modelPreset")
                 }
@@ -343,11 +351,32 @@ struct TrainingPanel: View {
         Binding(get: { model.effectiveTrainingSettings.exaggerateFeatures }, set: { model.settings.training.exaggerateFeatures = $0 })
     }
 
+    private var selectedNetwork: TrainingNetwork {
+        TrainingNetwork(rawValue: model.effectiveTrainingSettings.modelArchitecture) ?? .pyramid
+    }
+
+    private var networkBinding: Binding<TrainingNetwork> {
+        Binding(get: { selectedNetwork }, set: { network in
+            guard network != selectedNetwork else { return }
+            let currentPreset = TrainingModelPreset.allCases.first {
+                $0.width(network: selectedNetwork) == model.settings.training.modelWidth && model.settings.training.modelBlocks == 4
+            }
+            model.settings.training.modelArchitecture = network.rawValue
+            if let width = currentPreset?.width(network: network) {
+                model.settings.training.modelWidth = width
+            } else {
+                // Custom widths remain directly editable; changing networks
+                // selects a practical size before the user adjusts them.
+                model.settings.training.modelWidth = TrainingModelPreset.large.width(network: network)!
+            }
+        })
+    }
+
     private var presetBinding: Binding<TrainingModelPreset> {
         Binding(get: {
-            customArchitecture ? .custom : (TrainingModelPreset.allCases.first { $0.width == model.effectiveTrainingSettings.modelWidth && model.effectiveTrainingSettings.modelBlocks == 4 } ?? .custom)
+            customArchitecture ? .custom : (TrainingModelPreset.allCases.first { $0.width(network: selectedNetwork) == model.effectiveTrainingSettings.modelWidth && model.effectiveTrainingSettings.modelBlocks == 4 } ?? .custom)
         }, set: { preset in
-            guard let width = preset.width else { customArchitecture = true; return }
+            guard let width = preset.width(network: selectedNetwork) else { customArchitecture = true; return }
             customArchitecture = false
             model.settings.training.modelWidth = width
             model.settings.training.modelBlocks = 4
@@ -426,20 +455,26 @@ struct TrainingPanel: View {
 enum TrainingModelPreset: String, CaseIterable, Identifiable {
     case compact, small, medium, large, extraLarge, huge, custom
     var id: String { rawValue }
-    var width: Int? {
-        switch self {
-        case .compact: 24
-        case .small: 84
-        case .medium: 116
-        case .large: 164
-        case .extraLarge: 204
-        case .huge: 236
-        case .custom: nil
+    func width(network: TrainingNetwork) -> Int? {
+        switch (network, self) {
+        case (_, .custom): nil
+        case (.pyramid, .compact): 8
+        case (.pyramid, .small): 19
+        case (.pyramid, .medium): 27
+        case (.pyramid, .large): 38
+        case (.pyramid, .extraLarge): 47
+        case (.pyramid, .huge): 55
+        case (.residual, .compact): 24
+        case (.residual, .small): 84
+        case (.residual, .medium): 116
+        case (.residual, .large): 164
+        case (.residual, .extraLarge): 204
+        case (.residual, .huge): 236
         }
     }
-    func label(map: MapRole) -> String {
-        guard let width else { return "Custom" }
-        let count = TrainingSettings(modelWidth: width).parameterCount(map: map)
+    func label(map: MapRole, network: TrainingNetwork) -> String {
+        guard let width = width(network: network) else { return "Custom" }
+        let count = TrainingSettings(modelWidth: width, modelArchitecture: network.rawValue).parameterCount(map: map)
         return count.formatted(.number.notation(.compactName)) + " parameters"
     }
 }

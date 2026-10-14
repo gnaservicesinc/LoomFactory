@@ -1,4 +1,5 @@
 import Foundation
+import LoomNative
 import XCTest
 @testable import LoomCore
 
@@ -11,6 +12,7 @@ final class TrainingSettingsTests: XCTestCase {
         """.utf8)
         let settings = try JSONDecoder().decode(TrainingSettings.self, from: json)
         XCTAssertEqual(settings.imageSize, 2048); XCTAssertEqual(settings.modelWidth, 24)
+        XCTAssertEqual(settings.modelArchitecture, NativeArchitecture.identifier)
         XCTAssertEqual(settings.epochs, 37); XCTAssertEqual(settings.learningRate, 0.0007)
         XCTAssertFalse(settings.shuffleEachEpoch); XCTAssertTrue(settings.flipCrops)
         XCTAssertEqual(settings.optimizer, .adamW); XCTAssertEqual(settings.gradientAccumulationSteps, 1)
@@ -33,9 +35,9 @@ final class TrainingSettingsTests: XCTestCase {
     }
 
     func testParameterCountsAreDerivedFromFreshConvolutionsAndSafeWhileEditing() {
-        XCTAssertEqual(TrainingSettings(modelWidth: 24).parameterCount(map: .depth), 42_553)
-        XCTAssertEqual(TrainingSettings(modelWidth: 84).parameterCount(map: .depth), 511_813)
-        XCTAssertEqual(TrainingSettings(modelWidth: 84).parameterCount(map: .normal), 513_327)
+        XCTAssertEqual(TrainingSettings(modelWidth: 24, modelArchitecture: NativeArchitecture.identifier).parameterCount(map: .depth), 42_553)
+        XCTAssertEqual(TrainingSettings(modelWidth: 84, modelArchitecture: NativeArchitecture.identifier).parameterCount(map: .depth), 511_813)
+        XCTAssertEqual(TrainingSettings(modelWidth: 84, modelArchitecture: NativeArchitecture.identifier).parameterCount(map: .normal), 513_327)
         var settings = TrainingSettings()
         settings.modelWidth = Int.max; settings.modelBlocks = Int.max
         settings.batchSize = Int.max; settings.gradientAccumulationSteps = Int.max
@@ -43,6 +45,38 @@ final class TrainingSettingsTests: XCTestCase {
         XCTAssertEqual(settings.effectiveBatchSize, 0)
         XCTAssertEqual(settings.optimizerStepsPerEpoch(pairCount: Int.max), 0)
         XCTAssertNotNil(settings.validationIssue)
+    }
+
+    func testNewProjectsUsePyramidAndParameterCountMatchesItsNativeConstructor() throws {
+        let settings = TrainingSettings()
+        XCTAssertEqual(settings.modelArchitecture, NativeArchitecture.pyramidIdentifier)
+        XCTAssertEqual(settings.modelWidth, 38)
+        for map in MapRole.targets {
+            let architecture = try NativeArchitecture(mapKind: map.rawValue, width: settings.modelWidth,
+                blocks: settings.modelBlocks, identifier: settings.modelArchitecture)
+            XCTAssertEqual(settings.parameterCount(map: map), architecture.parameterCount)
+            XCTAssertTrue((1_900_000...2_100_000).contains(architecture.parameterCount))
+        }
+        var unknown = settings; unknown.modelArchitecture = "unregistered-network"
+        XCTAssertNotNil(unknown.validationIssue)
+        XCTAssertEqual(unknown.parameterCount(map: .depth), 0)
+    }
+
+    func testFreshRunMigrationKeepsApproximateCapacityAndOtherTrainingChoices() {
+        var settings = TrainingSettings(imageSize: 1024, epochs: 500, learningRate: 0.0002,
+            seed: 9587, modelWidth: 164, gradientAccumulationSteps: 2,
+            modelArchitecture: NativeArchitecture.identifier)
+        let oldCount = settings.parameterCount(map: .depth)
+        settings.usePyramidForFreshRun(map: .depth)
+        XCTAssertEqual(settings.modelArchitecture, NativeArchitecture.pyramidIdentifier)
+        XCTAssertEqual(settings.modelWidth, 38)
+        XCTAssertLessThan(abs(settings.parameterCount(map: .depth) - oldCount), oldCount / 20)
+        XCTAssertEqual(settings.imageSize, 1024); XCTAssertEqual(settings.epochs, 500)
+        XCTAssertEqual(settings.learningRate, 0.0002); XCTAssertEqual(settings.seed, 9587)
+        XCTAssertEqual(settings.gradientAccumulationSteps, 2)
+        let repeatSettings = settings
+        settings.usePyramidForFreshRun(map: .depth)
+        XCTAssertEqual(settings, repeatSettings)
     }
 
     func testOnlyActiveOptimizerCoefficientsCanDisableTraining() {

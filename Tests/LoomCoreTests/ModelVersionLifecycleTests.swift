@@ -1,6 +1,7 @@
 import CoreML
 import Foundation
 import ImageIO
+import LoomNative
 import UniformTypeIdentifiers
 import XCTest
 @testable import LoomCore
@@ -21,6 +22,7 @@ final class ModelVersionLifecycleTests: XCTestCase {
         XCTAssertEqual(continued.settings.imageSize, 32)
         XCTAssertEqual(continued.settings.modelWidth, 8)
         XCTAssertEqual(continued.settings.modelBlocks, 1)
+        XCTAssertEqual(continued.settings.modelArchitecture, NativeArchitecture.identifier)
         XCTAssertEqual(continued.settings.learningRate, changed.learningRate)
         XCTAssertEqual(continued.settings.optimizer, .adam)
 
@@ -28,6 +30,7 @@ final class ModelVersionLifecycleTests: XCTestCase {
             datasetID: fixture.datasetID, map: .depth, settings: changed)
         XCTAssertEqual(best.resume?.weights, old.directory.appendingPathComponent("model.safetensors"))
         XCTAssertEqual(best.resume?.source, .model)
+        XCTAssertEqual(best.settings.modelArchitecture, NativeArchitecture.identifier)
         XCTAssertNotEqual(best.resume?.sha256, continued.resume?.sha256)
         let fresh = try await fixture.project.prepareTrainingStart(.fresh, datasetID: fixture.datasetID, map: .depth, settings: changed)
         XCTAssertNil(fresh.resume)
@@ -95,7 +98,8 @@ final class ModelVersionLifecycleTests: XCTestCase {
         let child = try fixture.artifact("child", date: Date(timeIntervalSince1970: 200), checkpoint: true)
         let lineage = TrainingLineage(parentRunID: parent.id, source: .model,
             weightsSHA256: try TrainingRunFiles.sha256(parent.directory.appendingPathComponent("model.safetensors")))
-        let settings = TrainingSettings(imageSize: 32, epochs: 2, modelWidth: 8, modelBlocks: 1)
+        let settings = TrainingSettings(imageSize: 32, epochs: 2, modelWidth: 8, modelBlocks: 1,
+            modelArchitecture: NativeArchitecture.identifier)
         try TrainingRunFiles.writeMetadata(TrainingRunMetadata(projectID: fixture.projectID, runID: child.id,
             datasetID: fixture.datasetID, map: .depth, label: "Lower learning rate", createdAt: child.createdAt,
             settings: settings, lineage: lineage, status: "completed"), at: child.directory)
@@ -210,7 +214,8 @@ final class ModelVersionLifecycleTests: XCTestCase {
             let directory = project.projectFolder.appendingPathComponent("runs/" + id, isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             var settings = NativeFactoryTraining.settingsJSON(TrainingSettings(imageSize: size, epochs: 2,
-                learningRate: 0.0003, modelWidth: width, modelBlocks: 1, gradientAccumulationSteps: 3))
+                learningRate: 0.0003, modelWidth: width, modelBlocks: 1, gradientAccumulationSteps: 3,
+                modelArchitecture: NativeArchitecture.identifier))
             let rows: [[String: Any]] = [["epoch": 1, "loss": 0.5, "validation_loss": 0.4, "learning_rate": 0.0003, "updates": 1],
                                         ["epoch": 2, "loss": 0.3, "validation_loss": 0.2, "learning_rate": 0.0003, "updates": 2]]
             settings["history"] = rows

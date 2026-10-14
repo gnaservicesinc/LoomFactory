@@ -108,6 +108,7 @@ struct TrainingPanelTests {
         let checkpoint: [String: Any] = [
             "schema": "loom-factory-checkpoint-v1", "project_id": snapshot.projectID,
             "kind": "map", "dataset_id": dataset.id, "map": "depth",
+            "architecture": "loom-factory-material-residual-v1",
             "architecture_config": ["id": "loom-factory-material-residual-v1", "width": 24, "blocks": 2],
             "settings": ["image_size": 256, "exaggerate_features": true],
             "epochs_completed": 3, "status": "cancelled"

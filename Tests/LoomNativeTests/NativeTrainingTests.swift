@@ -257,7 +257,7 @@ final class NativeTrainingTests: XCTestCase {
                 XCTAssertEqual(norm, expectedNorms[step], accuracy: 2e-5)
             }
         }
-        XCTAssertEqual(try generated.weights(), try reloaded.weights())
+        XCTAssertTrue(try generated.weights() == reloaded.weights(), "Fresh and reloaded state must produce identical weights")
         XCTAssertEqual(try [inputURL, targetURL].map(hash), originalHashes)
     }
 }

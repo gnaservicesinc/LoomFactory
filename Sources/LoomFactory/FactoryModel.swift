@@ -114,6 +114,8 @@ final class FactoryModel {
     var selectedModelVersions: [ModelVersion] {
         snapshot?.modelVersions.filter { $0.datasetID == selectedDatasetID && $0.map == selectedMap } ?? []
     }
+    var hasTrainingRuns: Bool { snapshot?.modelVersions.isEmpty == false }
+    var trainingRunCount: Int { snapshot?.modelVersions.count ?? 0 }
     var exportedModelVersions: [ModelVersion] {
         selectedModelVersions.filter { $0.artifact?.weightsPath != nil }
     }
@@ -180,9 +182,11 @@ final class FactoryModel {
         var value = settings.training
         if continuingTraining {
             if effectiveStartMode == .exportedModel, let saved = selectedTrainingVersion?.settings {
+                value.modelArchitecture = saved.modelArchitecture
                 value.modelWidth = saved.modelWidth; value.modelBlocks = saved.modelBlocks
                 value.imageSize = saved.imageSize; value.exaggerateFeatures = saved.exaggerateFeatures
             } else if effectiveStartMode == .checkpoint, let checkpoint = selectedCheckpoint {
+                value.modelArchitecture = checkpoint.modelArchitecture
                 value.modelWidth = checkpoint.modelWidth; value.modelBlocks = checkpoint.modelBlocks
                 value.imageSize = checkpoint.imageSize; value.exaggerateFeatures = checkpoint.exaggerateFeatures
             }
@@ -412,6 +416,7 @@ final class FactoryModel {
     }
 
     func setTrainingStartMode(_ mode: FactoryTrainingStartMode) {
+        if mode == .fresh { settings.training.usePyramidForFreshRun(map: selectedMap) }
         trainingStartMode = mode == .fresh ? .checkpoint : mode
         settings.training.continueLatestWeights = mode != .fresh
         selectedTrainingVersionID = ""
@@ -429,6 +434,51 @@ final class FactoryModel {
             try await project.selectModelVersion(runID: version.id, datasetID: version.datasetID, map: version.map)
             guard let self, self.generation == current else { return }
             self.invalidateExportedPackage()
+        }
+    }
+
+    func confirmDeleteTrainingRun(_ version: ModelVersion) {
+        guard !busy else { return }
+        let alert = NSAlert()
+        alert.messageText = "Delete this training run?"
+        alert.informativeText = "\(ModelVersionPresentation.title(version)) will move to Trash, including its saved model, checkpoint and history. Original images and exported packages remain available."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Move to Trash")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        deleteTrainingRuns([version.id])
+    }
+
+    func confirmDeleteAllTrainingRuns() {
+        guard !busy, hasTrainingRuns else { return }
+        let alert = NSAlert()
+        alert.messageText = "Delete all \(trainingRunCount.formatted()) training runs?"
+        alert.informativeText = "Every training run in this source folder will move to Trash, across all datasets and map types. This includes saved models, checkpoints and histories. Original images, the classifier and exported packages remain available."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Move All to Trash")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        deleteTrainingRuns(snapshot?.modelVersions.map(\.id) ?? [])
+    }
+
+    func deleteTrainingRuns(_ runIDs: [String]) {
+        guard !busy, !runIDs.isEmpty else { return }
+        let current = generation
+        perform("Deleting training runs", clearEvents: true) { [weak self] project in
+            let result = try await project.deleteTrainingRuns(runIDs: runIDs)
+            guard let self, self.generation == current else { return }
+            if result.runIDs.contains(self.selectedTrainingVersionID) { self.selectedTrainingVersionID = "" }
+            if result.runIDs.contains(self.comparisonFirstVersionID) { self.comparisonFirstVersionID = "" }
+            if result.runIDs.contains(self.comparisonSecondVersionID) { self.comparisonSecondVersionID = "" }
+            self.invalidateComparisonSelection()
+            self.invalidateExportedPackage()
+            if self.snapshot?.modelVersions.contains(where: { !result.runIDs.contains($0.id) &&
+                $0.datasetID == self.selectedDatasetID && $0.map == self.selectedMap }) != true {
+                self.setTrainingStartMode(.fresh)
+                try await project.updateSettings(self.settings)
+            }
+            self.events.append(TrainingEvent(type: "summary", message:
+                "Moved \(result.count.formatted()) training \(result.count == 1 ? "run" : "runs") to Trash."))
         }
     }
 
