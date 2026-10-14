@@ -115,7 +115,7 @@ struct TrainingPanel: View {
                 }.accessibilityIdentifier("training.continueVersion")
                 Text(model.effectiveStartMode == .exportedModel
                      ? "Starts from the exported weights of this version, including lowest validation loss weights when that run exported them. A fresh optimizer uses the settings below."
-                     : "Starts from this run’s final saved checkpoint, which can differ from its exported weights. A fresh optimizer uses the settings below.")
+                     : "Restores saved weights and compatible optimizer state. Unfinished checkpoints resume their saved image position when settings and sources match. Older checkpoints use a fresh optimizer; changing training settings starts a new epoch schedule.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Text("Saved architecture, training dimensions and depth transform are retained. This continuation creates another saved version.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -495,7 +495,7 @@ struct TrainingOverviewPanel: View {
             summary("Effective batch", "Up to \(model.settings.training.effectiveBatchSize.formatted()) images")
             summary("Gradient clipping", model.settings.training.gradientClipPolicy.displayName)
             if model.continuingTraining, let version = model.selectedTrainingVersion {
-                Text("Continuing \(model.effectiveStartMode == .exportedModel ? "exported model" : "final checkpoint") · \(ModelVersionPresentation.title(version))")
+                Text("Continuing \(model.effectiveStartMode == .exportedModel ? "exported model" : "saved checkpoint") · \(ModelVersionPresentation.title(version))")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if let plan = model.trainingPlan {
@@ -607,10 +607,30 @@ struct RunPanel: View {
         FactoryPanel("Run progress") {
             HStack(spacing: 14) {
                 if model.busy { ProgressView().controlSize(.small) }
-                Text(model.trainingProgress == nil ? model.activityTitle : (model.activityTitle == "Stopping safely…" ? model.activityTitle : "Training run"))
+                Text(model.trainingProgress == nil || !model.isTraining ? model.activityTitle : "Training run")
                     .font(.callout).textSelection(.enabled)
                 Spacer()
-                if model.busy { Button("Stop") { model.cancel() }.accessibilityIdentifier("training.stop") }
+                if model.busy && !model.isTraining { Button("Stop") { model.cancel() }.accessibilityIdentifier("training.stop") }
+            }
+            if model.isTraining {
+                HStack(spacing: 10) {
+                    Button("Save Checkpoint", systemImage: "square.and.arrow.down") { model.saveCheckpoint() }
+                        .accessibilityIdentifier("training.saveCheckpoint")
+                    Button("Save & Stop", systemImage: "stop.fill") { model.saveAndStopTraining() }
+                        .accessibilityIdentifier("training.saveAndStop")
+                }
+                .disabled(model.checkpointRequestPending)
+                Text("Saves the latest completed optimizer update, including optimizer state and epoch position.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if let status = model.checkpointStatus {
+                Text(status).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("training.checkpointStatus")
+            }
+            if let directory = model.lastCheckpointDirectory {
+                Button("Show Checkpoint in Finder", systemImage: "folder") { model.reveal(directory.appendingPathComponent("checkpoint.json")) }
+                    .font(.caption).accessibilityIdentifier("training.revealCheckpoint")
             }
             if let progress = model.progress, model.trainingProgress == nil {
                 ProgressView(value: progress).progressViewStyle(.linear)

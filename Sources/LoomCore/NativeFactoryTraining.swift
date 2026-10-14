@@ -8,7 +8,7 @@ enum NativeFactoryTraining {
     static func run(id: String, root: URL, output: URL, projectID: String, dataset: DatasetCategory,
                     map: MapRole, plan: TrainingDataPlan, settings: TrainingSettings, resume: URL?,
                     cancellation: NativeCancellation, progress: @escaping @Sendable (TrainingEvent) -> Void,
-                    prepareAhead: Bool = true) throws -> ModelArtifact {
+                    prepareAhead: Bool = true, control: TrainingRunControl? = nil) throws -> ModelArtifact {
         let started = Date()
         func clock() -> Double { ProcessInfo.processInfo.systemUptime }
         let stepsPerEpoch = settings.optimizerStepsPerEpoch(pairCount: plan.training.count)
@@ -80,24 +80,87 @@ enum NativeFactoryTraining {
             gradientClipPolicy: settings.gradientClipPolicy.rawValue,
             gradientClipWarmupStartNorm: settings.gradientClipWarmupStartNorm,
             gradientClipWarmupUpdates: settings.gradientClipWarmupUpdates)
-        var initial: [String: NativeTensor]?
+        var initial: [String: NativeTensor]?, optimizerState: [String: NativeTensor]?
+        var restoredUpdateCount = 0
+        var restoredCursor: TrainingCheckpointCursor?
+        var restoredDescriptor: [String: Any]?
+        var restoredBestWeights: [String: NativeTensor]?
+        let fingerprint = SHA256.hash(data: Data(all.map { pair in
+            "\(pair.id)|\(pair.input.width)x\(pair.input.height)|\(proofs[pair.input.url.path]!.hash)|\(proofs[pair.target.url.path]!.hash)|\(validationIDs.contains(pair.id))"
+        }.sorted().joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
         if let resume {
-            _ = try TrainingRunFiles.resume(weights: resume, projectFolder: root.appendingPathComponent(".loom-factory"),
+            let resolved = try TrainingRunFiles.resume(weights: resume, projectFolder: root.appendingPathComponent(".loom-factory"),
                 projectID: projectID, datasetID: dataset.id, map: map, settings: settings,
                 expectedSHA256: runMetadata?.lineage?.weightsSHA256)
             initial = try NativeWeights.read(from: resume)
-            emit(.init(type: "status", message: "Continuing saved weights with a fresh native optimizer"))
+            if resolved.source == .checkpoint {
+                let folder = resume.deletingLastPathComponent()
+                let descriptor = try TrainingRunFiles.descriptor(at: folder, source: .checkpoint)
+                let saved = descriptor["settings"] as? [String: Any] ?? [:]
+                let optimizerKeys = ["optimizer", "weight_decay", "beta1", "beta2", "momentum"]
+                if let path = descriptor["optimizer_path"] as? String,
+                   TrainingCheckpointCursor.compatibleSettings(saved, current: settingsJSON(settings), keys: optimizerKeys) {
+                    let file = try TrainingRunFiles.containedFile(path, directory: folder)
+                    guard descriptor["optimizer_sha256"] as? String == (try sha(file)),
+                          let count = descriptor["optimizer_updates"] as? Int, count >= 0 else {
+                        throw LoomError("The saved checkpoint's optimizer state or checksum is invalid. Choose another saved version.")
+                    }
+                    optimizerState = try NativeWeights.read(from: file); restoredUpdateCount = count
+                    if descriptor["status"] as? String != "completed",
+                       let object = descriptor["resume_cursor"],
+                       TrainingCheckpointCursor.compatibleSettings(saved, current: settingsJSON(settings)) {
+                        let cursor = try JSONDecoder().decode(TrainingCheckpointCursor.self,
+                            from: JSONSerialization.data(withJSONObject: object))
+                        guard cursor.sourceFingerprint == fingerprint else {
+                            throw LoomError("The source pairs or pixels changed since this checkpoint. Continue exported model weights for a new training plan, or restore the checkpoint's original source files.")
+                        }
+                        guard cursor.epoch >= 0, cursor.epoch <= settings.epochs,
+                              cursor.order.isEmpty || cursor.epoch < settings.epochs,
+                              cursor.nextWindow >= 0, cursor.nextWindow <= plan.training.count,
+                              (cursor.order.isEmpty && cursor.nextWindow == 0)
+                                || (cursor.order.count == plan.training.count && Set(cursor.order) == Set(plan.training.map(\.id))),
+                              cursor.crops.count == cursor.order.count,
+                              cursor.imageCount == cursor.nextWindow,
+                              cursor.nextWindow == plan.training.count || cursor.nextWindow % settings.effectiveBatchSize == 0 else {
+                            throw LoomError("This checkpoint's epoch position is incompatible with the requested training run. Use at least \(cursor.epoch + 1) epochs or choose exported model weights.")
+                        }
+                        guard let completed = descriptor["updates"] as? Int, completed > 0,
+                              let rows = descriptor["history"] as? [[String: Any]], rows.count == cursor.epoch,
+                              cursor.epochUpdates == (cursor.nextWindow + settings.effectiveBatchSize - 1) / settings.effectiveBatchSize,
+                              completed == cursor.epoch * stepsPerEpoch + cursor.epochUpdates else {
+                            throw LoomError("This checkpoint's saved update count or epoch history is inconsistent. Choose another saved version.")
+                        }
+                        restoredCursor = cursor; restoredDescriptor = descriptor
+                        if let path = descriptor["best_weights_path"] as? String {
+                            let file = try TrainingRunFiles.containedFile(path, directory: folder)
+                            guard descriptor["best_weights_sha256"] as? String == (try sha(file)) else {
+                                throw LoomError("The saved best-validation weights checksum changed.")
+                            }
+                            restoredBestWeights = try NativeWeights.read(from: file)
+                        }
+                    }
+                }
+            }
+            emit(.init(type: "status", message: restoredCursor != nil
+                ? "Resuming checkpoint with optimizer state at epoch \(restoredCursor!.epoch + 1), image \(restoredCursor!.nextWindow + 1)"
+                : optimizerState != nil ? "Continuing saved weights and optimizer state with a new epoch schedule"
+                : "Continuing saved weights with a fresh optimizer (legacy checkpoint or changed optimizer settings)"))
         }
         let session = try NativeTrainingSession(architecture: architecture, options: options, seed: UInt64(settings.seed),
-            weights: initial, device: settings.device.rawValue, cancellation: cancellation,
+            weights: initial, optimizerState: optimizerState, initialUpdateCount: restoredUpdateCount,
+            device: settings.device.rawValue, cancellation: cancellation,
             channelsLast: !architecture.isPyramid)
-        var update = 0, history: [[String: Any]] = [], bestLoss: Double?, bestEpoch: Int?, stale = 0
-        var stoppedEarly = false
-        var bestWeights: [String: NativeTensor]?
-        var augmentation = NativeAugmentationPlan(seed: settings.seed, cropRefresh: settings.cropRefresh.rawValue,
+        var update = restoredCursor != nil ? (restoredDescriptor?["updates"] as? Int ?? 0) : 0
+        var history: [[String: Any]] = restoredCursor != nil ? (restoredDescriptor?["history"] as? [[String: Any]] ?? []) : []
+        var bestLoss = restoredCursor?.bestLoss, bestEpoch = restoredCursor?.bestEpoch, stale = restoredCursor?.staleEpochs ?? 0
+        var stoppedEarly = restoredCursor?.stoppedEarly ?? false
+        var bestWeights = restoredBestWeights
+        var augmentation = restoredCursor?.augmentation ?? NativeAugmentationPlan(seed: settings.seed, cropRefresh: settings.cropRefresh.rawValue,
                                                   augmentationRefresh: settings.augmentationRefresh.rawValue)
         var rng = FactoryRandom(seed: UInt64(settings.seed))
-        emit(.init(type: "started", message: "Training \(dataset.name) · \(settings.epochs) epochs · \(totalUpdates) steps", update: 0, totalUpdates: totalUpdates,
+        if let state = restoredCursor?.randomState { rng.state = state }
+        var cursor = restoredCursor
+        emit(.init(type: "started", message: "Training \(dataset.name) · \(settings.epochs) epochs · \(totalUpdates) steps", update: update, totalUpdates: totalUpdates,
                    parameterCount: settings.parameterCount(map: map), effectiveBatchSize: settings.effectiveBatchSize))
         func verify(_ pair: TrainingPair) throws {
             try cancellation.check(); try checkTags(pair, dataset: dataset.name, map: map, root: root)
@@ -109,44 +172,79 @@ enum NativeFactoryTraining {
             tracker.begin(stage: .checkpointing,
                           index: epochComplete && !history.isEmpty ? plan.training.count : nil, now: checkpointStart)
             emit(.init(type: "status", message: "Saving checkpoint at step \(update)…", update: update, totalUpdates: totalUpdates))
-            let weights = try session.weights()
-            try NativeWeights.write(weights, to: output.appendingPathComponent("checkpoint.safetensors"),
-                                    metadata: ["schema": "loom-factory-checkpoint-v1", "architecture": architecture.identifier])
             var descriptor: [String: Any] = ["schema": "loom-factory-checkpoint-v1", "status": status, "project_id": projectID,
                 "dataset_id": dataset.id, "dataset_name": dataset.name, "kind": "map", "map": map.rawValue,
                 "architecture": architecture.identifier, "architecture_config": architectureJSON(architecture),
                 "settings": settingsJSON(settings), "epochs_completed": history.count, "updates": update, "history": history,
-                "weights_path": "checkpoint.safetensors", "backend": "swift-mpsgraph-metal",
-                "continuation": "saved weights with a fresh optimizer and current source metadata"]
-            descriptor["weights_sha256"] = try sha(output.appendingPathComponent("checkpoint.safetensors"))
+                "optimizer_updates": session.updateCount, "backend": "swift-mpsgraph-metal",
+                "continuation": "weights, optimizer state and completed-update epoch position",
+                "saved_at": ISO8601DateFormatter().string(from: Date())]
+            if let cursor {
+                descriptor["resume_cursor"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(cursor))
+            }
             descriptor.merge(versionJSON) { _, new in new }
-            try writeJSON(descriptor, to: output.appendingPathComponent("checkpoint.json"))
+            try TrainingCheckpointFiles.write(weights: session.weights(), optimizer: session.optimizerState(),
+                bestWeights: bestWeights, descriptor: descriptor, directory: output)
             tracker.checkpointCompleted(durationSeconds: clock() - checkpointStart, epochComplete: epochComplete, now: clock())
             emit(.init(type: "checkpoint", message: "Checkpoint saved at step \(update)", epoch: history.count, update: update))
         }
+        func serviceCheckpointRequest() throws {
+            guard update > 0, let control, let stop = control.beginRequest() else { return }
+            emit(.init(type: "checkpoint_saving", message: stop ? "Saving latest checkpoint before stopping…" : "Saving requested checkpoint…", update: update))
+            do {
+                try checkpoint(stop ? "saved_stopped" : "training", epochComplete: false)
+            } catch {
+                control.complete(.failure(error))
+                emit(.init(type: "checkpoint_failed", message: "Checkpoint was not saved; training continues. \(error.localizedDescription)", update: update))
+                return
+            }
+            control.complete(.success(.init(runDirectory: output, completedUpdates: update, stopped: stop)))
+            emit(.init(type: "checkpoint_saved", message: "Checkpoint saved at step \(update)\(stop ? "; stopping training" : "; training continues")", update: update))
+            if stop { cancellation.cancel(); throw TrainingSavedStop() }
+        }
+        func automaticCheckpoint(_ status: String, epochComplete: Bool = true) {
+            do { try checkpoint(status, epochComplete: epochComplete) }
+            catch { emit(.init(type: "warning", message: "Automatic checkpoint failed; training continues. \(error.localizedDescription)", update: update)) }
+        }
         do {
-            for epoch in 0..<settings.epochs {
+            for epoch in (stoppedEarly ? settings.epochs : restoredCursor?.epoch ?? 0)..<settings.epochs {
                 try cancellation.check()
                 tracker.beginEpoch(epoch: epoch + 1, now: clock())
+                let restoring = restoredCursor?.epoch == epoch && restoredCursor?.order.isEmpty == false ? restoredCursor : nil
                 var order = plan.training
-                if settings.shuffleEachEpoch { order.shuffle(using: &rng) }
-                var epochLoss = 0.0, count = 0, learningRate = settings.learningRate
-                var epochUpdates = 0, clippedUpdates = 0, normSum = 0.0, peakNorm = 0.0
+                if let restoring {
+                    let pairs = Dictionary(uniqueKeysWithValues: order.map { ($0.id, $0) })
+                    order = restoring.order.map { pairs[$0]! }
+                } else if settings.shuffleEachEpoch { order.shuffle(using: &rng) }
+                var epochLoss = restoring?.epochLoss ?? 0, count = restoring?.imageCount ?? 0, learningRate = settings.learningRate
+                var epochUpdates = restoring?.epochUpdates ?? 0, clippedUpdates = restoring?.clippedUpdates ?? 0
+                var normSum = restoring?.gradientNormSum ?? 0, peakNorm = restoring?.peakGradientNorm ?? 0
+                let firstWindow = restoring?.nextWindow ?? 0
                 // Resolve deterministic transforms on the serial owner. Only the
                 // upcoming minibatch's pixels are prepared by the bounded worker.
                 var batches: [FactoryImageBatch] = []
-                for window in stride(from: 0, to: order.count, by: settings.effectiveBatchSize) {
+                var epochCrops = restoring?.crops ?? []
+                for window in stride(from: firstWindow, to: order.count, by: settings.effectiveBatchSize) {
                     let end = min(window + settings.effectiveBatchSize, order.count)
                     for offset in stride(from: window, to: end, by: settings.batchSize) {
                         let pairs = Array(order[offset..<min(offset + settings.batchSize, end)])
-                        let crops = try pairs.map { pair in
+                        let crops = try restoring != nil ? Array(epochCrops[offset..<min(offset + settings.batchSize, end)]) : pairs.map { pair in
                             try augmentation.transform(sampleID: pair.id, epoch: epoch,
                                 width: pair.input.width, height: pair.input.height, size: settings.imageSize,
                                 flip: settings.flipCrops, rotate: settings.rotateCrops)
                         }
+                        if restoring == nil { epochCrops.append(contentsOf: crops) }
                         batches.append(FactoryImageBatch(pairs: pairs, crops: crops, offset: offset))
                     }
                 }
+                func updateCursor(nextWindow: Int) {
+                    cursor = TrainingCheckpointCursor(epoch: epoch, nextWindow: nextWindow, order: order.map(\.id), crops: epochCrops,
+                        epochLoss: epochLoss, imageCount: count, epochUpdates: epochUpdates, clippedUpdates: clippedUpdates,
+                        gradientNormSum: normSum, peakGradientNorm: peakNorm, augmentation: augmentation, randomState: rng.state,
+                        sourceFingerprint: fingerprint, bestLoss: bestLoss, bestEpoch: bestEpoch, staleEpochs: stale)
+                }
+                updateCursor(nextWindow: firstWindow)
+                try serviceCheckpointRequest()
                 func submit(_ batch: FactoryImageBatch) throws {
                     for pair in batch.pairs { try verify(pair) }
                     try preparation.submit {
@@ -155,7 +253,7 @@ enum NativeFactoryTraining {
                 }
                 if prepareAhead, let first = batches.first { try submit(first) }
                 var batchIndex = 0
-                for window in stride(from: 0, to: order.count, by: settings.effectiveBatchSize) {
+                for window in stride(from: firstWindow, to: order.count, by: settings.effectiveBatchSize) {
                     let cycleStart = clock()
                     var preparationSeconds = 0.0, waitingSeconds = 0.0, trainingSeconds = 0.0
                     try cancellation.check(); session.resetAccumulatedGradients()
@@ -190,7 +288,7 @@ enum NativeFactoryTraining {
                         epochLoss += Double(loss) * Double(batch.pairs.count); count += batch.pairs.count
                     }
                     try cancellation.check()
-                    let cap = options.gradientClipThreshold(updateCount: update)
+                    let cap = options.gradientClipThreshold(updateCount: session.updateCount)
                     tracker.begin(stage: .optimizing,
                                   image: order[window..<end].map { $0.input.trainingDisplayName }.joined(separator: ", "), now: clock())
                     emit(.init(type: "step_updating", message: "Updating step \(update + 1) of \(totalUpdates)", epoch: epoch + 1,
@@ -200,6 +298,7 @@ enum NativeFactoryTraining {
                     let optimizerSeconds = clock() - optimizerStart
                     epochUpdates += 1; normSum += norm; peakNorm = max(peakNorm, norm)
                     if cap > 0 && norm > cap { clippedUpdates += 1 }
+                    updateCursor(nextWindow: end)
                     let cycleSeconds = clock() - cycleStart
                     tracker.completeStep(stepInEpoch: epochUpdates, completedSteps: update,
                         completedImages: epoch * order.count + count, cycleSeconds: cycleSeconds, now: clock())
@@ -210,7 +309,8 @@ enum NativeFactoryTraining {
                         cycleTiming: TrainingCycleTiming(preparationSeconds: preparationSeconds, preparationWaitSeconds: waitingSeconds,
                             trainingSeconds: trainingSeconds, optimizerSeconds: optimizerSeconds, totalSeconds: cycleSeconds)))
                     // Preserve the first real update even when an epoch spans thousands of pairs.
-                    if update == 1 { try checkpoint("training", epochComplete: false) }
+                    if update == 1 && control?.hasPendingRequest != true { automaticCheckpoint("training", epochComplete: false) }
+                    try serviceCheckpointRequest()
                 }
                 var validation: Double?
                 if !plan.validation.isEmpty {
@@ -219,6 +319,7 @@ enum NativeFactoryTraining {
                     emit(.init(type: "status", message: "Validating \(plan.validation.count) held-out images…"))
                     var sum = 0.0
                     for (index, pair) in plan.validation.enumerated() {
+                        try serviceCheckpointRequest()
                         tracker.begin(stage: .validating, image: pair.input.trainingDisplayName, index: index + 1, now: clock())
                         emit(.init(type: "validation_image", message: "Validating image \(index + 1) of \(plan.validation.count): \(pair.input.trainingDisplayName)"))
                         try verify(pair)
@@ -238,28 +339,37 @@ enum NativeFactoryTraining {
                     } else { stale += 1 }
                     tracker.completeValidation(durationSeconds: clock() - validationStart, now: clock())
                 }
+                try serviceCheckpointRequest()
                 var record: [String: Any] = ["epoch": epoch + 1, "loss": epochLoss / Double(count), "learning_rate": learningRate,
                     "update": update,
                     "mean_gradient_norm": normSum / Double(max(1, epochUpdates)), "peak_gradient_norm": peakNorm,
                     "clipped_updates": clippedUpdates, "optimizer_updates": epochUpdates,
-                    "gradient_clip_threshold": options.gradientClipThreshold(updateCount: max(0, update - 1))]
+                    "gradient_clip_threshold": options.gradientClipThreshold(updateCount: max(0, session.updateCount - 1))]
                 record["validation_loss"] = validation ?? NSNull(); history.append(record)
+                let stop = settings.earlyStoppingPatience > 0 && stale >= settings.earlyStoppingPatience
+                cursor = TrainingCheckpointCursor(epoch: epoch + 1, nextWindow: 0, order: [], crops: [], epochLoss: 0,
+                    imageCount: 0, epochUpdates: 0, clippedUpdates: 0, gradientNormSum: 0, peakGradientNorm: 0,
+                    augmentation: augmentation, randomState: rng.state, sourceFingerprint: fingerprint,
+                    bestLoss: bestLoss, bestEpoch: bestEpoch, staleEpochs: stale, stoppedEarly: stop)
                 emit(.init(type: "epoch_completed", message: "Epoch \(epoch + 1) complete", epoch: epoch + 1,
                     loss: epochLoss / Double(count), validationLoss: validation, update: update, totalUpdates: totalUpdates))
-                let stop = settings.earlyStoppingPatience > 0 && stale >= settings.earlyStoppingPatience
-                if (epoch + 1) % settings.checkpointEveryEpochs == 0 || epoch + 1 == settings.epochs || stop { try checkpoint("training") }
+                if (epoch + 1) % settings.checkpointEveryEpochs == 0 || epoch + 1 == settings.epochs || stop { automaticCheckpoint("training") }
+                try serviceCheckpointRequest()
                 try writeJSON(["status": "training", "history": history, "updates": update], to: output.appendingPathComponent("progress.json"))
                 if stop { stoppedEarly = true; break }
             }
+            try serviceCheckpointRequest()
             try cancellation.check()
             tracker.begin(stage: .verifyingSources, now: clock())
             emit(.init(type: "status", message: "Verifying original images before export…"))
-            for pair in all { try verify(pair) }
+            for pair in all { try serviceCheckpointRequest(); try verify(pair) }
             for (path, proof) in proofs {
+                try serviceCheckpointRequest()
                 tracker.begin(stage: .verifyingSources, image: URL(fileURLWithPath: path).lastPathComponent, now: clock())
                 emit(.init(type: "status", message: "Verifying original: \(URL(fileURLWithPath: path).lastPathComponent)"))
                 try proof.verifyHash(URL(fileURLWithPath: path), cancellation: cancellation)
             }
+            try serviceCheckpointRequest()
             tracker.begin(stage: .exporting, now: clock())
             emit(.init(type: "status", message: "Exporting trained model…"))
             let deployment: [String: NativeTensor]
@@ -271,11 +381,13 @@ enum NativeFactoryTraining {
                 to: output.appendingPathComponent("model.mlmodel"))
             defer { try? FileManager.default.removeItem(at: compiled) }
             try cancellation.check()
+            try serviceCheckpointRequest()
             tracker.begin(stage: .verifyingSources, now: clock())
             emit(.init(type: "status", message: "Verifying originals after export…"))
-            for pair in all { try verify(pair) }
-            for (path, proof) in proofs { try proof.verifyHash(URL(fileURLWithPath: path), cancellation: cancellation) }
-            try checkpoint("completed")
+            for pair in all { try serviceCheckpointRequest(); try verify(pair) }
+            for (path, proof) in proofs { try serviceCheckpointRequest(); try proof.verifyHash(URL(fileURLWithPath: path), cancellation: cancellation) }
+            automaticCheckpoint("completed")
+            try serviceCheckpointRequest()
             try cancellation.check()
             let exportEpoch = settings.exportBestWeights ? (bestEpoch ?? history.count) : history.count
             var training = settingsJSON(settings)
@@ -309,11 +421,21 @@ enum NativeFactoryTraining {
             emit(.init(type: "completed", message: "Training complete · model saved", progress: 1))
             return artifact
         } catch {
+            if error is TrainingSavedStop {
+                try? writeJSON(["status": "saved_stopped", "history": history, "updates": update], to: output.appendingPathComponent("progress.json"))
+                tracker.begin(stage: .stopped, now: clock())
+                emit(.init(type: "saved_stopped", message: "Training stopped after saving checkpoint at step \(update)", update: update))
+                throw error
+            }
             let status = error is CancellationError ? "cancelled" : "stopped"
-            do { try checkpoint(status) } catch { emit(.init(type: "warning", message: "Latest checkpoint could not be saved: \(error.localizedDescription)")) }
+            var savedLatest = false
+            do { try checkpoint(status); savedLatest = update > 0 }
+            catch { emit(.init(type: "checkpoint_failed", message: "Latest checkpoint could not be saved. The previous checkpoint was preserved: \(error.localizedDescription)")) }
             try? writeJSON(["status": status, "history": history, "updates": update], to: output.appendingPathComponent("progress.json"))
             tracker.begin(stage: .stopped, now: clock())
-            emit(.init(type: status, message: error is CancellationError ? "Training stopped; completed steps were saved" : error.localizedDescription))
+            emit(.init(type: status, message: error is CancellationError
+                ? savedLatest ? "Training stopped; completed steps were saved" : update == 0 ? "Training stopped before any optimizer update; no trained checkpoint exists" : "Training stopped; latest save failed. Check the previous checkpoint in Model Versions."
+                : error.localizedDescription))
             throw error
         }
     }
@@ -354,6 +476,9 @@ enum NativeFactoryTraining {
          "checkpoint_every_epochs": s.checkpointEveryEpochs]
     }
     static func writeJSON(_ value: [String: Any], to url: URL) throws {
+        guard JSONSerialization.isValidJSONObject(value) else {
+            throw LoomError("The training descriptor contains an invalid or non-finite value; its previous saved version was preserved.")
+        }
         try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .prettyPrinted]).write(to: url, options: .atomic)
     }
     static func json(_ url: URL) throws -> [String: Any] {

@@ -25,6 +25,8 @@ public struct NativeGraphExecutionMeasurements: Sendable {
     public fileprivate(set) var gpuSpanSeconds: Double = 0
     public fileprivate(set) var scalarReadSeconds: Double = 0
     public fileprivate(set) var totalSeconds: Double = 0
+    public fileprivate(set) var feedBufferAllocationCount: Int = 0
+    public fileprivate(set) var resultBufferAllocationCount: Int = 0
 }
 
 private struct NativeBatchShape: Hashable { let batch: Int; let height: Int; let width: Int }
@@ -39,8 +41,23 @@ private struct NativeTensorStorage {
     }
 }
 
+/// Graph calls are synchronous and have one serial owner. Retain fixed feed
+/// storage and at most two result buffers per target, alternating when the last
+/// result is an input to this call. Never clear or write a currently fed buffer.
+/// This keeps autorelease drains without allocating every tensor on every step.
+private final class NativeGraphStorage {
+    // Create a fresh TensorData wrapper when reusing a buffer. Reusing the
+    // wrapper itself failed the full-resolution gradient regression, even with
+    // disjoint feed and result buffers. Preserve the uncached binding lifetime.
+    var feeds: [MPSGraphTensor: MTLBuffer] = [:]
+    var results: [MPSGraphTensor: [MTLBuffer]] = [:]
+    var feedBufferAllocationCount = 0
+    func beginOperation() { feedBufferAllocationCount = 0 }
+}
+
 private final class NativeBatchGraph {
     let graph = MPSGraph()
+    let storage = NativeGraphStorage()
     let input: MPSGraphTensor
     let target: MPSGraphTensor
     let weight: MPSGraphTensor
@@ -96,6 +113,7 @@ public final class NativeTrainingSession {
     private var second: [String: NativeTensorStorage] = [:]
     private var batchGraphs: [NativeBatchShape: NativeBatchGraph] = [:]
     private let optimizerGraph: NativeOptimizerGraph
+    private let optimizerStorage = NativeGraphStorage()
     private var accumulatedBatches = 0
 
     public init(architecture: NativeArchitecture, options: NativeTrainingOptions,
@@ -176,13 +194,14 @@ public final class NativeTrainingSession {
             try cancellation.check()
             guard weight.isFinite, weight > 0 else { throw NativeTrainingError.invalid("Gradient accumulation weight must be positive and finite.") }
             let compiled = try batchGraph(input: input, target: target, batchSize: batchSize, height: height, width: width)
+            compiled.storage.beginOperation()
             var feeds = parameterFeeds(compiled)
-            feeds[compiled.input] = try tensorData(input, shape: [batchSize, 3, height, width])
-            feeds[compiled.target] = try tensorData(target, shape: [batchSize, architecture.outputChannels, height, width])
-            feeds[compiled.weight] = try tensorData([weight], shape: [])
+            feeds[compiled.input] = try cachedFeed(input, tensor: compiled.input, storage: compiled.storage)
+            feeds[compiled.target] = try cachedFeed(target, tensor: compiled.target, storage: compiled.storage)
+            feeds[compiled.weight] = try cachedFeed([weight], tensor: compiled.weight, storage: compiled.storage)
             for (name, placeholder) in compiled.accumulators { feeds[placeholder] = accumulation[name]! }
             try cancellation.check()
-            let results = try runGraph(compiled.graph, feeds: feeds, targets: compiled.trainingTargets,
+            let results = try runGraph(compiled.graph, storage: compiled.storage, feeds: feeds, targets: compiled.trainingTargets,
                                        feedSeconds: ProcessInfo.processInfo.systemUptime - executionStart)
             let loss = Double(readScalar(results[compiled.loss]!))
             guard loss.isFinite else { throw NativeTrainingError.nonFinite("Training produced a non-finite loss. The previous checkpoint remains intact.") }
@@ -203,6 +222,7 @@ public final class NativeTrainingSession {
                 throw NativeTrainingError.invalid("A finite learning rate and accumulated gradients are required for an optimizer step.")
             }
             let compiled = optimizerGraph
+            optimizerStorage.beginOperation()
             var feeds: [MPSGraphTensor: NativeTensorStorage] = [:]
             for name in trainableShapes.keys {
                 feeds[compiled.parameters[name]!] = parameters[name]!
@@ -210,11 +230,11 @@ public final class NativeTrainingSession {
                 feeds[compiled.first[name]!] = first[name]!
                 feeds[compiled.second[name]!] = second[name]!
             }
-            feeds[compiled.rate] = try tensorData([Float(learningRate)], shape: [])
-            feeds[compiled.clipThreshold] = try tensorData([Float(options.gradientClipThreshold(updateCount: updateCount))], shape: [])
-            feeds[compiled.firstCorrection] = try tensorData([Float(1 - pow(options.beta1, Double(updateCount + 1)))], shape: [])
-            feeds[compiled.secondCorrection] = try tensorData([Float(1 - pow(options.beta2, Double(updateCount + 1)))], shape: [])
-            let results = try runGraph(compiled.graph, feeds: feeds, targets: compiled.targets,
+            feeds[compiled.rate] = try cachedFeed([Float(learningRate)], tensor: compiled.rate, storage: optimizerStorage)
+            feeds[compiled.clipThreshold] = try cachedFeed([Float(options.gradientClipThreshold(updateCount: updateCount))], tensor: compiled.clipThreshold, storage: optimizerStorage)
+            feeds[compiled.firstCorrection] = try cachedFeed([Float(1 - pow(options.beta1, Double(updateCount + 1)))], tensor: compiled.firstCorrection, storage: optimizerStorage)
+            feeds[compiled.secondCorrection] = try cachedFeed([Float(1 - pow(options.beta2, Double(updateCount + 1)))], tensor: compiled.secondCorrection, storage: optimizerStorage)
+            let results = try runGraph(compiled.graph, storage: optimizerStorage, feeds: feeds, targets: compiled.targets,
                                        feedSeconds: ProcessInfo.processInfo.systemUptime - executionStart)
             let norm = Double(readScalar(results[compiled.norm]!))
             let invalidWeights = readScalar(results[compiled.valid]!)
@@ -242,10 +262,11 @@ public final class NativeTrainingSession {
             let executionStart = ProcessInfo.processInfo.systemUptime
             try cancellation.check()
             let compiled = try batchGraph(input: input, target: target, batchSize: batchSize, height: height, width: width)
+            compiled.storage.beginOperation()
             var feeds = parameterFeeds(compiled)
-            feeds[compiled.input] = try tensorData(input, shape: [batchSize, 3, height, width])
-            feeds[compiled.target] = try tensorData(target, shape: [batchSize, architecture.outputChannels, height, width])
-            let result = try runGraph(compiled.graph, feeds: feeds, targets: [compiled.loss],
+            feeds[compiled.input] = try cachedFeed(input, tensor: compiled.input, storage: compiled.storage)
+            feeds[compiled.target] = try cachedFeed(target, tensor: compiled.target, storage: compiled.storage)
+            let result = try runGraph(compiled.graph, storage: compiled.storage, feeds: feeds, targets: [compiled.loss],
                                       feedSeconds: ProcessInfo.processInfo.systemUptime - executionStart)
             let loss = Double(readScalar(result[compiled.loss]!))
             try cancellation.check()
@@ -261,9 +282,10 @@ public final class NativeTrainingSession {
             try cancellation.check()
             let count = try validateBatch(input: input, target: nil, batchSize: batchSize, height: height, width: width)
             let compiled = try batchGraph(input: input, target: nil, batchSize: batchSize, height: height, width: width)
+            compiled.storage.beginOperation()
             var feeds = parameterFeeds(compiled)
-            feeds[compiled.input] = try tensorData(input, shape: [batchSize, 3, height, width])
-            let result = try runGraph(compiled.graph, feeds: feeds, targets: [compiled.prediction],
+            feeds[compiled.input] = try cachedFeed(input, tensor: compiled.input, storage: compiled.storage)
+            let result = try runGraph(compiled.graph, storage: compiled.storage, feeds: feeds, targets: [compiled.prediction],
                                       feedSeconds: ProcessInfo.processInfo.systemUptime - executionStart)
             let values = read(result[compiled.prediction]!, count: count * architecture.outputChannels)
             try cancellation.check()
@@ -333,7 +355,21 @@ public final class NativeTrainingSession {
             return NativeTensorStorage(data: MPSGraphTensorData(buffer, shape: shape.map(NSNumber.init(value:)), dataType: .float32), backingBuffer: buffer)
         }
     }
-    private func runGraph(_ graph: MPSGraph, feeds: [MPSGraphTensor: NativeTensorStorage],
+    private func cachedFeed(_ values: [Float], tensor: MPSGraphTensor,
+                            storage: NativeGraphStorage) throws -> NativeTensorStorage {
+        if let existing = storage.feeds[tensor] {
+            values.withUnsafeBytes { bytes in
+                existing.contents().copyMemory(from: bytes.baseAddress!, byteCount: bytes.count)
+            }
+            return NativeTensorStorage(data: MPSGraphTensorData(existing, shape: tensor.shape!, dataType: .float32), backingBuffer: existing)
+        }
+        let created = try tensorData(values, shape: tensor.shape!.map(\.intValue))
+        storage.feeds[tensor] = created.backingBuffer
+        storage.feedBufferAllocationCount += 1
+        return created
+    }
+    private func runGraph(_ graph: MPSGraph, storage: NativeGraphStorage,
+                          feeds: [MPSGraphTensor: NativeTensorStorage],
                           targets: [MPSGraphTensor], feedSeconds: Double) throws -> [MPSGraphTensor: NativeTensorStorage] {
         // Automatically allocated target data, fed into another graph without
         // CPU materialization, produced allocation-dependent gradients at full
@@ -342,7 +378,9 @@ public final class NativeTrainingSession {
         let setupStart = ProcessInfo.processInfo.systemUptime
         var measurements = NativeGraphExecutionMeasurements()
         measurements.feedSeconds = feedSeconds
+        measurements.feedBufferAllocationCount = storage.feedBufferAllocationCount
         var results: [MPSGraphTensor: NativeTensorStorage] = [:]
+        let activeBuffers = Set(feeds.values.map { ObjectIdentifier($0.backingBuffer) })
         guard let initialization = queue.makeCommandBuffer(), let blit = initialization.makeBlitCommandEncoder() else {
             throw NativeTrainingError.unavailable("The Apple GPU could not initialize native training result storage.")
         }
@@ -352,12 +390,28 @@ public final class NativeTrainingSession {
                 throw NativeTrainingError.invalid("Native training requires fixed float32 result shapes.")
             }
             let byteCount = max(1, shape.reduce(1) { $0 * $1.intValue }) * MemoryLayout<Float>.size
-            guard let buffer = device.makeBuffer(length: byteCount, options: .storageModeShared) else {
-                blit.endEncoding()
-                throw NativeTrainingError.unavailable("The Apple GPU could not allocate native training result storage.")
+            let buffer: MTLBuffer
+            if let reusable = storage.results[tensor]?.first(where: { !activeBuffers.contains(ObjectIdentifier($0)) }) {
+                buffer = reusable
+            } else {
+                // Only the latest result for a target can be a feed. A third
+                // slot would indicate an ownership bug rather than justify
+                // unbounded cache growth.
+                guard (storage.results[tensor]?.count ?? 0) < 2 else {
+                    blit.endEncoding()
+                    throw NativeTrainingError.invalid("Native training result storage overlaps active inputs.")
+                }
+                guard let created = device.makeBuffer(length: byteCount, options: .storageModeShared) else {
+                    blit.endEncoding()
+                    throw NativeTrainingError.unavailable("The Apple GPU could not allocate native training result storage.")
+                }
+                buffer = created
+                storage.results[tensor, default: []].append(buffer)
+                measurements.resultBufferAllocationCount += 1
             }
-            blit.fill(buffer: buffer, range: 0..<byteCount, value: 0)
-            results[tensor] = NativeTensorStorage(data: MPSGraphTensorData(buffer, shape: shape, dataType: .float32), backingBuffer: buffer)
+            let result = NativeTensorStorage(data: MPSGraphTensorData(buffer, shape: shape, dataType: .float32), backingBuffer: buffer)
+            blit.fill(buffer: result.backingBuffer, range: 0..<byteCount, value: 0)
+            results[tensor] = result
         }
         blit.endEncoding()
         let graphFeeds = feeds.mapValues(\.data)

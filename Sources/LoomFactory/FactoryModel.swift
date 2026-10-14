@@ -11,7 +11,7 @@ enum FactoryTrainingStartMode: String, CaseIterable, Identifiable {
         switch self {
         case .fresh: "Replace with a fresh model"
         case .exportedModel: "Continue exported model weights"
-        case .checkpoint: "Continue final checkpoint"
+        case .checkpoint: "Continue saved checkpoint"
         }
     }
 }
@@ -67,6 +67,10 @@ final class FactoryModel {
     private(set) var progress: Double?
     private(set) var events: [TrainingEvent] = []
     private(set) var trainingProgress: TrainingProgress?
+    private(set) var isTraining = false
+    private(set) var checkpointRequestPending = false
+    private(set) var checkpointStatus: String?
+    private(set) var lastCheckpointDirectory: URL?
     private(set) var exportedPackage: URL?
     private(set) var publishedURL: URL?
     private(set) var sourceIssue: String?
@@ -75,6 +79,8 @@ final class FactoryModel {
     @ObservationIgnored private var project: LoomProject?
     @ObservationIgnored private var operation: Task<Void, Never>?
     @ObservationIgnored private var saveOperation: Task<Void, Never>?
+    @ObservationIgnored private var checkpointOperation: Task<Bool, Never>?
+    @ObservationIgnored private var checkpointWillStop = false
     @ObservationIgnored private var generation = UUID()
     @ObservationIgnored private var polling = false
     @ObservationIgnored private var loadedComparisonKey = ""
@@ -287,6 +293,10 @@ final class FactoryModel {
     }
 
     func chooseSourceFolder() {
+        guard !busy else {
+            errorMessage = isTraining ? "Save & Stop this training run before opening another source folder." : "Wait for the current action to finish before opening another source folder."
+            return
+        }
         let panel = NSOpenPanel()
         panel.title = "Choose your source folder"
         panel.prompt = "Open Source Folder"
@@ -300,6 +310,10 @@ final class FactoryModel {
     }
 
     func openFolder(_ url: URL) {
+        guard !busy else {
+            errorMessage = isTraining ? "Save & Stop this training run before opening another source folder." : "Wait for the current action to finish before opening another source folder."
+            return
+        }
         operation?.cancel()
         saveOperation?.cancel()
         let oldProject = project
@@ -333,6 +347,7 @@ final class FactoryModel {
         publishedURL = nil
         events = []
         trainingProgress = nil
+        isTraining = false; checkpointRequestPending = false; checkpointStatus = nil; lastCheckpointDirectory = nil
         errorMessage = nil
         sourceIssue = nil
         busy = true
@@ -454,7 +469,7 @@ final class FactoryModel {
         let label = runLabel
         let onProgress = progressHandler()
         let current = generation
-        perform("Training \(dataset.name) · \(map.displayName)", clearEvents: true) { [weak self] project in
+        perform("Training \(dataset.name) · \(map.displayName)", clearEvents: true, training: true) { [weak self] project in
             try await project.updateSettings(value)
             _ = try await project.trainMap(datasetID: dataset.id, map: map, settings: configuredTraining,
                                           start: start, runLabel: label, progress: onProgress)
@@ -765,9 +780,62 @@ final class FactoryModel {
 
     func cancel() {
         guard let project, busy else { return }
+        if isTraining { saveAndStopTraining(); return }
         operation?.cancel()
         Task { await project.cancelTraining() }
         activityTitle = "Stopping safely…"
+    }
+
+    func saveCheckpoint() { requestCheckpoint(stop: false) }
+
+    func saveAndStopTraining() { requestCheckpoint(stop: true) }
+
+    private func requestCheckpoint(stop: Bool) {
+        guard let project, busy, isTraining, !checkpointRequestPending else { return }
+        checkpointRequestPending = true
+        checkpointWillStop = stop
+        checkpointStatus = stop ? "Save & Stop queued; finishing the current optimizer update…" : "Checkpoint queued; finishing the current optimizer update…"
+        errorMessage = nil
+        let current = generation
+        checkpointOperation = Task { [weak self] in
+            do {
+                let receipt = try await project.saveTrainingCheckpoint(stopAfterSaving: stop)
+                guard let self, self.generation == current else { return false }
+                self.lastCheckpointDirectory = receipt.runDirectory
+                let result = stop ? (self.isTraining ? "; stopping…" : "; training stopped") : "; training continues"
+                self.checkpointStatus = "Saved step \(receipt.completedUpdates.formatted()) at \(Date().formatted(date: .omitted, time: .shortened))\(result)"
+                self.checkpointRequestPending = false
+                if let value = try? await project.snapshot(), self.generation == current {
+                    self.adopt(value, restoreSettings: false)
+                }
+                return true
+            } catch {
+                guard let self, self.generation == current else { return false }
+                self.checkpointRequestPending = false
+                self.checkpointStatus = self.isTraining ? "Checkpoint was not saved; training continues." : "The requested checkpoint could not be saved. Check the latest saved version."
+                self.errorMessage = error.localizedDescription
+                return false
+            }
+        }
+    }
+
+    func waitForTrainingToFinish() async {
+        await operation?.value
+    }
+
+    /// Quit waits for the save receipt before waiting for the training task.
+    /// A failed checkpoint returns promptly and keeps the app and run alive.
+    func saveTrainingAndPrepareForTermination() async -> Bool {
+        if !isTraining { return await prepareForTermination() }
+        if let checkpointOperation, checkpointRequestPending {
+            let alreadyStopping = checkpointWillStop
+            guard await checkpointOperation.value else { return false }
+            if isTraining && !alreadyStopping { saveAndStopTraining() }
+        } else { saveAndStopTraining() }
+        guard let checkpointOperation, await checkpointOperation.value else { return false }
+        await waitForTrainingToFinish()
+        guard !busy, !isTraining else { return false }
+        return await prepareForTermination()
     }
 
     func revealSource() {
@@ -776,12 +844,14 @@ final class FactoryModel {
 
     func reveal(_ url: URL) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
 
-    private func perform(_ title: String, clearEvents: Bool = false,
+    private func perform(_ title: String, clearEvents: Bool = false, training: Bool = false,
                          action: @escaping @MainActor (LoomProject) async throws -> Void) {
         guard let project, !busy else { return }
         saveOperation?.cancel()
         let current = generation
         busy = true
+        isTraining = training
+        checkpointRequestPending = false; checkpointStatus = nil; lastCheckpointDirectory = nil
         activityTitle = title
         progress = nil
         errorMessage = nil
@@ -791,17 +861,29 @@ final class FactoryModel {
             do {
                 try Task.checkCancellation()
                 try await action(project)
-                let value = try await project.snapshot()
                 guard generation == current else { return }
-                adopt(value, restoreSettings: false)
+                do {
+                    let value = try await project.snapshot()
+                    guard generation == current else { return }
+                    adopt(value, restoreSettings: false)
+                } catch {
+                    guard generation == current else { return }
+                    sourceIssue = "The action completed, but the source folder could not be refreshed: \(error.localizedDescription)"
+                    events.append(.init(type: "warning", message: sourceIssue!))
+                }
                 busy = false
+                isTraining = false
                 activityTitle = Task.isCancelled ? "Stopped" : "\(title) complete"
                 progress = Task.isCancelled ? nil : 1
             } catch {
                 guard generation == current else { return }
-                if Task.isCancelled || error is CancellationError {
+                if Task.isCancelled || error is CancellationError || error is TrainingSavedStop {
                     busy = false
-                    activityTitle = "Stopped"
+                    isTraining = false
+                    activityTitle = error is TrainingSavedStop ? "Checkpoint saved · training stopped" : "Stopped"
+                    if error is TrainingSavedStop, let status = checkpointStatus {
+                        checkpointStatus = status.replacingOccurrences(of: "; stopping…", with: "; training stopped")
+                    }
                     progress = nil
                     if let value = try? await project.snapshot() { adopt(value, restoreSettings: false) }
                 } else {
@@ -863,6 +945,7 @@ final class FactoryModel {
 
     private func fail(_ error: Error) {
         busy = false
+        isTraining = false
         progress = nil
         activityTitle = "Action could not finish"
         errorMessage = error.localizedDescription

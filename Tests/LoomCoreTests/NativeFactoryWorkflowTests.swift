@@ -56,7 +56,8 @@ final class NativeFactoryWorkflowTests: XCTestCase {
         let checkpoint = try XCTUnwrap(stopped.checkpoints.first)
         XCTAssertEqual(checkpoint.status, "cancelled")
         XCTAssertFalse(FileManager.default.fileExists(atPath: checkpoint.directory.appendingPathComponent("model.json").path))
-        XCTAssertFalse(try NativeWeights.read(from: checkpoint.directory.appendingPathComponent("checkpoint.safetensors")).isEmpty)
+        let saved = try NativeFactoryTraining.json(checkpoint.directory.appendingPathComponent("checkpoint.json"))
+        XCTAssertFalse(try NativeWeights.read(from: checkpoint.directory.appendingPathComponent(try XCTUnwrap(saved["weights_path"] as? String))).isEmpty)
         var resumed = settings; resumed.epochs = 1; resumed.continueLatestWeights = true
         let artifact = try await project.trainMap(datasetID: ImageMetadataStore.categoryID("Bricks"), map: .depth,
             settings: resumed, progress: { _ in })
@@ -79,6 +80,112 @@ final class NativeFactoryWorkflowTests: XCTestCase {
         let snapshot = try await project.snapshot()
         XCTAssertTrue(snapshot.artifacts.isEmpty)
         XCTAssertEqual(snapshot.checkpoints.first?.status, "stopped")
+    }
+
+    func testManualCheckpointAcknowledgesARealUpdateAndTrainingContinues() async throws {
+        let (project, root) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try addMaterialPairs(root)
+        let snapshot = try await project.snapshot()
+        let dataset = try XCTUnwrap(snapshot.datasets.first)
+        let settings = TrainingSettings(imageSize: 32, epochs: 2,
+            shuffleEachEpoch: false, modelWidth: 8, modelBlocks: 1, validationFraction: 0,
+            checkpointEveryEpochs: 100)
+        let plan = try XCTUnwrap(snapshot.trainingPlan(datasetID: dataset.id, map: .depth, settings: settings))
+        let id = UUID().uuidString.lowercased()
+        let directory = project.projectFolder.appendingPathComponent("runs/" + id)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let projectID = await project.document.id
+        let control = TrainingRunControl(runID: id)
+        let receiptTask = Task { try await control.request(stop: false) }
+        try await waitForCheckpointRequest(control)
+        let artifact = try await Task.detached {
+            try NativeFactoryTraining.run(id: id, root: root, output: directory, projectID: projectID,
+                dataset: dataset, map: .depth, plan: plan, settings: settings, resume: nil,
+                cancellation: NativeCancellation(), progress: { _ in }, control: control)
+        }.value
+        let receipt = try await receiptTask.value
+        XCTAssertEqual(receipt.completedUpdates, 1)
+        XCTAssertFalse(receipt.stopped)
+        XCTAssertEqual(artifact.epochs, 2)
+        let descriptor = try NativeFactoryTraining.json(directory.appendingPathComponent("checkpoint.json"))
+        XCTAssertEqual(descriptor["updates"] as? Int, 6)
+        XCTAssertEqual(descriptor["optimizer_updates"] as? Int, 6)
+        control.finish()
+    }
+
+    func testSaveAndStopMidEpochResumesOptimizerAndExactNextImage() async throws {
+        let (project, root) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try addMaterialPairs(root)
+        let snapshot = try await project.snapshot()
+        let dataset = try XCTUnwrap(snapshot.datasets.first)
+        let settings = TrainingSettings(imageSize: 32, epochs: 3,
+            shuffleEachEpoch: true, flipCrops: true, rotateCrops: true, seed: 19,
+            modelWidth: 8, modelBlocks: 1, cropRefresh: .perSample, augmentationRefresh: .perSample,
+            validationFraction: 0, checkpointEveryEpochs: 100)
+        let baseline = try await project.trainMap(datasetID: dataset.id, map: .depth, settings: settings,
+            start: .fresh, progress: { _ in })
+        let expected = try NativeWeights.read(from: baseline.directory.appendingPathComponent("model.safetensors"))
+        let plan = try XCTUnwrap(snapshot.trainingPlan(datasetID: dataset.id, map: .depth, settings: settings))
+        let id = UUID().uuidString.lowercased()
+        let directory = project.projectFolder.appendingPathComponent("runs/" + id)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let projectID = await project.document.id
+        let control = TrainingRunControl(runID: id)
+        let receiptTask = Task { try await control.request(stop: true) }
+        try await waitForCheckpointRequest(control)
+        do {
+            _ = try await Task.detached {
+                try NativeFactoryTraining.run(id: id, root: root, output: directory, projectID: projectID,
+                    dataset: dataset, map: .depth, plan: plan, settings: settings, resume: nil,
+                    cancellation: NativeCancellation(), progress: { _ in }, control: control)
+            }.value
+            XCTFail("Save & Stop must end the run after saving")
+        } catch is TrainingSavedStop {} catch { throw error }
+        let receipt = try await receiptTask.value
+        XCTAssertTrue(receipt.stopped)
+        XCTAssertEqual(receipt.completedUpdates, 1)
+        let checkpoint = try NativeFactoryTraining.json(directory.appendingPathComponent("checkpoint.json"))
+        XCTAssertEqual(checkpoint["status"] as? String, "saved_stopped")
+        let cursor = try XCTUnwrap(checkpoint["resume_cursor"] as? [String: Any])
+        XCTAssertEqual(cursor["nextWindow"] as? Int, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("artifact.json").path))
+        control.finish()
+        let resumed = try await project.trainMap(datasetID: dataset.id, map: .depth, settings: settings,
+            start: .checkpoint(runID: id), progress: { _ in })
+        XCTAssertEqual(resumed.epochs, 3)
+        let actual = try NativeWeights.read(from: resumed.directory.appendingPathComponent("model.safetensors"))
+        XCTAssertEqual(actual.keys.sorted(), expected.keys.sorted())
+        for name in expected.keys {
+            for (left, right) in zip(try XCTUnwrap(actual[name]).values, expected[name]!.values) {
+                XCTAssertEqual(left, right, accuracy: 2e-6)
+            }
+        }
+        let resumedDescriptor = try NativeFactoryTraining.json(resumed.directory.appendingPathComponent("checkpoint.json"))
+        XCTAssertEqual(resumedDescriptor["optimizer_updates"] as? Int, 9)
+        XCTAssertEqual(resumedDescriptor["updates"] as? Int, 9)
+    }
+
+    private func waitForCheckpointRequest(_ control: TrainingRunControl) async throws {
+        for _ in 0..<1_000 {
+            if control.hasPendingRequest { return }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        throw LoomError("Checkpoint request did not arrive")
+    }
+
+    private func addMaterialPairs(_ root: URL) throws {
+        for index in 2...3 {
+            for role in [MapRole.diffuse, .depth] {
+                let original = root.appendingPathComponent(role == .diffuse ? "brick_diff.png" : "brick_disp.png")
+                let destination = root.appendingPathComponent("brick\(index)_\(role.rawValue).png")
+                try Data(contentsOf: original).write(to: destination)
+                var metadata = ImageMetadata(pairingKey: "fixture_\(index)", role: role)
+                metadata.category = "Bricks"; metadata.roleWasManuallySelected = true; metadata.pairingWasManuallySelected = true
+                try ImageMetadataStore.write(metadata, to: destination)
+            }
+        }
     }
 
     private func fixture() throws -> (LoomProject, URL) {

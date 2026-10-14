@@ -11,6 +11,7 @@ struct FactoryApplicationTerminationTests {
         defer { try? FileManager.default.removeItem(at: root) }
         let model = FactoryModel(rememberSourceFolder: false)
         let delegate = FactoryApplicationDelegate()
+        delegate.showBusyNotice = {}
         delegate.bind(to: model)
         var replies: [Bool] = []
         delegate.replyToTermination = { _, allowed in replies.append(allowed) }
@@ -49,6 +50,7 @@ struct FactoryApplicationTerminationTests {
     func idleTerminationWaitsForOneSaveAndRechecksForNewWork() async throws {
         let delegate = FactoryApplicationDelegate()
         #expect(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateNow)
+        delegate.showBusyNotice = {}
         var active = false
         var preparations = 0
         var replies: [Bool] = []
@@ -77,5 +79,52 @@ struct FactoryApplicationTerminationTests {
             try await Task.sleep(for: .milliseconds(10))
         }
         #expect(replies == [false, false])
+    }
+
+    @Test @MainActor
+    func trainingQuitCanKeepRunningOrWaitForOneDurableSave() async throws {
+        let delegate = FactoryApplicationDelegate()
+        var active = true
+        var saves = 0
+        var replies: [Bool] = []
+        delegate.operationIsActive = { active }
+        delegate.trainingIsActive = { true }
+        delegate.chooseTrainingQuit = { false }
+        delegate.saveAndStopForTermination = {
+            saves += 1
+            try? await Task.sleep(for: .milliseconds(20))
+            active = false
+            return true
+        }
+        delegate.replyToTermination = { _, allowed in replies.append(allowed) }
+        #expect(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateCancel)
+        #expect(active)
+        #expect(saves == 0)
+        delegate.chooseTrainingQuit = { true }
+        #expect(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateLater)
+        #expect(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateLater)
+        for _ in 0..<100 {
+            if !replies.isEmpty { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(saves == 1)
+        #expect(replies == [true])
+    }
+
+    @Test @MainActor
+    func failedTrainingSaveKeepsApplicationOpen() async throws {
+        let delegate = FactoryApplicationDelegate()
+        delegate.operationIsActive = { true }
+        delegate.trainingIsActive = { true }
+        delegate.chooseTrainingQuit = { true }
+        delegate.saveAndStopForTermination = { false }
+        var replies: [Bool] = []
+        delegate.replyToTermination = { _, allowed in replies.append(allowed) }
+        #expect(delegate.applicationShouldTerminate(NSApplication.shared) == .terminateLater)
+        for _ in 0..<100 {
+            if !replies.isEmpty { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(replies == [false])
     }
 }

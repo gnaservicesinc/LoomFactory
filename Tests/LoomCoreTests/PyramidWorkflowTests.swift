@@ -36,7 +36,8 @@ final class PyramidWorkflowTests: XCTestCase {
         XCTAssertEqual(checkpoint["architecture"] as? String, NativeArchitecture.pyramidIdentifier)
         XCTAssertEqual((checkpoint["settings"] as? [String: Any])?["model_architecture"] as? String,
             NativeArchitecture.pyramidIdentifier)
-        let before = try Data(contentsOf: artifact.directory.appendingPathComponent("checkpoint.safetensors"))
+        let checkpointPath = artifact.directory.appendingPathComponent(try XCTUnwrap(checkpoint["weights_path"] as? String))
+        let before = try Data(contentsOf: checkpointPath)
         var requestedContinuation = settings
         requestedContinuation.modelArchitecture = NativeArchitecture.identifier
         requestedContinuation.modelWidth = 24; requestedContinuation.modelBlocks = 2
@@ -47,8 +48,8 @@ final class PyramidWorkflowTests: XCTestCase {
         XCTAssertEqual(continuedRequest["width"] as? Int, 8)
         XCTAssertEqual(continuedRequest["blocks"] as? Int, 1)
         XCTAssertEqual(continuedRequest["resume_weights"] as? String,
-            artifact.directory.appendingPathComponent("checkpoint.safetensors").path)
-        XCTAssertEqual(try Data(contentsOf: artifact.directory.appendingPathComponent("checkpoint.safetensors")), before)
+            checkpointPath.path)
+        XCTAssertEqual(try Data(contentsOf: checkpointPath), before)
         let reopened = try LoomProject(sourceFolder: root)
         let versions = try await reopened.modelVersions(datasetID: datasetID, map: .depth)
         XCTAssertEqual(versions.count, 2)

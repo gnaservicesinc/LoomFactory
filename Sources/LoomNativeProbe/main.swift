@@ -44,7 +44,9 @@ private func executionJSON(_ value: NativeGraphExecutionMeasurements) -> [String
     ["feed_seconds": value.feedSeconds, "result_setup_seconds": value.resultSetupSeconds,
      "encoding_seconds": value.encodingSeconds, "wait_seconds": value.waitSeconds,
      "gpu_span_seconds": value.gpuSpanSeconds, "scalar_read_seconds": value.scalarReadSeconds,
-     "total_seconds": value.totalSeconds]
+     "total_seconds": value.totalSeconds,
+     "feed_buffer_allocations": Double(value.feedBufferAllocationCount),
+     "result_buffer_allocations": Double(value.resultBufferAllocationCount)]
 }
 private func memory() -> [String: Any] {
     var usage = rusage()

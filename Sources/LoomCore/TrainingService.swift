@@ -2,6 +2,13 @@ import Foundation
 import LoomNative
 
 extension LoomProject {
+    public func saveTrainingCheckpoint(stopAfterSaving: Bool = false) async throws -> TrainingCheckpointReceipt {
+        guard let control = activeTrainingControl else {
+            throw LoomError("No model training run is active.")
+        }
+        return try await control.request(stop: stopAfterSaving)
+    }
+
     public func trainMap(datasetID: String, map: MapRole, settings: TrainingSettings,
                          start: TrainingStart? = nil, runLabel: String = "",
                          progress: @escaping @Sendable (TrainingEvent) -> Void) async throws -> ModelArtifact {
@@ -34,8 +41,9 @@ extension LoomProject {
             status: "running")
         try TrainingRunFiles.writeMetadata(metadata, at: output)
         let cancellation = NativeCancellation()
-        operationActive = true; activeTraining = cancellation
-        defer { operationActive = false; activeTraining = nil }
+        let control = TrainingRunControl(runID: id)
+        operationActive = true; activeTraining = cancellation; activeTrainingControl = control
+        defer { control.finish(); operationActive = false; activeTraining = nil; activeTrainingControl = nil }
         let root = sourceFolder, projectID = document.id, continued = prepared.resume?.weights
         // The actor remains available to Stop while the serial GPU worker runs.
         do {
@@ -44,7 +52,7 @@ extension LoomProject {
                 return try await Task.detached(priority: .userInitiated) {
                     try NativeFactoryTraining.run(id: id, root: root, output: output, projectID: projectID,
                         dataset: dataset, map: map, plan: plan, settings: settings, resume: continued,
-                        cancellation: cancellation, progress: progress)
+                        cancellation: cancellation, progress: progress, control: control)
                 }.value
             } onCancel: { cancellation.cancel() }
             metadata.status = "completed"
@@ -54,7 +62,7 @@ extension LoomProject {
             catch { progress(.init(type: "warning", message: "Model saved; choose it for export manually: \(error.localizedDescription)")) }
             return artifact
         } catch {
-            metadata.status = error is CancellationError ? "cancelled" : "failed"
+            metadata.status = error is TrainingSavedStop ? "saved_stopped" : error is CancellationError ? "cancelled" : "failed"
             try? TrainingRunFiles.writeMetadata(metadata, at: output)
             throw error
         }

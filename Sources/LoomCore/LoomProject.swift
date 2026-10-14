@@ -15,6 +15,7 @@ public actor LoomProject {
     var document: ProjectDocument
     var activeProcess: Process?
     var activeTraining: NativeCancellation?
+    var activeTrainingControl: TrainingRunControl?
     var operationActive = false
     public init(sourceFolder: URL) throws {
         // Foundation can mix /var and /private/var URLs. Establish one actual

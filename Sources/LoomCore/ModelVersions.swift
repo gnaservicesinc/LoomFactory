@@ -184,9 +184,12 @@ extension LoomProject {
             let active = selected?.runID ?? artifacts.first { $0.kind == "map" && $0.datasetID == datasetID && $0.map == map }?.directory.lastPathComponent
             let created = metadata?.createdAt ?? artifact?.createdAt ?? checkpoint?.modifiedAt ??
                 (try? folder.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
+            let recordedStatus = progress?["status"] as? String ?? checkpoint?.status ?? metadata?.status ?? "interrupted"
+            let status = ["running", "training"].contains(recordedStatus) && activeTrainingControl?.runID != folder.lastPathComponent
+                ? "inactive in this window" : recordedStatus
             return ModelVersion(id: folder.lastPathComponent, directory: folder, datasetID: datasetID,
                 datasetName: artifact?.datasetName ?? model?["dataset_name"] as? String ?? savedCheckpoint?["dataset_name"] as? String ?? request?["display_name"] as? String ?? datasetID,
-                map: map, status: artifact == nil ? (progress?["status"] as? String ?? checkpoint?.status ?? metadata?.status ?? "interrupted") : "completed",
+                map: map, status: artifact == nil ? status : "completed",
                 createdAt: created, label: metadata?.label ?? request?["run_label"] as? String ?? "", settings: settings,
                 checkpoint: checkpoint, artifact: artifact, history: history, lineage: metadata?.lineage,
                 isActive: artifact != nil && active == folder.lastPathComponent)
@@ -295,7 +298,10 @@ enum TrainingRunFiles {
     static func resume(weights: URL, projectFolder: URL, projectID: String, datasetID: String, map: MapRole,
                        settings: TrainingSettings, expectedSHA256: String? = nil) throws -> TrainingResume {
         let directory = try ownedRun(weights.deletingLastPathComponent(), projectFolder: projectFolder)
-        let source: TrainingWeightSource = weights.lastPathComponent == "checkpoint.safetensors" ? .checkpoint : .model
+        let checkpointDescriptor = optionalJSON(directory.appendingPathComponent("checkpoint.json"))
+        let checkpointPath = checkpointDescriptor?["weights_path"] as? String ?? "checkpoint.safetensors"
+        let source: TrainingWeightSource = weights.standardizedFileURL.resolvingSymlinksInPath()
+            == directory.appendingPathComponent(checkpointPath).standardizedFileURL.resolvingSymlinksInPath() ? .checkpoint : .model
         let descriptor = try descriptor(at: directory, source: source)
         let architecture = try nativeArchitecture(from: descriptor, map: map)
         let nativeSettings = (source == .checkpoint ? descriptor["settings"] : descriptor["training"]) as? [String: Any] ?? [:]
