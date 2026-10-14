@@ -1,10 +1,11 @@
 # Checkpoint and Materials usability validation
 
-Validated source and optimized Release bundle on 2026-10-14. Installation and
-live interaction qualification remain pending; the installed Loom Factory is
-running and the installer refuses to replace it. Computer-use inspection failed
-with `Sky Computer Use native pipe startup failed`. The active app was neither
-stopped nor relaunched.
+Validated source and optimized Release bundle on 2026-10-14. After the user
+closed Loom Factory, the validated build was installed at
+`/Applications/Loom Factory.app` without launching it. Its executable hash,
+complete bundle contents, native resources and strict signature match the
+validated build. Live interaction qualification remains pending: computer-use
+inspection failed with `Sky Computer Use native pipe startup failed`.
 
 ## User-visible changes
 
@@ -50,7 +51,7 @@ stopped nor relaunched.
   fixture was corrected to explicitly recognize a numbered alternate diffuse
   instead of counting it as an ignored unknown map.
 
-## Evidence and next installation step
+## Installation and evidence
 
 Evidence is stored outside the app source at:
 `/opt/ipde/ipde/out/loom-factory-materials-usability-2026-10-14`.
@@ -58,10 +59,18 @@ Evidence is stored outside the app source at:
 The validated bundle is:
 `/opt/ipde/ipde/LoomFactory/.build/application/Loom Factory.app`.
 
-Once Loom Factory is closed, `Scripts/install-app.sh --skip-build` installs that
-bundle without launching it and retains the prior installed app as a backup.
-After installation, verify the installed executable hash/signature and exercise
-folder selection, review, approval, testing, checkpoint loading and continuation
-in the live app before calling the user's no-hang acceptance requirement met.
+`Scripts/install-app.sh --skip-build` completed after confirming Factory was
+closed. The installer retained the prior app at:
+`/Users/andrewsmith/Library/Application Support/Loom Factory/Backups/Loom Factory.backup-20261014-220740-AF67246D.app`.
+
+`installation-receipt.json` and `installation-completed.log` record the completed
+installation. The installed executable SHA-256 is the validated hash above;
+every installed file and symbolic link matches the built bundle. Strict
+code-signature verification and `Scripts/verify-native-bundle.sh` passed against
+the installed application. Factory remains closed.
+
+Exercise folder selection, review, approval, testing, checkpoint loading and
+continuation in the live app before calling the user's no-hang acceptance
+requirement met.
 
 Execution tests do not establish learned model quality or generalization.
