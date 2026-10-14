@@ -13,18 +13,29 @@ enum TrainingPairSelector {
         var pairs: [TrainingPair] = []
         for key in families.keys.sorted() {
             let group = families[key]!
-            let inputs = group.filter { $0.role == .diffuse }
+            let inputs = group.filter { $0.role == .diffuse }.sorted { $0.id < $1.id }
             let targets = group.filter { $0.role == map && (map != .normal || $0.normalConvention?.lowercased() != "directx") }
             guard !inputs.isEmpty, !targets.isEmpty else { continue }
-            guard inputs.count == 1, targets.count == 1 else {
-                throw LoomError("\(group[0].displayName) contains several maps of the same type. Pair the intended maps before training.")
+            if inputs.count > 1 {
+                let folders = Set((inputs + targets).map { $0.url.deletingLastPathComponent().standardizedFileURL })
+                guard folders.count == 1 else {
+                    throw LoomError("Keep diffuse variants and their shared maps in one material folder so training and validation stay separate.")
+                }
             }
-            let input = inputs[0], target = targets[0]
-            guard input.width == target.width, input.height == target.height else {
-                throw LoomError("The diffuse and \(map.displayName.lowercased()) maps for \(input.displayName) have different dimensions. Originals were left unchanged.")
+            for input in inputs {
+                let matching = targets.filter { $0.width == input.width && $0.height == input.height }
+                guard !matching.isEmpty else {
+                    throw LoomError("The diffuse and \(map.displayName.lowercased()) maps for \(input.displayName) have different dimensions. Originals were left unchanged.")
+                }
+                guard matching.count == 1 else {
+                    throw LoomError("\(input.displayName) contains several \(map.displayName.lowercased()) maps at the same resolution. Pair the intended maps before training.")
+                }
+                guard input.width >= size, input.height >= size else { continue }
+                // Color variants are independent inputs to the shared target.
+                // Preserve existing singleton IDs and distinguish variant crops.
+                let id = inputs.count == 1 ? key : key + "|" + input.id
+                pairs.append(TrainingPair(id: id, input: input, target: matching[0]))
             }
-            guard input.width >= size, input.height >= size else { continue }
-            pairs.append(TrainingPair(id: key, input: input, target: target))
         }
         return pairs
     }

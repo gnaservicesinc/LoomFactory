@@ -26,7 +26,8 @@ final class BumpMapTests: XCTestCase {
         XCTAssertEqual(ImageMetadataStore.repairingLegacyInference(manual, file: file, sourceRoot: root, width: 1024, height: 1024), manual)
         let alternate = ImageMetadataStore.initialMetadata(file: root.appendingPathComponent("leather_red_02_coll2_1k.png"),
                                                           sourceRoot: root, width: 1024, height: 1024)
-        XCTAssertEqual(alternate.role, .unknown)
+        XCTAssertEqual(alternate.role, .diffuse)
+        XCTAssertEqual(alternate.pairingKey, target.pairingKey)
     }
 
     func testMaterialNameRoleWordCannotKeepAnOldNormalMapTaggedAsRoughness() throws {

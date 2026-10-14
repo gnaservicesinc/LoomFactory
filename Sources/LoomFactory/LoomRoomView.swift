@@ -338,7 +338,7 @@ private struct PairImagesSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Pair material images").font(.title2.weight(.semibold))
-            Text("Select a diffuse image and its matching maps. Set each map type in Image Review first.")
+            Text("Select all diffuse variants that share these maps, plus one image of each matching target type at the same resolution. Each diffuse becomes a separate training sample. Set map types in Image Review first.")
                 .foregroundStyle(.secondary)
             List(model.snapshot?.images ?? [], id: \.id, selection: $selected) { image in
                 HStack {

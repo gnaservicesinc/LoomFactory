@@ -70,6 +70,41 @@ public enum ImageMetadataStore {
         inferredMetadata(file: file, sourceRoot: sourceRoot, width: width, height: height, currentNaming: true)
     }
 
+    /// Earlier scans gave alternate colors an isolated filename-derived pair.
+    /// Repair that inference without changing a deliberate role, pair or ignore.
+    static func repairingColorVariantInference(_ metadata: ImageMetadata, file: URL, sourceRoot: URL,
+                                                width: Int, height: Int) -> ImageMetadata {
+        guard metadata.pairingWasManuallySelected != true else { return metadata }
+        let tokens = file.deletingPathExtension().lastPathComponent.lowercased()
+            .split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
+        guard tokens.enumerated().contains(where: { index, token in
+            isNumberedColorToken(token) || (["col", "coll"].contains(token) && index + 1 < tokens.count && isVariantNumber(tokens[index + 1]))
+        }) else { return metadata }
+        let inferred = initialMetadata(file: file, sourceRoot: sourceRoot, width: width, height: height)
+        guard inferred.role == .diffuse else { return metadata }
+        let previous = inferredMetadata(file: file, sourceRoot: sourceRoot, width: width, height: height,
+                                        currentNaming: true, allColorVariants: false)
+        let legacy = inferredMetadata(file: file, sourceRoot: sourceRoot, width: width, height: height, currentNaming: false)
+        guard [previous, legacy].contains(where: {
+            metadata.pairingKey == $0.pairingKey && (metadata.roleWasManuallySelected == true || metadata.role == $0.role)
+        }) else { return metadata }
+        var repaired = metadata
+        repaired.pairingKey = inferred.pairingKey
+        if metadata.roleWasManuallySelected != true { repaired.role = inferred.role }
+        return repaired
+    }
+
+    private static func isVariantNumber(_ token: String) -> Bool {
+        !token.isEmpty && token.allSatisfy(\.isNumber) && (Int(token) ?? 0) > 0
+    }
+
+    private static func isNumberedColorToken(_ token: String) -> Bool {
+        for prefix in ["coll", "col"] where token.hasPrefix(prefix) {
+            if isVariantNumber(String(token.dropFirst(prefix.count))) { return true }
+        }
+        return false
+    }
+
     /// Repair only an exact filename inference made by earlier versions.
     /// File identity, human review and deliberate role/pair choices remain authoritative.
     static func repairingLegacyInference(_ metadata: ImageMetadata, file: URL, sourceRoot: URL,
@@ -89,7 +124,8 @@ public enum ImageMetadataStore {
     }
 
     private static func inferredMetadata(file: URL, sourceRoot: URL, width: Int, height: Int,
-                                         currentNaming: Bool) -> ImageMetadata {
+                                         currentNaming: Bool,
+                                         allColorVariants: Bool = true) -> ImageMetadata {
         let stem = file.deletingPathExtension().lastPathComponent.lowercased()
         let tokens = stem.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
         var roles: [(MapRole, Set<String>)] = [
@@ -106,20 +142,24 @@ public enum ImageMetadataStore {
         var role = MapRole.unknown
         var family = tokens
         let choices = roles.compactMap { candidate, words -> (MapRole, Int)? in
-            guard let index = currentNaming ? tokens.lastIndex(where: words.contains) : tokens.firstIndex(where: words.contains) else { return nil }
+            let matches: (String) -> Bool = { token in
+                words.contains(token) || (currentNaming && allColorVariants && candidate == .diffuse && isNumberedColorToken(token))
+            }
+            guard let index = currentNaming ? tokens.lastIndex(where: matches) : tokens.firstIndex(where: matches) else { return nil }
             return (candidate, index)
         }
         let choice = currentNaming ? choices.max { $0.1 < $1.1 } : choices.first
         if let (candidate, index) = choice {
             role = candidate; family.remove(at: index)
-            // Poly Haven's first colour variant is the primary paired input.
-            // Strip its variant marker as well as the role, keeping resolution.
+            // Numbered color variants share material targets at this resolution.
+            // Strip their color number as well as the role, keeping resolution.
             if currentNaming, candidate == .diffuse, ["col", "coll"].contains(tokens[index]),
-               index + 1 < tokens.count, tokens[index + 1] == "1" {
+               index + 1 < tokens.count,
+               allColorVariants ? isVariantNumber(tokens[index + 1]) : tokens[index + 1] == "1" {
                 family.remove(at: index)
             }
             if currentNaming, candidate == .diffuse, tokens[index] == "coll",
-               !(index + 1 < tokens.count && tokens[index + 1] == "1") {
+               !(index + 1 < tokens.count && (allColorVariants ? isVariantNumber(tokens[index + 1]) : tokens[index + 1] == "1")) {
                 role = .unknown; family = tokens
             }
             if currentNaming, candidate == .diffuse, index > 0, tokens[index - 1] == "base",

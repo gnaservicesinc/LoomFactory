@@ -241,7 +241,8 @@ enum NativeFactoryTraining {
                   !image.url.standardizedFileURL.path.hasPrefix(root.path + "/.loom-factory/"),
                   FileManager.default.fileExists(atPath: image.url.path),
                   let metadata = try ImageMetadataStore.read(image.url), metadata.id == image.id,
-                  metadata.pairingKey == pair.id, metadata.category == dataset, metadata.role == role, metadata.ignored != true else {
+                  image.pairingKey == pair.input.pairingKey,
+                  metadata.pairingKey == image.pairingKey, metadata.category == dataset, metadata.role == role, metadata.ignored != true else {
                 throw LoomError("A source pair changed its file, dataset, role, pairing or ignore state: \(image.url.lastPathComponent). Refresh the source folder.")
             }
             if map == .normal && role == .normal && metadata.normalConvention?.lowercased() == "directx" {

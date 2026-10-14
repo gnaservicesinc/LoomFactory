@@ -47,9 +47,9 @@ public actor LoomProject {
             let members = images.filter { $0.category == category && !$0.ignored }
             let families = Dictionary(grouping: members, by: \.pairingKey)
             let counts = Dictionary(uniqueKeysWithValues: MapRole.targets.map { map in
-                (map.rawValue, families.values.filter { group in
-                    group.contains { $0.role == .diffuse } && group.contains { $0.role == map }
-                }.count)
+                (map.rawValue, families.values.reduce(0) { count, group in
+                    count + ((try? TrainingPairSelector.select(images: group, dataset: category, map: map, size: 1).count) ?? 0)
+                })
             })
             return DatasetCategory(id: ImageMetadataStore.categoryID(category), name: category,
                 imageCount: members.count, verifiedCount: members.filter(\.verified).count, pairCounts: counts)
@@ -114,7 +114,15 @@ public actor LoomProject {
         let images = try scanImages().filter { ids.contains($0.id) }
         guard images.count == ids.count, !images.isEmpty else { throw LoomError("Choose images currently in this source folder.") }
         guard Set(images.map { "\($0.width)x\($0.height)" }).count == 1 else { throw LoomError("Paired maps must have the same pixel dimensions.") }
-        guard Set(images.map(\.role)).count == images.count else { throw LoomError("A pair can contain one image of each map type.") }
+        if images.filter({ $0.role == .diffuse }).count > 1 {
+            guard Set(images.map { $0.url.deletingLastPathComponent().standardizedFileURL }).count == 1 else {
+                throw LoomError("Keep diffuse variants and their shared maps in one material folder so training and validation stay separate.")
+            }
+        }
+        let targets = images.filter { $0.role != .diffuse }
+        guard Set(targets.map(\.role)).count == targets.count else {
+            throw LoomError("A material pair can contain several diffuse variants and one image of each other map type.")
+        }
         let key = UUID().uuidString.lowercased()
         for image in images {
             guard var metadata = try ImageMetadataStore.read(image.url) else { throw LoomError("Refresh the source folder before pairing these images.") }
@@ -186,7 +194,8 @@ public actor LoomProject {
                     try ImageMetadataStore.write(metadata!, to: target)
                 }
                 var tag = metadata!
-                let repaired = ImageMetadataStore.repairingLegacyInference(tag, file: file, sourceRoot: sourceFolder, width: width, height: height)
+                let variantTag = ImageMetadataStore.repairingColorVariantInference(tag, file: file, sourceRoot: sourceFolder, width: width, height: height)
+                let repaired = ImageMetadataStore.repairingLegacyInference(variantTag, file: file, sourceRoot: sourceFolder, width: width, height: height)
                 if repaired != tag {
                     tag = repaired
                     try ImageMetadataStore.write(tag, to: target)
