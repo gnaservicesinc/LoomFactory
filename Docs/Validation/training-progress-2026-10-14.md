@@ -36,7 +36,8 @@ Validation:
   `b0e7f41d2ed09ccca1150ae46c47d83ff177d471c0dbfabfd6d2f6683fb67e57`.
 - Live interactive UI inspection was unavailable because the computer-use tool
   returned `Sky Computer Use native pipe startup failed`. Native offscreen
-  rendering and the installed-process check provide the UI/startup evidence.
+  rendering provides the UI evidence. AppKit logs confirmed launch followed by
+  approved normal termination; a persistent interactive session was not verified.
 
 Receipts and the rendered panel are under
 `~/Library/Application Support/Loom Factory/Validation/training-progress-2026-10-14`.
