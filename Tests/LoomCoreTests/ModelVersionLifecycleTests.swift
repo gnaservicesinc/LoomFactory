@@ -23,6 +23,7 @@ final class ModelVersionLifecycleTests: XCTestCase {
         XCTAssertEqual(continued.settings.modelWidth, 8)
         XCTAssertEqual(continued.settings.modelBlocks, 1)
         XCTAssertEqual(continued.settings.modelArchitecture, NativeArchitecture.identifier)
+        XCTAssertEqual(continued.settings.scalarLoss, .absoluteV1, "Legacy checkpoint continuation preserves its objective")
         XCTAssertEqual(continued.settings.learningRate, changed.learningRate)
         XCTAssertEqual(continued.settings.optimizer, .adam)
 
@@ -31,6 +32,7 @@ final class ModelVersionLifecycleTests: XCTestCase {
         XCTAssertEqual(best.resume?.weights, old.directory.appendingPathComponent("model.safetensors"))
         XCTAssertEqual(best.resume?.source, .model)
         XCTAssertEqual(best.settings.modelArchitecture, NativeArchitecture.identifier)
+        XCTAssertEqual(best.settings.scalarLoss, .absoluteV1)
         XCTAssertNotEqual(best.resume?.sha256, continued.resume?.sha256)
         let fresh = try await fixture.project.prepareTrainingStart(.fresh, datasetID: fixture.datasetID, map: .depth, settings: changed)
         XCTAssertNil(fresh.resume)
@@ -216,6 +218,7 @@ final class ModelVersionLifecycleTests: XCTestCase {
             var settings = NativeFactoryTraining.settingsJSON(TrainingSettings(imageSize: size, epochs: 2,
                 learningRate: 0.0003, modelWidth: width, modelBlocks: 1, gradientAccumulationSteps: 3,
                 modelArchitecture: NativeArchitecture.identifier))
+            settings.removeValue(forKey: "scalar_loss") // Historical runs predate the objective ID.
             let rows: [[String: Any]] = [["epoch": 1, "loss": 0.5, "validation_loss": 0.4, "learning_rate": 0.0003, "updates": 1],
                                         ["epoch": 2, "loss": 0.3, "validation_loss": 0.2, "learning_rate": 0.0003, "updates": 2]]
             settings["history"] = rows

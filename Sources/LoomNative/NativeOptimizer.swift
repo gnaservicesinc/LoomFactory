@@ -1,6 +1,13 @@
 import Foundation
 import MetalPerformanceShadersGraph
 
+/// Loss contracts are versioned independently of the unchanged inference graph.
+/// Existing checkpoints retain L1 unless their training request selects v2.
+public enum NativeScalarLoss: String, Codable, CaseIterable, Sendable {
+    case absoluteV1 = "absolute-v1"
+    case logitCrossEntropyV2 = "logit-cross-entropy-v2"
+}
+
 public struct NativeTrainingOptions: Sendable, Equatable {
     public let optimizer: String
     public let weightDecay: Double
@@ -11,10 +18,12 @@ public struct NativeTrainingOptions: Sendable, Equatable {
     public let gradientClipPolicy: String
     public let gradientClipWarmupStartNorm: Double
     public let gradientClipWarmupUpdates: Int
+    public let scalarLoss: NativeScalarLoss
     public init(optimizer: String = "adamw", weightDecay: Double = 0.01, beta1: Double = 0.9,
                 beta2: Double = 0.999, momentum: Double = 0.9, gradientClipNorm: Double = 1,
                 gradientClipPolicy: String = "fixed", gradientClipWarmupStartNorm: Double = 0.25,
-                gradientClipWarmupUpdates: Int = 100) throws {
+                gradientClipWarmupUpdates: Int = 100,
+                scalarLoss: NativeScalarLoss = .absoluteV1) throws {
         let activeBeta1 = optimizer == "sgd" ? 0.9 : beta1
         let activeBeta2 = optimizer == "sgd" ? 0.999 : beta2
         let activeMomentum = optimizer == "sgd" ? momentum : 0.9
@@ -36,6 +45,7 @@ public struct NativeTrainingOptions: Sendable, Equatable {
         self.beta2 = activeBeta2; self.momentum = activeMomentum; self.gradientClipNorm = activeClipNorm
         self.gradientClipPolicy = gradientClipPolicy; self.gradientClipWarmupStartNorm = activeWarmupStart
         self.gradientClipWarmupUpdates = activeWarmupUpdates
+        self.scalarLoss = scalarLoss
     }
     /// The threshold for the next update. Warmup starts tight and reaches the
     /// final cap after this many successful updates. Restored step counts keep

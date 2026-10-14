@@ -126,6 +126,14 @@ extension MPSGraph {
     func materialNetwork(input: MPSGraphTensor, architecture: NativeArchitecture,
                          parameters: [String: MPSGraphTensor], adapter: NativeAdapterConfiguration?,
                          channelsLast: Bool = false) -> MPSGraphTensor {
+        materialPrediction(logits: materialLogits(input: input, architecture: architecture,
+            parameters: parameters, adapter: adapter, channelsLast: channelsLast), architecture: architecture)
+    }
+    /// Pre-activation NCHW values are available to stable scalar training losses;
+    /// exported predictions keep the exact same sigmoid/vector interpretation.
+    func materialLogits(input: MPSGraphTensor, architecture: NativeArchitecture,
+                        parameters: [String: MPSGraphTensor], adapter: NativeAdapterConfiguration?,
+                        channelsLast: Bool = false) -> MPSGraphTensor {
         func conv(_ source: MPSGraphTensor, _ name: String) -> MPSGraphTensor {
             let stride = architecture.convolutionStride(name)
             var value = convolution(source, weight: parameters[name + ".weight"]!, kernel: 3,
@@ -161,8 +169,12 @@ extension MPSGraph {
             value = nearestDouble(value, matching: full, channelsLast: channelsLast)
             value = reLU(with: addition(conv(value, "decoder.full"), full, name: nil), name: nil)
         }
-        value = sigmoid(with: conv(value, "output"), name: nil)
+        value = conv(value, "output")
         if channelsLast { value = transpose(value, permutation: [0, 3, 1, 2], name: nil) }
+        return value
+    }
+    func materialPrediction(logits: MPSGraphTensor, architecture: NativeArchitecture) -> MPSGraphTensor {
+        var value = sigmoid(with: logits, name: nil)
         if architecture.mapKind == "normal" {
             value = addition(scaled(normalizedVector(subtraction(scaled(value, 2), scalar(1), name: nil)), 0.5), scalar(0.5), name: nil)
         }
@@ -202,5 +214,20 @@ extension MPSGraph {
             error = absolute(with: subtraction(prediction, target, name: nil), name: nil)
         }
         return mean(of: error, axes: [0, 1, 2, 3], name: nil)
+    }
+    /// Soft-target BCE evaluated from logits. Its derivative is sigmoid(z)-y,
+    /// so an incorrectly saturated white/black scalar map can still recover.
+    /// The positive/negative parts cancel |z|'s derivative at z=0 and avoid
+    /// subtracting large products near target endpoints. The exponential cannot
+    /// overflow. Targets are used without normalization.
+    func scalarLogitCrossEntropy(logits: MPSGraphTensor, target: MPSGraphTensor) -> MPSGraphTensor {
+        let absolute = absolute(with: logits, name: nil)
+        let positive = addition(scaled(absolute, 0.5), scaled(logits, 0.5), name: nil)
+        let negative = subtraction(scaled(absolute, 0.5), scaled(logits, 0.5), name: nil)
+        let linear = addition(multiplication(subtraction(scalar(1), target, name: nil), positive, name: nil),
+            multiplication(target, negative, name: nil), name: nil)
+        let softplusTail = logarithm(with: addition(scalar(1),
+            exponent(with: scaled(absolute, -1), name: nil), name: nil), name: nil)
+        return mean(of: addition(linear, softplusTail, name: nil), axes: [0, 1, 2, 3], name: nil)
     }
 }

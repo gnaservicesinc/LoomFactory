@@ -79,7 +79,8 @@ enum NativeFactoryTraining {
             beta1: settings.beta1, beta2: settings.beta2, momentum: settings.momentum, gradientClipNorm: settings.gradientClipNorm,
             gradientClipPolicy: settings.gradientClipPolicy.rawValue,
             gradientClipWarmupStartNorm: settings.gradientClipWarmupStartNorm,
-            gradientClipWarmupUpdates: settings.gradientClipWarmupUpdates)
+            gradientClipWarmupUpdates: settings.gradientClipWarmupUpdates,
+            scalarLoss: settings.scalarLoss)
         var initial: [String: NativeTensor]?, optimizerState: [String: NativeTensor]?
         var restoredUpdateCount = 0
         var restoredCursor: TrainingCheckpointCursor?
@@ -97,7 +98,7 @@ enum NativeFactoryTraining {
                 let folder = resume.deletingLastPathComponent()
                 let descriptor = try TrainingRunFiles.descriptor(at: folder, source: .checkpoint)
                 let saved = descriptor["settings"] as? [String: Any] ?? [:]
-                let optimizerKeys = ["optimizer", "weight_decay", "beta1", "beta2", "momentum"]
+                let optimizerKeys = ["optimizer", "weight_decay", "beta1", "beta2", "momentum", "scalar_loss"]
                 if let path = descriptor["optimizer_path"] as? String,
                    TrainingCheckpointCursor.compatibleSettings(saved, current: settingsJSON(settings), keys: optimizerKeys) {
                     let file = try TrainingRunFiles.containedFile(path, directory: folder)
@@ -460,6 +461,7 @@ enum NativeFactoryTraining {
     }
     static func settingsJSON(_ s: TrainingSettings) -> [String: Any] {
         ["image_size": s.imageSize, "model_architecture": s.modelArchitecture,
+         "scalar_loss": s.scalarLoss.rawValue,
          "width": s.modelWidth, "blocks": s.modelBlocks, "epochs": s.epochs,
          "batch_size": s.batchSize, "learning_rate": s.learningRate, "shuffle_each_epoch": s.shuffleEachEpoch,
          "flip_crops": s.flipCrops, "rotate_crops": s.rotateCrops, "exaggerate_features": s.exaggerateFeatures,

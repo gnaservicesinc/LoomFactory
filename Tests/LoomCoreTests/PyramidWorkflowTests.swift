@@ -23,6 +23,7 @@ final class PyramidWorkflowTests: XCTestCase {
         XCTAssertEqual(artifact.architecture, NativeArchitecture.pyramidIdentifier)
         let request = try NativeFactoryTraining.json(artifact.directory.appendingPathComponent("request.json"))
         XCTAssertEqual(request["model_architecture"] as? String, NativeArchitecture.pyramidIdentifier)
+        XCTAssertEqual(request["scalar_loss"] as? String, NativeScalarLoss.logitCrossEntropyV2.rawValue)
         let descriptor = try NativeFactoryTraining.json(artifact.directory.appendingPathComponent("model.json"))
         let architecture = try TrainingRunFiles.nativeArchitecture(from: descriptor, map: .depth)
         XCTAssertEqual(architecture.identifier, NativeArchitecture.pyramidIdentifier)
@@ -36,6 +37,8 @@ final class PyramidWorkflowTests: XCTestCase {
         XCTAssertEqual(checkpoint["architecture"] as? String, NativeArchitecture.pyramidIdentifier)
         XCTAssertEqual((checkpoint["settings"] as? [String: Any])?["model_architecture"] as? String,
             NativeArchitecture.pyramidIdentifier)
+        XCTAssertEqual((checkpoint["settings"] as? [String: Any])?["scalar_loss"] as? String,
+            NativeScalarLoss.logitCrossEntropyV2.rawValue)
         let checkpointPath = artifact.directory.appendingPathComponent(try XCTUnwrap(checkpoint["weights_path"] as? String))
         let before = try Data(contentsOf: checkpointPath)
         var requestedContinuation = settings
@@ -55,6 +58,7 @@ final class PyramidWorkflowTests: XCTestCase {
         XCTAssertEqual(versions.count, 2)
         XCTAssertTrue(versions.allSatisfy { $0.settings?.modelArchitecture == NativeArchitecture.pyramidIdentifier })
         XCTAssertTrue(versions.allSatisfy { $0.checkpoint?.modelArchitecture == NativeArchitecture.pyramidIdentifier })
+        XCTAssertTrue(versions.allSatisfy { $0.settings?.scalarLoss == .logitCrossEntropyV2 && $0.checkpoint?.scalarLoss == .logitCrossEntropyV2 })
         XCTAssertEqual(versions.first { $0.id == continued.id }?.lineage?.source, .checkpoint)
         for (url, bytes) in originals { XCTAssertEqual(try Data(contentsOf: url), bytes) }
     }

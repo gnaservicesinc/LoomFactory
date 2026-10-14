@@ -17,6 +17,25 @@ precision contract. The network picker also permits the original residual
 architecture. Saved identities are checked rather than inferred from width or
 parameter count, and unknown or contradictory descriptors are rejected.
 
+Scalar training has an explicit, independently versioned loss contract. Fresh
+Factory depth and roughness runs use `logit-cross-entropy-v2`: soft-target binary
+cross-entropy computed directly from pre-sigmoid logits. Its derivative is
+`sigmoid(logit) - target`, preserving a teaching signal when an incorrect scalar
+prediction has saturated to white or black. Its stable expression multiplies
+the positive and negative parts of the logit by `(1-target)` and `target`, then
+adds `log(1+exp(-abs(z)))`. This avoids subtracting large products near target
+endpoints; its exponential cannot overflow and its derivative is correct at zero.
+Targets retain their original numeric values. Normal products keep their
+existing cosine loss.
+
+Training settings, run requests, checkpoints and exports record `scalar_loss`.
+Absent loss identities mean legacy `absolute-v1` (mean absolute error after
+sigmoid), and continuing a saved run preserves its recorded objective. The loss
+version changes training behavior without changing either registered inference
+architecture, checkpoint tensor shapes or Core ML output interpretation. V2 loss
+values include target entropy and must not be compared numerically with V1 L1
+values. Original saved runs and source images remain untouched.
+
 Training runs outside the project actor so the Stop action can signal a locked
 cancellation token immediately. Pixel decoding, conversion and crop loops check
 the token, as do GPU boundaries. An already submitted GPU operation finishes
@@ -60,3 +79,12 @@ image precision and native export. `LoomNativeProbe` is an optional Release
 benchmark tool. Execution tests and timings do not qualify learned output on
 unseen materials. Large-grid performance must be measured at the intended
 architecture and image dimensions.
+
+`NativeScalarLossTests` verifies analytic corrective gradients for saturated
+white and black predictions, zero and extreme logits, unchanged normal training,
+and exact optimizer-state continuation. Its saved-failure regression is opt-in:
+set `LOOM_NATIVE_ROUGHNESS_RUN_DIRECTORY` to an exported collapsed roughness run,
+`LOOM_NATIVE_ROUGHNESS_INPUT` and `LOOM_NATIVE_ROUGHNESS_TARGET` to its untouched
+1K teaching pair, then run `swift test --filter NativeScalarLossTests`. The test
+uses a 64-pixel diagnostic crop and updates only in-memory copies of the saved
+weights. This proves a recoverable teaching signal, not whole-material quality.

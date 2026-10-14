@@ -56,6 +56,7 @@ struct ModelVersionControlsTests {
         #expect(model.trainingStart == .model(runID: oldest.id))
         #expect(model.effectiveTrainingSettings.modelWidth == oldest.settings?.modelWidth)
         #expect(model.effectiveTrainingSettings.imageSize == oldest.settings?.imageSize)
+        #expect(model.effectiveTrainingSettings.scalarLoss == oldest.settings?.scalarLoss)
         #expect(model.effectiveTrainingSettings.learningRate == 0.02)
         #expect(model.effectiveTrainingSettings.optimizer == .sgd)
         #expect(model.canTrain)
@@ -263,6 +264,7 @@ private struct VersionControlsFixture {
                 "schema": "loom-factory-model-v1", "project_id": snapshot.projectID, "kind": "map",
                 "dataset_id": datasetID, "dataset_name": "Bricks", "map": "depth", "status": "completed",
                 "architecture": "loom-factory-material-residual-v1", "architecture_config": architecture,
+                "input_name": "rgb", "output_name": "material_map",
                 "image_size": imageSize, "weights_path": "weights.safetensors", "coreml_path": "model.mlmodel",
                 "training": nativeSettings
             ]

@@ -13,6 +13,7 @@ final class TrainingSettingsTests: XCTestCase {
         let settings = try JSONDecoder().decode(TrainingSettings.self, from: json)
         XCTAssertEqual(settings.imageSize, 2048); XCTAssertEqual(settings.modelWidth, 24)
         XCTAssertEqual(settings.modelArchitecture, NativeArchitecture.identifier)
+        XCTAssertEqual(settings.scalarLoss, .absoluteV1)
         XCTAssertEqual(settings.epochs, 37); XCTAssertEqual(settings.learningRate, 0.0007)
         XCTAssertFalse(settings.shuffleEachEpoch); XCTAssertTrue(settings.flipCrops)
         XCTAssertEqual(settings.optimizer, .adamW); XCTAssertEqual(settings.gradientAccumulationSteps, 1)
@@ -50,6 +51,7 @@ final class TrainingSettingsTests: XCTestCase {
     func testNewProjectsUsePyramidAndParameterCountMatchesItsNativeConstructor() throws {
         let settings = TrainingSettings()
         XCTAssertEqual(settings.modelArchitecture, NativeArchitecture.pyramidIdentifier)
+        XCTAssertEqual(settings.scalarLoss, .logitCrossEntropyV2)
         XCTAssertEqual(settings.modelWidth, 38)
         for map in MapRole.targets {
             let architecture = try NativeArchitecture(mapKind: map.rawValue, width: settings.modelWidth,

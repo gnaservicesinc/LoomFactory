@@ -87,6 +87,15 @@ final class TrainingCheckpointControlTests: XCTestCase {
             current: ["epochs": 500, "checkpoint_every_epochs": 100, "batch_size": 1, "seed": 3]))
     }
 
+    func testLegacyCheckpointLossDefaultsPreventMixingObjectiveHistories() {
+        let saved: [String: Any] = ["optimizer": "adamw", "epochs": 500]
+        let legacy: [String: Any] = ["optimizer": "adamw", "epochs": 500, "scalar_loss": "absolute-v1"]
+        var stable = legacy; stable["scalar_loss"] = "logit-cross-entropy-v2"
+        XCTAssertTrue(TrainingCheckpointCursor.compatibleSettings(saved, current: legacy))
+        XCTAssertFalse(TrainingCheckpointCursor.compatibleSettings(saved, current: stable))
+        XCTAssertFalse(TrainingCheckpointCursor.compatibleSettings(saved, current: stable, keys: ["optimizer", "scalar_loss"]))
+    }
+
     private func waitForPending(_ control: TrainingRunControl) async throws {
         for _ in 0..<1_000 {
             if control.hasPendingRequest { return }

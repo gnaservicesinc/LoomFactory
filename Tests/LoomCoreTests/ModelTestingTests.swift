@@ -118,6 +118,57 @@ final class ModelTestingTests: XCTestCase {
         XCTAssertThrowsError(try fixture.selection(.checkpoint))
     }
 
+    func testScalarEndpointPredictionsReportSaturationAndPreserveFloatPixels() throws {
+        let fixture = try Fixture(map: .roughness); defer { fixture.remove() }
+        let selection = try fixture.selection(.model)
+        for (value, endpoint) in [(Float(0), "black"), (Float(1), "white")] {
+            let output = fixture.root.appendingPathComponent("outputs/" + endpoint)
+            let result = try ModelTestWorker.run(model: selection, inputURL: fixture.input, output: output,
+                cancellation: NativeCancellation(), progress: { _ in }) { _, h, w in
+                    [Float](repeating: value, count: h * w)
+                }
+            XCTAssertTrue(result.note.hasPrefix("The model produced an almost entirely \(endpoint) map"))
+            let decoded = try NativeImages.readTarget(from: result.outputURL, mapKind: "roughness")
+            XCTAssertTrue(decoded.values.allSatisfy { $0 == value }, "Diagnostics must not rescale endpoint pixels")
+            let record = try NativeFactoryTraining.json(output.appendingPathComponent("test.json"))
+            let statistics = try XCTUnwrap(record["output_statistics"] as? [String: Any])
+            XCTAssertEqual(statistics["minimum"] as? Double, Double(value))
+            XCTAssertEqual(statistics["maximum"] as? Double, Double(value))
+            XCTAssertEqual(statistics["mean"] as? Double, Double(value))
+            XCTAssertEqual(statistics["near_\(endpoint)_fraction"] as? Double, 1)
+            XCTAssertEqual(statistics["value_count"] as? Int, fixture.width * fixture.height)
+            XCTAssertNotNil(record["output_diagnostic"] as? String)
+        }
+    }
+
+    func testBrightTexturedPredictionReportsNumericRangeWithoutSaturationAlert() throws {
+        let fixture = try Fixture(map: .roughness); defer { fixture.remove() }
+        let selection = try fixture.selection(.model)
+        let output = fixture.root.appendingPathComponent("outputs/bright-texture")
+        let result = try ModelTestWorker.run(model: selection, inputURL: fixture.input, output: output,
+            cancellation: NativeCancellation(), progress: { _ in }) { _, h, w in
+                (0..<(h * w)).map { $0.isMultiple(of: 2) ? Float(0.98) : Float(1) }
+            }
+        XCTAssertFalse(result.note.contains("Training may have saturated"))
+        let record = try NativeFactoryTraining.json(output.appendingPathComponent("test.json"))
+        let statistics = try XCTUnwrap(record["output_statistics"] as? [String: Any])
+        XCTAssertEqual(try XCTUnwrap(statistics["minimum"] as? Double), 0.98, accuracy: 1e-6)
+        XCTAssertEqual(statistics["maximum"] as? Double, 1)
+        XCTAssertGreaterThan(try XCTUnwrap(statistics["mean"] as? Double), 0.98)
+        XCTAssertLessThan(try XCTUnwrap(statistics["near_white_fraction"] as? Double), 0.999)
+        XCTAssertTrue(record["output_diagnostic"] is NSNull)
+        let decoded = try NativeImages.readTarget(from: result.outputURL, mapKind: "roughness")
+        XCTAssertEqual(decoded.values.min()!, 0.98, accuracy: 2e-5)
+        XCTAssertEqual(decoded.values.max(), 1)
+    }
+
+    func testEndpointStatisticsRecognizeNearWhiteFloatsAndExcludeNormalMaps() throws {
+        let statistics = try ModelTestOutputStatistics(values: [0.999994, 1, 0.999999], cancellation: NativeCancellation())
+        XCTAssertEqual(statistics.nearWhiteFraction, 1)
+        XCTAssertNotNil(statistics.saturationNote(map: .roughness))
+        XCTAssertNil(statistics.saturationNote(map: .normal))
+    }
+
     func testCancellationAndChangedOriginalLeaveNoPublishedOrPartialOutput() throws {
         let fixture = try Fixture(); defer { fixture.remove() }
         let selection = try fixture.selection(.checkpoint)
@@ -182,8 +233,10 @@ final class ModelTestingTests: XCTestCase {
         let root: URL, input: URL, run: URL
         let runID = "saved-model-test", datasetID = "bricks", projectID: String
         let width = 73, height = 49
+        let map: MapRole
 
-        init() throws {
+        init(map: MapRole = .depth) throws {
+            self.map = map
             let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("model-test-" + UUID().uuidString)
             try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
             project = try LoomProject(sourceFolder: temporary)
@@ -196,7 +249,7 @@ final class ModelTestingTests: XCTestCase {
                 width: width, height: height, to: input)
             run = project.projectFolder.appendingPathComponent("runs/" + runID)
             try FileManager.default.createDirectory(at: run, withIntermediateDirectories: true)
-            let architecture = try NativeArchitecture(mapKind: "depth", width: 8, blocks: 1)
+            let architecture = try NativeArchitecture(mapKind: map.rawValue, width: 8, blocks: 1)
             let weights = Dictionary(uniqueKeysWithValues: architecture.parameterShapes.map { name, shape in
                 (name, NativeTensor(shape: shape, values: [Float](repeating: 0, count: shape.reduce(1, *))))
             })
@@ -207,7 +260,7 @@ final class ModelTestingTests: XCTestCase {
                 let weightFile = run.appendingPathComponent(filename + ".safetensors")
                 try NativeWeights.write(weights, to: weightFile)
                 try NativeFactoryTraining.writeJSON(["schema": "loom-factory-\(filename)-v1", "status": "completed",
-                    "project_id": projectID, "dataset_id": datasetID, "kind": "map", "map": "depth",
+                    "project_id": projectID, "dataset_id": datasetID, "kind": "map", "map": map.rawValue,
                     "architecture": architecture.identifier, "architecture_config": architecture.descriptor,
                     "weights_path": filename + ".safetensors", "weights_sha256": TrainingRunFiles.sha256(weightFile),
                     "image_size": 32, (source == .checkpoint ? "settings" : "training"): settings],
@@ -216,7 +269,7 @@ final class ModelTestingTests: XCTestCase {
         }
 
         func selection(_ source: TrainingWeightSource) throws -> ModelTestSelection {
-            try ModelTestSelection.load(runID: runID, source: source, datasetID: datasetID, map: .depth,
+            try ModelTestSelection.load(runID: runID, source: source, datasetID: datasetID, map: map,
                 projectFolder: project.projectFolder, projectID: projectID)
         }
         func remove() { try? FileManager.default.removeItem(at: root) }

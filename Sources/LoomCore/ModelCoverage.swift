@@ -72,6 +72,8 @@ public struct ModelCoverageEntry: Identifiable, Sendable, Equatable {
     public let effectiveRunID: String?
     public let status: ModelCoverageStatus
     public let detail: String?
+    /// Saved training runs without a completed deployment artifact.
+    /// A completed model's continuation checkpoint is not a second version.
     public let checkpointCount: Int
     public let pairCount: Int
     public var id: String { slot.id }
@@ -219,7 +221,11 @@ extension LoomProject {
             return ModelCoverageEntry(slot: slot, groupName: groupName,
                 isRequired: management.requirements.first { $0.slot == slot }?.required ?? true,
                 candidates: candidates, selectedRunID: chosen, effectiveRunID: effective, status: status, detail: detail,
-                checkpointCount: checkpoints.filter { $0.datasetID == slot.datasetID && $0.map == slot.product.map }.count,
+                checkpointCount: checkpoints.filter { checkpoint in
+                    checkpoint.datasetID == slot.datasetID && checkpoint.map == slot.product.map &&
+                        !matching.contains { $0.directory.standardizedFileURL.resolvingSymlinksInPath().path ==
+                            checkpoint.directory.standardizedFileURL.resolvingSymlinksInPath().path }
+                }.count,
                 pairCount: pairCount)
         }
     }

@@ -47,6 +47,16 @@ struct ModelCoveragePresentation {
         if let chosen, chosen.isAvailable { return !chosen.isApproved || chosen.approvalIsStale }
         return entry.approvedCount == 0
     }
+    var modelCounts: String {
+        "\(entry.availableCount) completed \(entry.availableCount == 1 ? "model" : "models") · \(entry.approvedCount) approved"
+    }
+    var checkpointCounts: String? {
+        guard entry.checkpointCount > 0 else { return nil }
+        return "\(entry.checkpointCount) saved \(entry.checkpointCount == 1 ? "checkpoint" : "checkpoints")"
+    }
+    var detailCounts: String {
+        [modelCounts, checkpointCounts].compactMap { $0 }.joined(separator: " · ")
+    }
     var title: String {
         if entry.selectedRunID != nil && chosen?.isAvailable != true { return "Chosen model unavailable" }
         if isReady { return "Ready for use" }
@@ -192,8 +202,11 @@ struct ModelCoverageView: View {
                 Label(state.title, systemImage: state.symbol)
                     .font(.caption.weight(.semibold)).foregroundStyle(state.color)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("\(entry.availableCount) \(entry.availableCount == 1 ? "model" : "models") · \(entry.approvedCount) approved")
+                Text(state.modelCounts)
                     .font(.caption).foregroundStyle(.secondary)
+                if let checkpoints = state.checkpointCounts {
+                    Text(checkpoints).font(.caption).foregroundStyle(.secondary)
+                }
                 Text(entry.isRequired ? (entry.usesLatestByDefault ? "Latest default" : (entry.selectedRunID == nil ? "Required" : "Model chosen")) : "Optional")
                     .font(.caption2).foregroundStyle(.secondary)
             }.padding(11).frame(maxWidth: .infinity, minHeight: 78, alignment: .leading)
@@ -202,7 +215,7 @@ struct ModelCoverageView: View {
                 .contentShape(RoundedRectangle(cornerRadius: 9))
         }.buttonStyle(.plain)
             .help("Manage \(entry.groupName) · \(entry.slot.product.displayName)")
-            .accessibilityLabel("\(entry.groupName), \(entry.slot.product.displayName), \(state.title), \(entry.availableCount) models, \(entry.approvedCount) approved")
+            .accessibilityLabel("\(entry.groupName), \(entry.slot.product.displayName), \(state.title), \(state.detailCounts)")
             .accessibilityIdentifier("coverage.slot.\(entry.id)")
     }
 
@@ -265,30 +278,21 @@ struct ModelCoverageView: View {
             }
             let checkpoints = unfinishedVersions(entry)
             if !checkpoints.isEmpty {
-                DisclosureGroup("Unfinished training runs (\(checkpoints.count))") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        ForEach(checkpoints) { version in
-                            HStack {
-                                Text(ModelVersionPresentation.title(version)).font(.callout)
-                                Spacer()
-                                Button("Continue checkpoint") {
-                                    selectTrainingContext(entry)
-                                    model.continueModelVersion(version, source: .checkpoint)
-                                    model.workspaceSection = .training
-                                }.disabled(model.busy)
-                                    .accessibilityIdentifier("coverage.continueCheckpoint.\(version.id)")
-                                Button("Test model") { model.showModelTesting(version) }.disabled(model.busy)
-                            }
-                        }
-                    }.padding(.top, 8)
-                }.font(.callout)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Saved checkpoints (\(checkpoints.count))").font(.callout.weight(.semibold))
+                    Text("These saved training versions can be tested or continued. Complete training to create a model for approval and package use.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    ForEach(checkpoints) { version in
+                        ModelCoverageCheckpointRow(model: model, version: version)
+                    }
+                }.accessibilityIdentifier("coverage.checkpoints.\(entry.id)")
             }
         }.accessibilityIdentifier("coverage.detail.\(entry.id)")
     }
 
     private func detailSubtitle(_ entry: ModelCoverageEntry) -> String {
         let state = ModelCoveragePresentation(entry)
-        return "\(state.title) · \(entry.availableCount) available \(entry.availableCount == 1 ? "model" : "models") · \(entry.approvedCount) approved"
+        return "\(state.title) · \(state.detailCounts)"
     }
     private func groupName(_ datasetID: String) -> String {
         model.snapshot?.datasets.first { $0.id == datasetID }?.name ?? datasetID
@@ -309,6 +313,47 @@ struct ModelCoverageView: View {
     private func selectTrainingContext(_ entry: ModelCoverageEntry) {
         if let datasetID = entry.slot.datasetID { model.selectedDatasetID = datasetID }
         if let map = entry.slot.product.map { model.selectedMap = map }
+    }
+}
+
+struct ModelCoverageCheckpointRow: View {
+    @Bindable var model: FactoryModel
+    let version: ModelVersion
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(ModelVersionPresentation.title(version)).font(.callout.weight(.semibold)).textSelection(.enabled)
+                    Text("\(version.status.capitalized) · \((version.checkpoint?.epochsCompleted ?? 0).formatted()) saved epochs")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                FactoryStatus(text: "Saved checkpoint", symbol: "pause.circle", color: .secondary)
+            }
+            if let settings = version.settings {
+                Text(ModelVersionPresentation.summary(settings, map: version.map)).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 10) {
+                Button("Continue checkpoint", action: continueTraining).disabled(model.busy)
+                    .accessibilityIdentifier("coverage.continueCheckpoint.\(version.id)")
+                Button("Test checkpoint") { model.showModelTesting(version) }.disabled(model.busy)
+                    .accessibilityIdentifier("coverage.testCheckpoint.\(version.id)")
+                Spacer(minLength: 0)
+                Button("Show folder") { model.reveal(version.directory) }
+                    .accessibilityIdentifier("coverage.revealCheckpoint.\(version.id)")
+            }.controlSize(.small)
+        }.padding(13).frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
+            .accessibilityIdentifier("coverage.checkpoint.\(version.id)")
+    }
+
+    @MainActor func continueTraining() {
+        model.selectedDatasetID = version.datasetID
+        model.selectedMap = version.map
+        model.continueModelVersion(version, source: .checkpoint)
+        model.workspaceSection = .training
     }
 }
 
@@ -349,7 +394,7 @@ struct ModelCoverageCandidateRow: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let settings = version?.settings {
-                Text(ModelVersionPresentation.summary(settings)).font(.caption).foregroundStyle(.secondary)
+                Text(ModelVersionPresentation.summary(settings, map: version?.map)).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 10) {

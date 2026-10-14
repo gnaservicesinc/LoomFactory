@@ -67,16 +67,20 @@ private final class NativeBatchGraph {
     var accumulators: [String: MPSGraphTensor] = [:]
     var accumulated: [String: MPSGraphTensor] = [:]
     init(shape: NativeBatchShape, architecture: NativeArchitecture, shapes: [String: [Int]],
-         trainable: Set<String>, adapter: NativeAdapterConfiguration?, channelsLast: Bool) {
+         trainable: Set<String>, adapter: NativeAdapterConfiguration?, channelsLast: Bool,
+         scalarLoss: NativeScalarLoss) {
         input = graph.placeholder(shape: [shape.batch, 3, shape.height, shape.width].map(NSNumber.init(value:)), dataType: .float32, name: "rgb")
         target = graph.placeholder(shape: [shape.batch, architecture.outputChannels, shape.height, shape.width].map(NSNumber.init(value:)), dataType: .float32, name: "target")
         weight = graph.placeholder(shape: [], dataType: .float32, name: "accumulation_weight")
         for name in shapes.keys.sorted() {
             parameters[name] = graph.placeholder(shape: shapes[name]!.map(NSNumber.init(value:)), dataType: .float32, name: name)
         }
-        prediction = graph.materialNetwork(input: input, architecture: architecture, parameters: parameters,
+        let logits = graph.materialLogits(input: input, architecture: architecture, parameters: parameters,
             adapter: adapter, channelsLast: channelsLast)
-        loss = graph.materialLoss(prediction: prediction, target: target, mapKind: architecture.mapKind)
+        prediction = graph.materialPrediction(logits: logits, architecture: architecture)
+        loss = architecture.mapKind != "normal" && scalarLoss == .logitCrossEntropyV2
+            ? graph.scalarLogitCrossEntropy(logits: logits, target: target)
+            : graph.materialLoss(prediction: prediction, target: target, mapKind: architecture.mapKind)
         let weightedLoss = graph.multiplication(loss, weight, name: nil)
         let names = trainable.sorted()
         let gradients = graph.gradients(of: weightedLoss, with: names.map { parameters[$0]! }, name: nil)
@@ -470,7 +474,8 @@ public final class NativeTrainingSession {
         if let compiled = batchGraphs[shape] { return compiled }
         try cancellation.check()
         let compiled = NativeBatchGraph(shape: shape, architecture: architecture, shapes: shapes,
-            trainable: Set(trainableShapes.keys), adapter: adapter, channelsLast: channelsLast)
+            trainable: Set(trainableShapes.keys), adapter: adapter, channelsLast: channelsLast,
+            scalarLoss: options.scalarLoss)
         // Native-resolution batches normally have one or two sizes. Bound graph
         // cache growth when a caller evaluates many differing dimensions.
         if batchGraphs.count >= 4 { batchGraphs.removeAll() }

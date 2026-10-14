@@ -25,6 +25,34 @@ final class ModelCoverageTests: XCTestCase {
         XCTAssertTrue(depth.candidates.allSatisfy { !$0.isSelected })
     }
 
+    func testCoverageCountsUnfinishedCheckpointsWithoutDoubleCountingCompletedVersions() async throws {
+        let fixture = try await Fixture(); defer { fixture.remove() }
+        func checkpoint(_ runID: String, map: MapRole = .depth) -> TrainingCheckpoint {
+            TrainingCheckpoint(directory: fixture.project.projectFolder.appendingPathComponent("runs/" + runID),
+                datasetID: fixture.dataset.id, map: map, modelWidth: 8, modelBlocks: 1,
+                imageSize: 32, exaggerateFeatures: false, epochsCompleted: 19, status: "cancelled", modifiedAt: .now)
+        }
+        let unfinished = [checkpoint("cancelled-depth"), checkpoint("interrupted-depth")]
+        let entries = try await fixture.project.loadModelCoverage(datasets: [fixture.dataset], artifacts: [],
+            checkpoints: unfinished + [checkpoint("normal-checkpoint", map: .normal)])
+        let depth = try XCTUnwrap(entries.first { $0.slot.product == .depth })
+        XCTAssertEqual(depth.availableCount, 0, "Checkpoints cannot satisfy deployment model coverage")
+        XCTAssertEqual(depth.checkpointCount, 2)
+        XCTAssertNil(depth.effectiveRunID)
+        XCTAssertEqual(entries.first { $0.slot.product == .normal }?.checkpointCount, 1)
+
+        let artifact = try fixture.artifact("completed-depth", date: .now)
+        let continuation = checkpoint("completed-depth")
+        XCTAssertNotEqual(artifact.directory.absoluteString, continuation.directory.absoluteString,
+            "This fixture covers equivalent directory URLs with different trailing-slash representations")
+        let completed = try await fixture.project.loadModelCoverage(datasets: [fixture.dataset], artifacts: [artifact],
+            checkpoints: unfinished + [continuation])
+        let completedDepth = try XCTUnwrap(completed.first { $0.slot.product == .depth })
+        XCTAssertEqual(completedDepth.availableCount, 1)
+        XCTAssertEqual(completedDepth.checkpointCount, 2, "A completed model's continuation checkpoint is the same saved version")
+        XCTAssertEqual(completedDepth.candidates.map(\.id), ["completed-depth"])
+    }
+
     func testLegacyMapSelectionAndIndependentApprovalsRestoreWithoutChangingRuns() async throws {
         let fixture = try await Fixture(); defer { fixture.remove() }
         let old = try fixture.artifact("old", date: Date(timeIntervalSince1970: 10))

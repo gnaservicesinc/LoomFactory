@@ -129,3 +129,51 @@ enum ModelTestImage {
         guard CGImageDestinationFinalize(destination) else { throw LoomError("Could not save the full-resolution model test output.") }
     }
 }
+
+/// Statistics describe the unchanged Float32 prediction, independently of its
+/// PNG preview. Endpoint checks apply to scalar maps; normal components can
+/// legitimately contain endpoints without representing a white or black map.
+struct ModelTestOutputStatistics {
+    static let endpointTolerance = 1e-5
+    let minimum: Float
+    let maximum: Float
+    let mean: Double
+    let nearWhiteFraction: Double
+    let nearBlackFraction: Double
+    let valueCount: Int
+
+    init(values: [Float], cancellation: NativeCancellation) throws {
+        guard !values.isEmpty else { throw LoomError("Cannot inspect an empty model output.") }
+        var minimum = Float.greatestFiniteMagnitude, maximum = -Float.greatestFiniteMagnitude
+        var sum: Double = 0, nearWhite = 0, nearBlack = 0
+        for (index, value) in values.enumerated() {
+            if index % 65536 == 0 { try cancellation.check() }
+            guard value.isFinite else { throw LoomError("Cannot inspect non-finite model output pixels.") }
+            minimum = min(minimum, value); maximum = max(maximum, value)
+            let numeric = Double(value)
+            sum += numeric
+            if abs(1 - numeric) <= Self.endpointTolerance { nearWhite += 1 }
+            if abs(numeric) <= Self.endpointTolerance { nearBlack += 1 }
+        }
+        self.minimum = minimum; self.maximum = maximum
+        valueCount = values.count
+        mean = sum / Double(valueCount)
+        nearWhiteFraction = Double(nearWhite) / Double(valueCount)
+        nearBlackFraction = Double(nearBlack) / Double(valueCount)
+    }
+
+    var record: [String: Any] {
+        ["minimum": minimum, "maximum": maximum, "mean": mean,
+         "near_white_fraction": nearWhiteFraction, "near_black_fraction": nearBlackFraction,
+         "endpoint_tolerance": Self.endpointTolerance, "value_count": valueCount]
+    }
+
+    func saturationNote(map: MapRole) -> String? {
+        guard map == .depth || map == .roughness else { return nil }
+        let endpoint: String
+        if nearWhiteFraction > 0.999 { endpoint = "white" }
+        else if nearBlackFraction > 0.999 { endpoint = "black" }
+        else { return nil }
+        return "The model produced an almost entirely \(endpoint) map: over 99.9% of values are within 0.00001 of the endpoint. Training may have saturated."
+    }
+}

@@ -62,6 +62,8 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     public var exaggerateFeatures: Bool
     public var seed: Int
     public var modelArchitecture: String
+    /// Immutable training objective; inference architecture and pixels stay unchanged.
+    public var scalarLoss: NativeScalarLoss
     public var modelWidth: Int
     public var continueLatestWeights: Bool?
     public var modelBlocks: Int
@@ -103,12 +105,14 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
                 augmentationRefresh: TrainingRefresh = .perEpoch, device: TrainingDevice = .automatic,
                 validationFraction: Double = 0.1, validationSeed: Int = 42, earlyStoppingPatience: Int = 0,
                 exportBestWeights: Bool = true, checkpointEveryEpochs: Int = 1,
-                modelArchitecture: String = NativeArchitecture.pyramidIdentifier) {
+                modelArchitecture: String = NativeArchitecture.pyramidIdentifier,
+                scalarLoss: NativeScalarLoss = .logitCrossEntropyV2) {
         self.imageSize = imageSize; self.epochs = epochs; self.batchSize = batchSize
         self.learningRate = learningRate; self.shuffleEachEpoch = shuffleEachEpoch
         self.flipCrops = flipCrops; self.rotateCrops = rotateCrops
         self.exaggerateFeatures = exaggerateFeatures; self.seed = seed; self.modelWidth = modelWidth
         self.modelArchitecture = modelArchitecture
+        self.scalarLoss = scalarLoss
         self.continueLatestWeights = continueLatestWeights; self.modelBlocks = modelBlocks
         self.optimizer = optimizer; self.weightDecay = weightDecay; self.beta1 = beta1
         self.beta2 = beta2 ?? (optimizer == .lion ? 0.99 : 0.999); self.momentum = momentum
@@ -139,6 +143,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     /// Switching a saved project's fresh run keeps its approximate capacity,
     /// while its saved checkpoints keep their exact recorded architecture.
     public mutating func usePyramidForFreshRun(map: MapRole) {
+        if map != .normal { scalarLoss = .logitCrossEntropyV2 }
         guard modelArchitecture != NativeArchitecture.pyramidIdentifier else { return }
         let budget = parameterCount(map: map)
         modelArchitecture = NativeArchitecture.pyramidIdentifier
@@ -182,7 +187,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case imageSize, epochs, batchSize, learningRate, shuffleEachEpoch, flipCrops, rotateCrops, exaggerateFeatures, seed, modelWidth, continueLatestWeights
-        case modelArchitecture, modelBlocks, optimizer, weightDecay, beta1, beta2, momentum, gradientAccumulationSteps, gradientClipNorm
+        case modelArchitecture, scalarLoss, modelBlocks, optimizer, weightDecay, beta1, beta2, momentum, gradientAccumulationSteps, gradientClipNorm
         case gradientClipPolicy, gradientClipWarmupStartNorm, gradientClipWarmupUpdates
         case learningRateSchedule, warmupEpochs, minimumLearningRateRatio, cropRefresh, augmentationRefresh, device
         case validationFraction, validationSeed, earlyStoppingPatience, exportBestWeights, checkpointEveryEpochs
@@ -202,6 +207,8 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
         // Absence identifies the original full-resolution architecture. Never
         // reinterpret an existing run's width as a pyramid channel count.
         modelArchitecture = try c.decodeIfPresent(String.self, forKey: .modelArchitecture) ?? NativeArchitecture.identifier
+        // Missing IDs identify the original sigmoid/L1 training contract.
+        scalarLoss = try c.decodeIfPresent(NativeScalarLoss.self, forKey: .scalarLoss) ?? .absoluteV1
         modelWidth = try c.decodeIfPresent(Int.self, forKey: .modelWidth)
             ?? (modelArchitecture == NativeArchitecture.identifier ? 84 : d.modelWidth)
         continueLatestWeights = try c.decodeIfPresent(Bool.self, forKey: .continueLatestWeights) ?? false

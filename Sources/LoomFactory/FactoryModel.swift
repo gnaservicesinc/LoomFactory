@@ -251,12 +251,15 @@ final class FactoryModel {
                 value.modelArchitecture = saved.modelArchitecture
                 value.modelWidth = saved.modelWidth; value.modelBlocks = saved.modelBlocks
                 value.imageSize = saved.imageSize; value.exaggerateFeatures = saved.exaggerateFeatures
+                value.scalarLoss = saved.scalarLoss
             } else if effectiveStartMode == .checkpoint, let checkpoint = selectedCheckpoint {
                 value.modelArchitecture = checkpoint.modelArchitecture
                 value.modelWidth = checkpoint.modelWidth; value.modelBlocks = checkpoint.modelBlocks
                 value.imageSize = checkpoint.imageSize; value.exaggerateFeatures = checkpoint.exaggerateFeatures
+                value.scalarLoss = checkpoint.scalarLoss
             }
         }
+        if !continuingTraining && selectedMap != .normal { value.scalarLoss = .logitCrossEntropyV2 }
         return value
     }
     var trainingOptionsIssue: String? {

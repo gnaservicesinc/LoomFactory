@@ -119,6 +119,8 @@ enum ModelTestWorker {
         let plan = try ModelTestTilePlan(width: image.width, height: image.height, tileSize: tileSize)
         let pixels = try ModelTestImage.predict(image: image, plan: plan, map: model.map,
             cancellation: cancellation, progress: progress, predictor: predictor)
+        let statistics = try ModelTestOutputStatistics(values: pixels, cancellation: cancellation)
+        let saturationNote = statistics.saturationNote(map: model.map)
         try cancellation.check()
         let parent = output.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
@@ -136,7 +138,8 @@ enum ModelTestWorker {
         guard model.weightsSHA256 == (try NativeFactoryTraining.sha(model.weightsURL, cancellation: cancellation)) else {
             throw LoomError("The saved weights changed during testing. Choose the version again.")
         }
-        let note = "Original \(image.width) × \(image.height) resolution; \(plan.tiles.count) overlapping native tile\(plan.tiles.count == 1 ? "" : "s"). "
+        let note = (saturationNote.map { $0 + " " } ?? "")
+            + "Original \(image.width) × \(image.height) resolution; \(plan.tiles.count) overlapping native tile\(plan.tiles.count == 1 ? "" : "s"). "
             + "Overlap blending can differ from whole-image inference. "
             + (model.map == .normal ? "OpenGL normal vectors are normalized after blending. " : "")
             + "PNG uses fixed [0,1] values quantized to 16 bits, without per-output normalization."
@@ -144,6 +147,8 @@ enum ModelTestWorker {
             "weight_source": model.source.rawValue, "dataset_id": model.datasetID, "map": model.map.rawValue,
             "architecture": model.architecture.identifier, "input_path": original.path, "input_sha256": inputHash,
             "weights_sha256": model.weightsSHA256, "output_path": name,
+            "output_statistics": statistics.record,
+            "output_diagnostic": saturationNote as Any? ?? NSNull(),
             "width": image.width, "height": image.height, "tile_size": tileSize, "tile_count": plan.tiles.count,
             "overlap": plan.overlap, "stitching": "linear-feather-overlap-v1",
             "normal_convention": model.map == .normal ? "OpenGL" as Any : NSNull(),

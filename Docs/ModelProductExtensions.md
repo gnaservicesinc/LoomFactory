@@ -27,6 +27,16 @@ version. Architecture constructors should be registered by immutable IDs. Unknow
 IDs must be rejected, rather than interpreted as the current residual network.
 Continuation and adapters must still match the actual architecture and weights.
 
+Scalar training objectives have independent immutable IDs: `absolute-v1`
+preserves the original sigmoid/L1 objective and `logit-cross-entropy-v2`
+trains from pre-sigmoid logits to retain gradients at saturated endpoints.
+The objective ID is recorded in run settings, requests, checkpoints and exported
+model descriptors. Missing IDs identify v1. Fresh scalar runs use v2; continuation
+retains the saved objective. Objective changes must start a separate loss history
+and optimizer state. These objectives share the exact same inference graph,
+tensor interface and architecture IDs, so changing the objective does not
+reinterpret existing weights or require another inference constructor.
+
 For a product that needs several stages, introduce an ordered, versioned stage
 plan with the product's real package contract. Each stage declares its inputs,
 outputs, model artifact, required or optional status, and when it should run. An

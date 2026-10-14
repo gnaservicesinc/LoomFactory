@@ -17,6 +17,7 @@ public struct TrainingCheckpoint: Identifiable, Sendable, Equatable {
     public let modifiedAt: Date
     public var updatesCompleted: Int = 0
     public var restoresOptimizer: Bool = false
+    public var scalarLoss: NativeScalarLoss = .absoluteV1
     public var parameterCount: Int { TrainingSettings(modelWidth: modelWidth, modelBlocks: modelBlocks,
         modelArchitecture: modelArchitecture).parameterCount(map: map) }
 }
@@ -42,6 +43,7 @@ extension LoomProject {
                   let width = architecture["width"] as? Int, (8...256).contains(width),
                   let blocks = architecture["blocks"] as? Int, (1...12).contains(blocks),
                   let savedSettings = descriptor["settings"] as? [String: Any],
+                  let scalarLoss = NativeScalarLoss(rawValue: savedSettings["scalar_loss"] as? String ?? NativeScalarLoss.absoluteV1.rawValue),
                   let size = savedSettings["image_size"] as? Int, (32...8192).contains(size),
                   let weights = try? TrainingRunFiles.containedFile(descriptor["weights_path"] as? String ?? "checkpoint.safetensors", directory: directory),
                   FileManager.default.fileExists(atPath: weights.path) else { return nil }
@@ -49,7 +51,8 @@ extension LoomProject {
             return TrainingCheckpoint(directory: directory, datasetID: datasetID, map: map, modelWidth: width,
                 modelBlocks: blocks, modelArchitecture: architectureID, imageSize: size, exaggerateFeatures: savedSettings["exaggerate_features"] as? Bool ?? false,
                 epochsCompleted: descriptor["epochs_completed"] as? Int ?? 0, status: descriptor["status"] as? String ?? "saved", modifiedAt: modified,
-                updatesCompleted: descriptor["updates"] as? Int ?? 0, restoresOptimizer: descriptor["optimizer_path"] as? String != nil)
+                updatesCompleted: descriptor["updates"] as? Int ?? 0, restoresOptimizer: descriptor["optimizer_path"] as? String != nil,
+                scalarLoss: scalarLoss)
         }.sorted { $0.modifiedAt > $1.modifiedAt }
     }
 }
@@ -185,6 +188,10 @@ struct TrainingCheckpointCursor: Codable, Sendable {
 
     static func compatibleSettings(_ saved: [String: Any], current: [String: Any], keys: [String]? = nil) -> Bool {
         let selected = keys ?? current.keys.filter { $0 != "checkpoint_every_epochs" }
+        var saved = saved
+        if saved["scalar_loss"] == nil, current["scalar_loss"] != nil {
+            saved["scalar_loss"] = NativeScalarLoss.absoluteV1.rawValue
+        }
         let lhs = Dictionary(uniqueKeysWithValues: selected.compactMap { key in saved[key].map { (key, $0) } })
         let rhs = Dictionary(uniqueKeysWithValues: selected.compactMap { key in current[key].map { (key, $0) } })
         return NSDictionary(dictionary: lhs).isEqual(to: rhs)

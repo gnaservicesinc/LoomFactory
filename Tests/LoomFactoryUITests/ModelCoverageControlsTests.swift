@@ -9,6 +9,69 @@ import UniformTypeIdentifiers
 @Suite(.serialized)
 struct ModelCoverageControlsTests {
     @Test @MainActor
+    func actualSourceCoverageRendersSavedDepthVersionsWhenRequested() async throws {
+        guard let path = ProcessInfo.processInfo.environment["LOOM_FACTORY_COVERAGE_SOURCE_ROOT"] else { return }
+        let model = FactoryModel(rememberSourceFolder: false)
+        model.openFolder(URL(fileURLWithPath: path, isDirectory: true))
+        try await wait(model)
+        let snapshot = try #require(model.snapshot)
+        let bricks = try #require(snapshot.datasets.first { $0.name == "Bricks" })
+        let depth = try #require(snapshot.modelCoverage.first { $0.slot.datasetID == bricks.id && $0.slot.product == .depth })
+        let runs = snapshot.sourceURL.appendingPathComponent(".loom-factory/runs", isDirectory: true)
+        let physicalRunIDs = try FileManager.default.contentsOfDirectory(at: runs, includingPropertiesForKeys: [.isDirectoryKey])
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }.map(\.lastPathComponent)
+        #expect(Set(snapshot.modelVersions.map(\.id)) == Set(physicalRunIDs))
+        let depthVersions = snapshot.modelVersions.filter { $0.datasetID == bricks.id && $0.map == .depth }
+        #expect(!depthVersions.isEmpty)
+        #expect(depth.checkpointCount == depthVersions.filter { $0.artifact == nil && $0.checkpoint != nil }.count)
+        model.selectedDatasetID = bricks.id
+        model.selectedMap = .depth
+        model.workspaceSection = .models
+        try await render(ModelCoverageView(model: model).padding(24).preferredColorScheme(.dark),
+            size: NSSize(width: 1380, height: 1250), name: "actual-bricks-depth-coverage-dark.png")
+    }
+
+    @Test @MainActor
+    func savedCheckpointsRemainVisibleWithoutSatisfyingModelApprovalOrPackageCoverage() async throws {
+        let fixture = try await CoverageControlsFixture()
+        defer { fixture.remove() }
+        for id in ["older-depth", "latest-depth"] {
+            try FileManager.default.removeItem(at: fixture.source.appendingPathComponent(".loom-factory/runs/\(id)"))
+        }
+        let model = FactoryModel(rememberSourceFolder: false)
+        model.openFolder(fixture.source)
+        try await wait(model)
+        let depth = try #require(model.modelCoverage.first { $0.slot == fixture.depthSlot })
+        let state = ModelCoveragePresentation(depth)
+        #expect(depth.availableCount == 0)
+        #expect(depth.checkpointCount == 2)
+        #expect(state.modelCounts == "0 completed models · 0 approved")
+        #expect(state.checkpointCounts == "2 saved checkpoints")
+        #expect(state.title == "Training unfinished")
+        #expect(ModelCoverageFilter.missing.includes(depth))
+        #expect(!ModelCoverageFilter.needsApproval.includes(depth))
+        #expect(!state.isReady)
+        let unfinished = try #require(model.snapshot).modelVersions.filter { $0.artifact == nil }
+        #expect(Set(unfinished.map(\.id)) == Set(["cancelled-depth", "interrupted-depth"]))
+        #expect(unfinished.allSatisfy { $0.checkpoint != nil && !$0.isApproved && !$0.isActive })
+        let version = try #require(unfinished.first { $0.id == "cancelled-depth" })
+        model.showModelTesting(version)
+        #expect(model.workspaceSection == .testing)
+        #expect(model.selectedTestVersionID == version.id)
+        ModelCoverageCheckpointRow(model: model, version: version).continueTraining()
+        #expect(model.selectedDatasetID == fixture.depthSlot.datasetID)
+        #expect(model.selectedMap == .depth)
+        #expect(model.trainingStartMode == .checkpoint)
+        #expect(model.selectedTrainingVersionID == version.id)
+        for scheme in [ColorScheme.light, .dark] {
+            try await render(ModelCoverageView(model: model).padding(24).preferredColorScheme(scheme),
+                size: NSSize(width: 1120, height: 1150), name: "coverage-checkpoints-visible-\(scheme == .light ? "light" : "dark").png")
+            try await render(ModelCoverageCheckpointRow(model: model, version: version).padding(24).preferredColorScheme(scheme),
+                size: NSSize(width: 1060, height: 220), name: "coverage-saved-checkpoint-\(scheme == .light ? "light" : "dark").png")
+        }
+    }
+
+    @Test @MainActor
     func approvalAndChosenModelAreIndependentAndPersistWithTheSourceFolder() async throws {
         let fixture = try await CoverageControlsFixture()
         defer { fixture.remove() }
@@ -221,6 +284,20 @@ private struct CoverageControlsFixture {
                 directory: directory, createdAt: Date(timeIntervalSince1970: createdAt), epochs: 20, loss: 0.05,
                 coreMLPath: "model.mlmodel", weightsPath: "weights.safetensors", architecture: architecture)
             try JSONEncoder().encode(artifact).write(to: directory.appendingPathComponent("artifact.json"))
+        }
+        for (id, status, epochs) in [("cancelled-depth", "cancelled", 19), ("interrupted-depth", "training", 0)] {
+            let directory = project.projectFolder.appendingPathComponent("runs/\(id)")
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let descriptor: [String: Any] = [
+                "schema": "loom-factory-checkpoint-v1", "project_id": snapshot.projectID, "kind": "map",
+                "dataset_id": bricks.id, "dataset_name": bricks.name, "map": "depth", "status": status,
+                "architecture": "loom-factory-material-residual-v1",
+                "architecture_config": ["id": "loom-factory-material-residual-v1", "width": 8, "blocks": 1],
+                "settings": ["image_size": 32, "epochs": 100], "epochs_completed": epochs,
+                "weights_path": "checkpoint.safetensors"
+            ]
+            try JSONSerialization.data(withJSONObject: descriptor).write(to: directory.appendingPathComponent("checkpoint.json"))
+            try Data([7, 8, 9]).write(to: directory.appendingPathComponent("checkpoint.safetensors"))
         }
     }
 

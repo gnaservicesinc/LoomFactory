@@ -119,6 +119,11 @@ struct TrainingPanel: View {
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Text("Saved architecture, training dimensions and depth transform are retained. This continuation creates another saved version.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if model.selectedMap != .normal && model.effectiveTrainingSettings.scalarLoss == .absoluteV1 {
+                    Text("This version keeps the original scalar training loss. If its output has saturated to white or black, choose Start a fresh model to use stable scalar training.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("training.legacyScalarLoss")
+                }
             } else {
                 Text("Starts new weights and keeps every previous version. A successful replacement becomes the model used for package export.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)

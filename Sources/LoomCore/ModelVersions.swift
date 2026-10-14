@@ -205,7 +205,11 @@ extension LoomProject {
 
     func prepareTrainingStart(_ start: TrainingStart, datasetID: String, map: MapRole,
                               settings: TrainingSettings) throws -> (settings: TrainingSettings, resume: TrainingResume?) {
-        guard start != .fresh else { return (settings, nil) }
+        guard start != .fresh else {
+            var fresh = settings
+            if map != .normal { fresh.scalarLoss = .logitCrossEntropyV2 }
+            return (fresh, nil)
+        }
         let runID: String, source: TrainingWeightSource
         switch start {
         case .fresh: return (settings, nil)
@@ -219,6 +223,7 @@ extension LoomProject {
         }
         var resolved = settings
         resolved.modelArchitecture = saved.modelArchitecture
+        resolved.scalarLoss = saved.scalarLoss
         resolved.modelWidth = saved.modelWidth; resolved.modelBlocks = saved.modelBlocks
         resolved.imageSize = saved.imageSize; resolved.exaggerateFeatures = saved.exaggerateFeatures
         let path = source == .checkpoint ? (descriptor["weights_path"] as? String ?? "checkpoint.safetensors") : descriptor["weights_path"] as? String

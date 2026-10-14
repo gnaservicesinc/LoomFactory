@@ -10,8 +10,10 @@ enum ModelVersionPresentation {
         return "\(name) · \(version.createdAt.formatted(date: .abbreviated, time: .shortened))"
     }
 
-    static func summary(_ settings: TrainingSettings) -> String {
-        "\(settings.optimizer.displayName) · LR \(number(settings.learningRate)) · batch \(settings.batchSize) × \(settings.gradientAccumulationSteps) · \(settings.imageSize) px · \(settings.modelWidth) channels / \(settings.modelBlocks) blocks"
+    static func summary(_ settings: TrainingSettings, map: MapRole? = nil) -> String {
+        let objective = map == .depth || map == .roughness
+            ? (settings.scalarLoss == .absoluteV1 ? " · original scalar loss (v1)" : " · stable scalar loss (v2)") : ""
+        return "\(settings.optimizer.displayName) · LR \(number(settings.learningRate)) · batch \(settings.batchSize) × \(settings.gradientAccumulationSteps) · \(settings.imageSize) px · \(settings.modelWidth) channels / \(settings.modelBlocks) blocks" + objective
     }
 
     static func number(_ value: Double) -> String {
@@ -56,7 +58,7 @@ struct ModelVersionRow: View {
                 }
             }
             if let settings = version.settings {
-                Text(ModelVersionPresentation.summary(settings)).font(.caption).foregroundStyle(.secondary)
+                Text(ModelVersionPresentation.summary(settings, map: version.map)).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let metric = version.history.last(where: { $0.loss != nil || $0.validationLoss != nil }) {
@@ -297,6 +299,7 @@ struct TrainingSettingValue: Identifiable, Equatable {
         func yesNo(_ value: Bool) -> String { value ? "On" : "Off" }
         var values: [Self] = [
             item("modelArchitecture", "Model architecture", settings.modelArchitecture == NativeArchitecture.pyramidIdentifier ? "Efficient multiscale" : "Full-resolution residual"),
+            item("scalarLoss", "Scalar training objective", settings.scalarLoss == .absoluteV1 ? "Original absolute error (v1)" : "Stable cross-entropy (v2)"),
             item("imageSize", "Training dimensions", "\(settings.imageSize) × \(settings.imageSize)"),
             item("modelWidth", "Channel width", "\(settings.modelWidth)"),
             item("modelBlocks", "Residual blocks", "\(settings.modelBlocks)"),
