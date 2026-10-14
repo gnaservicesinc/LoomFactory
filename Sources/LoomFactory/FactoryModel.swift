@@ -54,6 +54,7 @@ final class FactoryModel {
     private(set) var activityTitle = ""
     private(set) var progress: Double?
     private(set) var events: [TrainingEvent] = []
+    private(set) var trainingProgress: TrainingProgress?
     private(set) var exportedPackage: URL?
     private(set) var publishedURL: URL?
     private(set) var sourceIssue: String?
@@ -279,6 +280,7 @@ final class FactoryModel {
         exportedPackage = nil
         publishedURL = nil
         events = []
+        trainingProgress = nil
         errorMessage = nil
         sourceIssue = nil
         busy = true
@@ -618,6 +620,7 @@ final class FactoryModel {
         progress = nil
         errorMessage = nil
         if clearEvents { events = [] }
+        trainingProgress = nil
         operation = Task {
             do {
                 try Task.checkCancellation()
@@ -651,6 +654,7 @@ final class FactoryModel {
             Task { @MainActor [weak self] in
                 guard let self, self.generation == current else { return }
                 self.events.append(event)
+                if let value = event.trainingProgress { self.trainingProgress = value }
                 if self.events.count > 300 { self.events.removeFirst(self.events.count - 300) }
                 if self.operation?.isCancelled != true { self.activityTitle = event.message }
                 if let progress = event.progress { self.progress = progress }

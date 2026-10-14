@@ -566,20 +566,26 @@ struct PackagePanel: View {
 struct RunPanel: View {
     @Bindable var model: FactoryModel
     @State private var showLog = false
+    @State private var showMeasurements = false
 
     var body: some View {
         FactoryPanel("Run progress") {
             HStack(spacing: 14) {
                 if model.busy { ProgressView().controlSize(.small) }
-                Text(model.activityTitle).font(.callout).textSelection(.enabled)
+                Text(model.trainingProgress == nil ? model.activityTitle : (model.activityTitle == "Stopping safely…" ? model.activityTitle : "Training run"))
+                    .font(.callout).textSelection(.enabled)
                 Spacer()
                 if model.busy { Button("Stop") { model.cancel() }.accessibilityIdentifier("training.stop") }
             }
-            if let progress = model.progress {
+            if let progress = model.progress, model.trainingProgress == nil {
                 ProgressView(value: progress).progressViewStyle(.linear)
             }
             let metrics = TrainingRunMetrics(events: model.events)
-            VStack(alignment: .leading, spacing: 7) {
+            if let progress = model.trainingProgress {
+                TrainingProgressView(progress: progress, isRunning: model.busy)
+            }
+            DisclosureGroup("Training measurements", isExpanded: $showMeasurements) {
+              VStack(alignment: .leading, spacing: 7) {
                 if let epoch = metrics.epoch { metric("Epoch", epoch.formatted()) }
                 if let loss = metrics.trainingLoss { metric("Training loss", loss.formatted(.number.precision(.significantDigits(5)))) }
                 if let loss = metrics.validationLoss { metric("Validation loss", loss.formatted(.number.precision(.significantDigits(5)))) }
@@ -591,6 +597,13 @@ struct RunPanel: View {
                 if let threshold = metrics.gradientClipThreshold { metric("Current clipping cap", ModelVersionPresentation.number(threshold)) }
                 if let batch = metrics.effectiveBatchSize { metric("Images per update", "Up to \(batch.formatted())") }
                 if let count = metrics.parameterCount { metric("Parameters", count.formatted()) }
+                if let timing = model.events.last(where: { $0.cycleTiming != nil })?.cycleTiming {
+                    metric("Image preparation", timing.preparationSeconds.formatted(.number.precision(.fractionLength(2))) + " s")
+                    metric("Wait for images", timing.preparationWaitSeconds.formatted(.number.precision(.fractionLength(2))) + " s")
+                    metric("Training", timing.trainingSeconds.formatted(.number.precision(.fractionLength(2))) + " s")
+                    metric("Model update", timing.optimizerSeconds.formatted(.number.precision(.fractionLength(2))) + " s")
+                }
+              }
             }
             if !model.events.isEmpty {
                 DisclosureGroup("Run details", isExpanded: $showLog) {

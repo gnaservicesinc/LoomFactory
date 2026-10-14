@@ -125,14 +125,26 @@ public struct TrainingEvent: Sendable {
     public let effectiveBatchSize: Int?
     public let gradientNorm: Double?
     public let gradientClipThreshold: Double?
+    public let trainingProgress: TrainingProgress?
+    public let cycleTiming: TrainingCycleTiming?
     public init(type: String, message: String, progress: Double? = nil, epoch: Int? = nil, loss: Double? = nil,
                 validationLoss: Double? = nil, learningRate: Double? = nil, update: Int? = nil, totalUpdates: Int? = nil,
                 parameterCount: Int? = nil, effectiveBatchSize: Int? = nil,
-                gradientNorm: Double? = nil, gradientClipThreshold: Double? = nil) {
+                gradientNorm: Double? = nil, gradientClipThreshold: Double? = nil,
+                trainingProgress: TrainingProgress? = nil, cycleTiming: TrainingCycleTiming? = nil) {
         self.type = type; self.message = message; self.progress = progress; self.epoch = epoch; self.loss = loss
         self.validationLoss = validationLoss; self.learningRate = learningRate; self.update = update
         self.totalUpdates = totalUpdates; self.parameterCount = parameterCount; self.effectiveBatchSize = effectiveBatchSize
         self.gradientNorm = gradientNorm; self.gradientClipThreshold = gradientClipThreshold
+        self.trainingProgress = trainingProgress; self.cycleTiming = cycleTiming
+    }
+
+    func reporting(_ progress: TrainingProgress) -> TrainingEvent {
+        TrainingEvent(type: type, message: message, progress: self.progress, epoch: epoch, loss: loss,
+            validationLoss: validationLoss, learningRate: learningRate, update: update, totalUpdates: totalUpdates,
+            parameterCount: parameterCount, effectiveBatchSize: effectiveBatchSize,
+            gradientNorm: gradientNorm, gradientClipThreshold: gradientClipThreshold,
+            trainingProgress: progress, cycleTiming: cycleTiming)
     }
 }
 

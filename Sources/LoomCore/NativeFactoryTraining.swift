@@ -7,19 +7,28 @@ import LoomNative
 enum NativeFactoryTraining {
     static func run(id: String, root: URL, output: URL, projectID: String, dataset: DatasetCategory,
                     map: MapRole, plan: TrainingDataPlan, settings: TrainingSettings, resume: URL?,
-                    cancellation: NativeCancellation, progress: @escaping @Sendable (TrainingEvent) -> Void) throws -> ModelArtifact {
+                    cancellation: NativeCancellation, progress: @escaping @Sendable (TrainingEvent) -> Void,
+                    prepareAhead: Bool = true) throws -> ModelArtifact {
         let started = Date()
+        func clock() -> Double { ProcessInfo.processInfo.systemUptime }
+        let stepsPerEpoch = settings.optimizerStepsPerEpoch(pairCount: plan.training.count)
+        let totalUpdates = settings.epochs * stepsPerEpoch
+        var tracker = TrainingProgressTracker(totalEpochs: settings.epochs, trainingImages: plan.training.count,
+            validationImages: plan.validation.count, stepsPerEpoch: stepsPerEpoch,
+            checkpointEveryEpochs: settings.checkpointEveryEpochs, startSeconds: clock())
+        let preparation = NativePreparationPipeline<FactoryPreparedBatch>(cancellation: cancellation)
         let runMetadata = try TrainingRunFiles.metadata(at: output)
         var versionJSON: [String: Any] = ["run_id": id, "run_label": runMetadata?.label ?? ""]
         if let lineage = runMetadata?.lineage {
             versionJSON["lineage"] = ["parent_run_id": lineage.parentRunID, "source": lineage.source.rawValue,
                 "weights_sha256": lineage.weightsSHA256]
         }
-        defer { NativeImages.clearDecodedPixelCache() }
+        defer { preparation.close(); NativeImages.clearDecodedPixelCache() }
         let logURL = output.appendingPathComponent("training.log")
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
         let log = try FileHandle(forWritingTo: logURL); defer { try? log.close() }
         func emit(_ event: TrainingEvent) {
+            let event = event.reporting(tracker.snapshot(now: clock()))
             progress(event)
             var json: [String: Any] = ["event": event.type, "message": event.message, "backend": "swift-mpsgraph-metal"]
             if let v = event.progress { json["progress"] = v }; if let v = event.epoch { json["epoch"] = v }
@@ -29,6 +38,15 @@ enum NativeFactoryTraining {
             if let v = event.effectiveBatchSize { json["effective_batch_size"] = v }
             if let v = event.gradientNorm { json["gradient_norm"] = v }
             if let v = event.gradientClipThreshold { json["gradient_clip_threshold"] = v }
+            if let value = event.trainingProgress,
+               let data = try? JSONEncoder().encode(value), let object = try? JSONSerialization.jsonObject(with: data) {
+                json["training_progress"] = object
+            }
+            if let value = event.cycleTiming,
+               let data = try? JSONEncoder().encode(value), let object = try? JSONSerialization.jsonObject(with: data) {
+                json["cycle_timing"] = object
+            }
+            json["timestamp"] = ISO8601DateFormatter().string(from: Date())
             if var data = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]) {
                 data.append(10); try? log.write(contentsOf: data)
             }
@@ -44,15 +62,18 @@ enum NativeFactoryTraining {
                            "split": validationIDs.contains($0.id) ? "validation" : "training"] }]) { _, new in new }
         if let resume { request["resume_weights"] = resume.path }
         try writeJSON(request, to: output.appendingPathComponent("request.json"))
-        emit(.init(type: "status", message: "Checking current source images for native Metal training…"))
+        emit(.init(type: "status", message: "Checking source images…"))
         var proofs: [String: SourceProof] = [:]
         for (index, pair) in all.enumerated() {
+            tracker.begin(stage: .checkingSources, image: pair.input.trainingDisplayName, now: clock())
+            emit(.init(type: "status", message: "Checking image \(index + 1) of \(all.count): \(pair.input.trainingDisplayName)"))
             try cancellation.check(); try checkTags(pair, dataset: dataset.name, map: map, root: root)
             for image in [pair.input, pair.target] where proofs[image.url.path] == nil {
                 proofs[image.url.path] = try SourceProof(image.url, cancellation: cancellation)
             }
-            emit(.init(type: "status", message: "Checked source pair \(index + 1) of \(all.count)"))
         }
+        tracker.begin(stage: .preparingModel, now: clock())
+        emit(.init(type: "status", message: "Preparing model…"))
         let architecture = try NativeArchitecture(mapKind: map.rawValue, width: settings.modelWidth, blocks: settings.modelBlocks)
         let options = try NativeTrainingOptions(optimizer: settings.optimizer.rawValue, weightDecay: settings.weightDecay,
             beta1: settings.beta1, beta2: settings.beta2, momentum: settings.momentum, gradientClipNorm: settings.gradientClipNorm,
@@ -69,22 +90,24 @@ enum NativeFactoryTraining {
         }
         let session = try NativeTrainingSession(architecture: architecture, options: options, seed: UInt64(settings.seed),
             weights: initial, device: settings.device.rawValue, cancellation: cancellation)
-        let stepsPerEpoch = settings.optimizerStepsPerEpoch(pairCount: plan.training.count)
-        let totalUpdates = settings.epochs * stepsPerEpoch
         var update = 0, history: [[String: Any]] = [], bestLoss: Double?, bestEpoch: Int?, stale = 0
         var stoppedEarly = false
         var bestWeights: [String: NativeTensor]?
         var augmentation = NativeAugmentationPlan(seed: settings.seed, cropRefresh: settings.cropRefresh.rawValue,
                                                   augmentationRefresh: settings.augmentationRefresh.rawValue)
         var rng = FactoryRandom(seed: UInt64(settings.seed))
-        emit(.init(type: "started", message: "Native Swift training · Apple GPU (Metal)", update: 0, totalUpdates: totalUpdates,
+        emit(.init(type: "started", message: "Training \(dataset.name) · \(settings.epochs) epochs · \(totalUpdates) steps", update: 0, totalUpdates: totalUpdates,
                    parameterCount: settings.parameterCount(map: map), effectiveBatchSize: settings.effectiveBatchSize))
         func verify(_ pair: TrainingPair) throws {
             try cancellation.check(); try checkTags(pair, dataset: dataset.name, map: map, root: root)
             for image in [pair.input, pair.target] { try proofs[image.url.path]!.check(image.url) }
         }
-        func checkpoint(_ status: String) throws {
+        func checkpoint(_ status: String, epochComplete: Bool = true) throws {
             guard update > 0 else { return }
+            let checkpointStart = clock()
+            tracker.begin(stage: .checkpointing,
+                          index: epochComplete && !history.isEmpty ? plan.training.count : nil, now: checkpointStart)
+            emit(.init(type: "status", message: "Saving checkpoint at step \(update)…", update: update, totalUpdates: totalUpdates))
             let weights = try session.weights()
             try NativeWeights.write(weights, to: output.appendingPathComponent("checkpoint.safetensors"),
                                     metadata: ["schema": "loom-factory-checkpoint-v1", "architecture": NativeArchitecture.identifier])
@@ -97,59 +120,106 @@ enum NativeFactoryTraining {
             descriptor["weights_sha256"] = try sha(output.appendingPathComponent("checkpoint.safetensors"))
             descriptor.merge(versionJSON) { _, new in new }
             try writeJSON(descriptor, to: output.appendingPathComponent("checkpoint.json"))
-            emit(.init(type: "checkpoint", message: "Native training weights saved", epoch: history.count, update: update))
+            tracker.checkpointCompleted(durationSeconds: clock() - checkpointStart, epochComplete: epochComplete, now: clock())
+            emit(.init(type: "checkpoint", message: "Checkpoint saved at step \(update)", epoch: history.count, update: update))
         }
         do {
             for epoch in 0..<settings.epochs {
                 try cancellation.check()
+                tracker.beginEpoch(epoch: epoch + 1, now: clock())
                 var order = plan.training
                 if settings.shuffleEachEpoch { order.shuffle(using: &rng) }
                 var epochLoss = 0.0, count = 0, learningRate = settings.learningRate
                 var epochUpdates = 0, clippedUpdates = 0, normSum = 0.0, peakNorm = 0.0
+                // Resolve deterministic transforms on the serial owner. Only the
+                // upcoming minibatch's pixels are prepared by the bounded worker.
+                var batches: [FactoryImageBatch] = []
                 for window in stride(from: 0, to: order.count, by: settings.effectiveBatchSize) {
+                    let end = min(window + settings.effectiveBatchSize, order.count)
+                    for offset in stride(from: window, to: end, by: settings.batchSize) {
+                        let pairs = Array(order[offset..<min(offset + settings.batchSize, end)])
+                        let crops = try pairs.map { pair in
+                            try augmentation.transform(sampleID: pair.id, epoch: epoch,
+                                width: pair.input.width, height: pair.input.height, size: settings.imageSize,
+                                flip: settings.flipCrops, rotate: settings.rotateCrops)
+                        }
+                        batches.append(FactoryImageBatch(pairs: pairs, crops: crops, offset: offset))
+                    }
+                }
+                func submit(_ batch: FactoryImageBatch) throws {
+                    for pair in batch.pairs { try verify(pair) }
+                    try preparation.submit {
+                        try FactoryPreparedBatch.prepare(batch, map: map, settings: settings, cancellation: cancellation)
+                    }
+                }
+                if prepareAhead, let first = batches.first { try submit(first) }
+                var batchIndex = 0
+                for window in stride(from: 0, to: order.count, by: settings.effectiveBatchSize) {
+                    let cycleStart = clock()
+                    var preparationSeconds = 0.0, waitingSeconds = 0.0, trainingSeconds = 0.0
                     try cancellation.check(); session.resetAccumulatedGradients()
                     let end = min(window + settings.effectiveBatchSize, order.count)
                     learningRate = NativeTrainingOptions.learningRate(base: settings.learningRate, step: update,
                         totalSteps: totalUpdates, stepsPerEpoch: stepsPerEpoch, warmupEpochs: settings.warmupEpochs,
                         schedule: settings.learningRateSchedule.rawValue, minimumRatio: settings.minimumLearningRateRatio)
                     for offset in stride(from: window, to: end, by: settings.batchSize) {
-                        let batch = Array(order[offset..<min(offset + settings.batchSize, end)])
-                        var inputs: [Float] = [], targets: [Float] = []
-                        for pair in batch {
-                            try verify(pair)
-                            let crop = try augmentation.transform(sampleID: pair.id, epoch: epoch,
-                                width: pair.input.width, height: pair.input.height, size: settings.imageSize,
-                                flip: settings.flipCrops, rotate: settings.rotateCrops)
-                            let prepared = try NativeImages.pair(inputURL: pair.input.url, targetURL: pair.target.url, transform: crop,
-                                mapKind: map.rawValue, normalConvention: pair.target.normalConvention ?? "OpenGL",
-                                exaggerate: settings.exaggerateFeatures, cancellation: cancellation)
-                            inputs.append(contentsOf: prepared.input.values); targets.append(contentsOf: prepared.target.values)
-                        }
-                        try cancellation.check()
-                        emit(.init(type: "batch_started", message: "Epoch \(epoch + 1) of \(settings.epochs) · native GPU batch \(offset / settings.batchSize + 1)",
+                        let batch = batches[batchIndex]
+                        tracker.begin(stage: .preparingImage, image: batch.imageNames, index: offset + 1,
+                                      completedImages: epoch * order.count + count, now: clock())
+                        emit(.init(type: "image_preparing", message: "Preparing image \(offset + 1) of \(order.count): \(batch.imageNames)",
                                    epoch: epoch + 1, update: update, totalUpdates: totalUpdates))
-                        let loss = try session.train(input: inputs, target: targets, batchSize: batch.count,
-                            height: settings.imageSize, width: settings.imageSize, weight: Float(batch.count) / Float(end - window))
+                        let waitingStart = clock()
+                        let prepared = try prepareAhead ? preparation.take() : FactoryPreparedBatch.prepare(batch,
+                            map: map, settings: settings, cancellation: cancellation)
+                        waitingSeconds += clock() - waitingStart
+                        preparationSeconds += prepared.preparationSeconds
+                        for pair in batch.pairs { try verify(pair) }
+                        batchIndex += 1
+                        if prepareAhead, batchIndex < batches.count { try submit(batches[batchIndex]) }
+                        try cancellation.check()
+                        tracker.begin(stage: .training, image: batch.imageNames,
+                                      index: min(offset + batch.pairs.count, order.count), now: clock())
+                        emit(.init(type: "image_training", message: "Training image \(offset + 1) of \(order.count): \(batch.imageNames)",
+                                   epoch: epoch + 1, update: update, totalUpdates: totalUpdates))
+                        let trainingStart = clock()
+                        let loss = try session.train(input: prepared.input, target: prepared.target, batchSize: batch.pairs.count,
+                            height: settings.imageSize, width: settings.imageSize, weight: Float(batch.pairs.count) / Float(end - window))
+                        trainingSeconds += clock() - trainingStart
                         guard loss.isFinite else { throw LoomError("Native training produced a non-finite loss. The last finite checkpoint was preserved.") }
-                        epochLoss += Double(loss) * Double(batch.count); count += batch.count
+                        epochLoss += Double(loss) * Double(batch.pairs.count); count += batch.pairs.count
                     }
                     try cancellation.check()
                     let cap = options.gradientClipThreshold(updateCount: update)
+                    tracker.begin(stage: .optimizing,
+                                  image: order[window..<end].map { $0.input.trainingDisplayName }.joined(separator: ", "), now: clock())
+                    emit(.init(type: "step_updating", message: "Updating step \(update + 1) of \(totalUpdates)", epoch: epoch + 1,
+                               update: update, totalUpdates: totalUpdates))
+                    let optimizerStart = clock()
                     let norm = try session.applyGradients(learningRate: learningRate); update += 1
+                    let optimizerSeconds = clock() - optimizerStart
                     epochUpdates += 1; normSum += norm; peakNorm = max(peakNorm, norm)
                     if cap > 0 && norm > cap { clippedUpdates += 1 }
-                    emit(.init(type: "progress", message: "Epoch \(epoch + 1) of \(settings.epochs) · step \(update) of \(totalUpdates) · loss \(String(format: "%.5f", epochLoss / Double(count)))",
+                    let cycleSeconds = clock() - cycleStart
+                    tracker.completeStep(stepInEpoch: epochUpdates, completedSteps: update,
+                        completedImages: epoch * order.count + count, cycleSeconds: cycleSeconds, now: clock())
+                    emit(.init(type: "progress", message: "Epoch \(epoch + 1) of \(settings.epochs) · step \(update) of \(totalUpdates) · \(totalUpdates - update) steps left",
                         progress: Double(update) / Double(totalUpdates), epoch: epoch + 1, loss: epochLoss / Double(count),
                         learningRate: learningRate, update: update, totalUpdates: totalUpdates,
-                        gradientNorm: norm, gradientClipThreshold: cap))
+                        gradientNorm: norm, gradientClipThreshold: cap,
+                        cycleTiming: TrainingCycleTiming(preparationSeconds: preparationSeconds, preparationWaitSeconds: waitingSeconds,
+                            trainingSeconds: trainingSeconds, optimizerSeconds: optimizerSeconds, totalSeconds: cycleSeconds)))
                     // Preserve the first real update even when an epoch spans thousands of pairs.
-                    if update == 1 { try checkpoint("training") }
+                    if update == 1 { try checkpoint("training", epochComplete: false) }
                 }
                 var validation: Double?
                 if !plan.validation.isEmpty {
-                    emit(.init(type: "status", message: "Checking held-out material validation pairs…"))
+                    let validationStart = clock()
+                    tracker.begin(stage: .validating, index: 0, now: clock())
+                    emit(.init(type: "status", message: "Validating \(plan.validation.count) held-out images…"))
                     var sum = 0.0
-                    for pair in plan.validation {
+                    for (index, pair) in plan.validation.enumerated() {
+                        tracker.begin(stage: .validating, image: pair.input.trainingDisplayName, index: index + 1, now: clock())
+                        emit(.init(type: "validation_image", message: "Validating image \(index + 1) of \(plan.validation.count): \(pair.input.trainingDisplayName)"))
                         try verify(pair)
                         let crop = NativeCropTransform(x: (pair.input.width - settings.imageSize) / 2,
                             y: (pair.input.height - settings.imageSize) / 2, size: settings.imageSize)
@@ -165,6 +235,7 @@ enum NativeFactoryTraining {
                         bestLoss = validation; bestEpoch = epoch + 1; stale = 0; bestWeights = try session.weights()
                         try NativeWeights.write(bestWeights!, to: output.appendingPathComponent("best.safetensors"))
                     } else { stale += 1 }
+                    tracker.completeValidation(durationSeconds: clock() - validationStart, now: clock())
                 }
                 var record: [String: Any] = ["epoch": epoch + 1, "loss": epochLoss / Double(count), "learning_rate": learningRate,
                     "update": update,
@@ -180,9 +251,16 @@ enum NativeFactoryTraining {
                 if stop { stoppedEarly = true; break }
             }
             try cancellation.check()
+            tracker.begin(stage: .verifyingSources, now: clock())
+            emit(.init(type: "status", message: "Verifying original images before export…"))
             for pair in all { try verify(pair) }
-            for (path, proof) in proofs { try proof.verifyHash(URL(fileURLWithPath: path), cancellation: cancellation) }
-            emit(.init(type: "status", message: "Exporting native Core ML and Safetensors weights…"))
+            for (path, proof) in proofs {
+                tracker.begin(stage: .verifyingSources, image: URL(fileURLWithPath: path).lastPathComponent, now: clock())
+                emit(.init(type: "status", message: "Verifying original: \(URL(fileURLWithPath: path).lastPathComponent)"))
+                try proof.verifyHash(URL(fileURLWithPath: path), cancellation: cancellation)
+            }
+            tracker.begin(stage: .exporting, now: clock())
+            emit(.init(type: "status", message: "Exporting trained model…"))
             let deployment: [String: NativeTensor]
             if settings.exportBestWeights, let bestWeights { deployment = bestWeights } else { deployment = try session.weights() }
             try NativeWeights.write(deployment, to: output.appendingPathComponent("model.safetensors"),
@@ -192,6 +270,8 @@ enum NativeFactoryTraining {
                 to: output.appendingPathComponent("model.mlmodel"))
             defer { try? FileManager.default.removeItem(at: compiled) }
             try cancellation.check()
+            tracker.begin(stage: .verifyingSources, now: clock())
+            emit(.init(type: "status", message: "Verifying originals after export…"))
             for pair in all { try verify(pair) }
             for (path, proof) in proofs { try proof.verifyHash(URL(fileURLWithPath: path), cancellation: cancellation) }
             try checkpoint("completed")
@@ -224,13 +304,15 @@ enum NativeFactoryTraining {
             let artifact = ModelArtifact(id: id, kind: "map", datasetID: dataset.id, datasetName: dataset.name, map: map,
                 directory: output, epochs: history.count, loss: finalLoss, coreMLPath: "model.mlmodel", weightsPath: "model.safetensors", architecture: NativeArchitecture.identifier)
             try JSONEncoder().encode(artifact).write(to: output.appendingPathComponent("artifact.json"), options: .atomic)
-            emit(.init(type: "completed", message: "Native model saved in this source project", progress: 1))
+            tracker.begin(stage: .completed, now: clock())
+            emit(.init(type: "completed", message: "Training complete · model saved", progress: 1))
             return artifact
         } catch {
             let status = error is CancellationError ? "cancelled" : "stopped"
             do { try checkpoint(status) } catch { emit(.init(type: "warning", message: "Latest checkpoint could not be saved: \(error.localizedDescription)")) }
             try? writeJSON(["status": status, "history": history, "updates": update], to: output.appendingPathComponent("progress.json"))
-            emit(.init(type: status, message: error is CancellationError ? "Native training stopped; completed updates were saved" : error.localizedDescription))
+            tracker.begin(stage: .stopped, now: clock())
+            emit(.init(type: status, message: error is CancellationError ? "Training stopped; completed steps were saved" : error.localizedDescription))
             throw error
         }
     }
