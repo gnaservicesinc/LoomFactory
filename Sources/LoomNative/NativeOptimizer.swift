@@ -7,12 +7,14 @@ public enum NativeScalarLoss: String, Codable, CaseIterable, Sendable {
     case absoluteV1 = "absolute-v1"
     case logitCrossEntropyV2 = "logit-cross-entropy-v2"
     case nativeDetailV3 = "native-detail-v3"
+    case linearDetailV1 = "linear-detail-v1"
 
     public var displayName: String {
         switch self {
         case .absoluteV1: "Original absolute error (v1)"
         case .logitCrossEntropyV2: "Stable pixel loss (v2)"
         case .nativeDetailV3: "Native pixel detail (v3)"
+        case .linearDetailV1: "Linear pixel and detail loss"
         }
     }
 }

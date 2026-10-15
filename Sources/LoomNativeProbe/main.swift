@@ -192,8 +192,8 @@ private func run() throws {
     let updates = args.predictOnly ? 0 : try args.integer("updates", 3, range: 1...100_000)
     let seed = try args.integer("seed", 42, range: 0...Int(Int32.max))
     let map = args.values["map"] ?? "depth"
-    guard let scalarLoss = NativeScalarLoss(rawValue: args.values["scalar-loss"] ?? NativeScalarLoss.absoluteV1.rawValue) else {
-        throw NativeTrainingError.invalid("Choose --scalar-loss absolute-v1, logit-cross-entropy-v2 or native-detail-v3 to match the recorded training objective.")
+    guard let scalarLoss = NativeScalarLoss(rawValue: args.values["scalar-loss"] ?? (args.values["architecture"] == NativeArchitecture.compactIdentifier ? NativeScalarLoss.linearDetailV1.rawValue : NativeScalarLoss.absoluteV1.rawValue)) else {
+        throw NativeTrainingError.invalid("Choose --scalar-loss absolute-v1, logit-cross-entropy-v2 native-detail-v3 or linear-detail-v1 to match the recorded training objective.")
     }
     guard let rate = Double(args.values["learning-rate"] ?? "0.001"), rate.isFinite, rate > 0, rate <= 1 else { throw NativeTrainingError.invalid("Invalid probe learning rate") }
     let cancellation = NativeCancellation()

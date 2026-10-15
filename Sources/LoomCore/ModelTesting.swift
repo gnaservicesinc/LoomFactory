@@ -1,5 +1,7 @@
 import Foundation
+import ImageIO
 import LoomNative
+import Metal
 
 public struct ModelTestResult: Sendable {
     public let directory: URL
@@ -86,6 +88,31 @@ struct ModelTestSelection: Sendable {
     }
 }
 
+/// A conservative admission forecast, not a promise about allocator behavior.
+/// Fresh width-32 forward/evaluation probes used 5.06 GB at 1K and 20.17 GB at
+/// 2K. 256 bytes per width-pixel leaves headroom above both measured slopes.
+enum CompactModelMemoryAdmission {
+    static func forecast(width: Int, height: Int, featureWidth: Int, parameterCount: Int) -> UInt64 {
+        guard width > 0, height > 0, featureWidth > 0, parameterCount >= 0 else { return .max }
+        var activation = UInt64(width)
+        for factor in [UInt64(height), UInt64(featureWidth), 256] {
+            let product = activation.multipliedReportingOverflow(by: factor)
+            guard !product.overflow else { return .max }
+            activation = product.partialValue
+        }
+        let weights = UInt64(parameterCount).multipliedReportingOverflow(by: 12)
+        guard !weights.overflow else { return .max }
+        let total = activation.addingReportingOverflow(weights.partialValue)
+        return total.overflow ? .max : total.partialValue
+    }
+
+    static func budget(physical: UInt64, recommendedMetal: UInt64?, allocatedMetal: UInt64) -> UInt64 {
+        let machine = physical - physical / 4
+        guard let recommendedMetal else { return machine }
+        return min(machine, recommendedMetal > allocatedMetal ? recommendedMetal - allocatedMetal : 0)
+    }
+}
+
 enum ModelTestWorker {
     typealias Predictor = (_ input: [Float], _ height: Int, _ width: Int) throws -> [Float]
 
@@ -104,26 +131,79 @@ enum ModelTestWorker {
         guard model.weightsSHA256 == (try NativeFactoryTraining.sha(model.weightsURL, cancellation: cancellation)) else {
             throw LoomError("The selected weights changed before testing started. Choose the saved version again.")
         }
+        var memoryAdmission: [String: Any]?
+        var admittedDimensions: (width: Int, height: Int)?
+        if model.architecture.isCompact {
+            let options = [kCGImageSourceShouldCache: false] as CFDictionary
+            guard let source = CGImageSourceCreateWithURL(original as CFURL, options),
+                  let metadata = CGImageSourceCopyPropertiesAtIndex(source, 0, options) as? [CFString: Any],
+                  let width = (metadata[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+                  let height = (metadata[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+                  model.architecture.supportsGrid(height: height, width: width) else {
+                throw LoomError("Compact native model tests require native image dimensions of at least 32 pixels and multiples of eight. Choose a compatible original image.")
+            }
+            NativeImages.clearDecodedPixelCache()
+            let metal = MTLCreateSystemDefaultDevice()
+            let required = CompactModelMemoryAdmission.forecast(width: width, height: height,
+                featureWidth: model.architecture.width, parameterCount: model.architecture.parameterCount)
+            let budget = CompactModelMemoryAdmission.budget(physical: ProcessInfo.processInfo.physicalMemory,
+                recommendedMetal: metal?.recommendedMaxWorkingSetSize, allocatedMetal: UInt64(metal?.currentAllocatedSize ?? 0))
+            guard required <= budget else {
+                let gib = Double(1 << 30)
+                throw LoomError(String(format: "Whole-field compact inference has a conservative memory forecast of %.1f GiB; the current budget is %.1f GiB. Use a compatible smaller native image or free memory before testing.", Double(required) / gib, Double(budget) / gib))
+            }
+            memoryAdmission = ["kind": "conservative-forecast-v1", "forecast_bytes": required,
+                "budget_bytes": budget, "bytes_per_width_pixel": 256, "bytes_per_parameter": 12]
+            admittedDimensions = (width, height)
+        }
         let image = try autoreleasepool { try NativeImages.readRGB(from: original, cancellation: cancellation) }
         NativeImages.clearDecodedPixelCache()
         try cancellation.check()
+        if model.architecture.isCompact {
+            guard admittedDimensions?.width == image.width, admittedDimensions?.height == image.height else {
+                throw LoomError("The diffuse image dimensions changed after its memory preflight. Run the test again on the completed image.")
+            }
+            guard model.architecture.supportsGrid(height: image.height, width: image.width) else {
+                throw LoomError("Compact native model tests require native image dimensions of at least 32 pixels and multiples of eight. Choose a compatible original image.")
+            }
+        }
         let predictor: Predictor
         if let suppliedPredictor { predictor = suppliedPredictor }
         else {
             progress(.init(type: "status", message: "Loading saved \(model.source == .checkpoint ? "checkpoint" : "model")…"))
             let weights = try NativeWeights.read(from: model.weightsURL)
             let session = try NativeTrainingSession(architecture: model.architecture,
-                options: NativeTrainingOptions(), seed: 0, weights: weights, cancellation: cancellation)
+                options: NativeTrainingOptions(scalarLoss: model.architecture.isCompact ? .linearDetailV1 : .absoluteV1),
+                seed: 0, weights: weights, cancellation: cancellation)
             predictor = { input, height, width in
                 try session.predict(input: input, batchSize: 1, height: height, width: width)
             }
         }
         // Fixed tile dimensions bound GPU scratch use even for an 8K original.
         // Source pixels retain their native coordinates and numeric precision.
-        let tileSize = min(1024, model.imageSize)
-        let plan = try ModelTestTilePlan(width: image.width, height: image.height, tileSize: tileSize)
-        let pixels = try ModelTestImage.predict(image: image, plan: plan, map: model.map,
-            cancellation: cancellation, progress: progress, predictor: predictor)
+        let tileSize: Int, tileCount: Int, overlap: Int
+        let pixels: [Float]
+        if model.architecture.isCompact {
+            // Compact channel attention uses the complete field's mean. Tiling
+            // changes its math even when overlaps would hide a visible seam.
+            tileSize = max(image.width, image.height); tileCount = 1; overlap = 0
+            var input = [Float](repeating: 0, count: image.values.count)
+            let plane = image.width * image.height
+            for pixel in 0..<plane {
+                if pixel % 65536 == 0 { try cancellation.check() }
+                for channel in 0..<3 { input[channel * plane + pixel] = image.values[pixel * 3 + channel] }
+            }
+            progress(.init(type: "status", message: "Testing the complete native image field…"))
+            pixels = try predictor(input, image.height, image.width)
+            guard pixels.count == plane * model.architecture.outputChannels,
+                  pixels.allSatisfy(\.isFinite) else { throw LoomError("The saved compact model produced invalid native output pixels.") }
+        } else {
+            tileSize = min(1024, model.imageSize)
+            let plan = try ModelTestTilePlan(width: image.width, height: image.height, tileSize: tileSize)
+            tileCount = plan.tiles.count; overlap = plan.overlap
+            pixels = try ModelTestImage.predict(image: image, plan: plan, map: model.map,
+                cancellation: cancellation, progress: progress, predictor: predictor)
+        }
         let statistics = try ModelTestOutputStatistics(values: pixels, cancellation: cancellation)
         let saturationNote = statistics.saturationNote(map: model.map)
         try cancellation.check()
@@ -137,7 +217,8 @@ enum ModelTestWorker {
         try NativeFloatEXR.write(pixels, channels: model.architecture.outputChannels,
             width: image.width, height: image.height, to: staging.appendingPathComponent(name), cancellation: cancellation)
         try ModelTestImage.writePNG(pixels, channels: model.architecture.outputChannels,
-            width: image.width, height: image.height, to: staging.appendingPathComponent(previewName), cancellation: cancellation)
+            width: image.width, height: image.height, to: staging.appendingPathComponent(previewName),
+            clampPreview: model.architecture.isCompact, cancellation: cancellation)
         try cancellation.check()
         guard inputHash == (try NativeFactoryTraining.sha(original, cancellation: cancellation)) else {
             throw LoomError("The diffuse image changed during testing. Run the test again on the completed image.")
@@ -146,11 +227,13 @@ enum ModelTestWorker {
             throw LoomError("The saved weights changed during testing. Choose the version again.")
         }
         let note = (saturationNote.map { $0 + " " } ?? "")
-            + "Original \(image.width) × \(image.height) resolution; \(plan.tiles.count) overlapping native tile\(plan.tiles.count == 1 ? "" : "s"). "
-            + "Overlap blending can differ from whole-image inference. "
-            + (model.map == .normal ? "OpenGL normal vectors are normalized after blending. " : "")
+            + (model.architecture.isCompact
+                ? "Original \(image.width) × \(image.height) resolution; one complete native field, with raw linear output. "
+                : "Original \(image.width) × \(image.height) resolution; \(tileCount) overlapping native tile\(tileCount == 1 ? "" : "s"). Overlap blending can differ from whole-image inference. ")
+            + (model.map == .normal && !model.architecture.isCompact ? "OpenGL normal vectors are normalized after blending. " : "")
             + "The canonical EXR stores the Float32 prediction values without clamping or normalization. "
-            + "The PNG preview uses fixed [0,1] values quantized to 16 bits, without per-output normalization."
+            + (model.architecture.isCompact ? "The PNG preview clamps to [0,1] before 16-bit quantization, without per-output normalization."
+                : "The PNG preview uses fixed [0,1] values quantized to 16 bits, without per-output normalization.")
         try NativeFactoryTraining.writeJSON(["schema": "loom-factory-model-test-v1", "run_id": model.runID,
             "weight_source": model.source.rawValue, "dataset_id": model.datasetID, "map": model.map.rawValue,
             "architecture": model.architecture.identifier, "input_path": original.path, "input_sha256": inputHash,
@@ -161,8 +244,11 @@ enum ModelTestWorker {
             "preview_bits_per_channel": 16, "preview_value_range": [0, 1],
             "output_statistics": statistics.record,
             "output_diagnostic": saturationNote as Any? ?? NSNull(),
-            "width": image.width, "height": image.height, "tile_size": tileSize, "tile_count": plan.tiles.count,
-            "overlap": plan.overlap, "stitching": "linear-feather-overlap-v1",
+            "width": image.width, "height": image.height, "tile_size": tileSize, "tile_count": tileCount,
+            "overlap": overlap, "stitching": model.architecture.isCompact ? "whole-field-v1" : "linear-feather-overlap-v1",
+            "normal_output_transform": model.map == .normal && !model.architecture.isCompact ? "unit-normalize-after-blending" : "none",
+            "head_activation": model.architecture.isCompact ? "linear" : "sigmoid",
+            "memory_admission": memoryAdmission as Any? ?? NSNull(),
             "normal_convention": model.map == .normal ? "OpenGL" as Any : NSNull(),
             "created_at": ISO8601DateFormatter().string(from: .now), "note": note],
             to: staging.appendingPathComponent("test.json"))
@@ -170,7 +256,7 @@ enum ModelTestWorker {
         try FileManager.default.moveItem(at: staging, to: output)
         let result = ModelTestResult(directory: output, inputURL: original, outputURL: output.appendingPathComponent(name),
             runID: model.runID, source: model.source, map: model.map, width: image.width, height: image.height,
-            tileSize: tileSize, tileCount: plan.tiles.count, note: note, previewURL: output.appendingPathComponent(previewName))
+            tileSize: tileSize, tileCount: tileCount, note: note, previewURL: output.appendingPathComponent(previewName))
         progress(.init(type: "completed", message: "Saved full-resolution \(model.map.rawValue) output", progress: 1))
         return result
     }

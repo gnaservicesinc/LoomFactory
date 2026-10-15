@@ -49,7 +49,7 @@ extension LoomProject {
         let models = try ComparisonWorker.models(artifactIDs, artifacts: current.artifacts,
             projectFolder: projectFolder, projectID: document.id, datasetID: datasetID, map: map)
         guard let dataset = current.datasets.first(where: { $0.id == datasetID }) else { return [] }
-        let size = models.map(\.imageSize).min()!
+        let size = ComparisonWorker.commonCropSize(models)
         return try TrainingPairSelector.select(images: current.images, dataset: dataset.name, map: map, size: size).map { pair in
             ComparisonWorker.option(pair, first: models[0], second: models[1], projectFolder: projectFolder)
         }
@@ -66,7 +66,7 @@ extension LoomProject {
         }
         let models = try ComparisonWorker.models([firstArtifactID, secondArtifactID], artifacts: current.artifacts,
             projectFolder: projectFolder, projectID: document.id, datasetID: datasetID, map: map)
-        let size = models.map(\.imageSize).min()!
+        let size = ComparisonWorker.commonCropSize(models)
         guard let pair = try TrainingPairSelector.select(images: current.images, dataset: dataset.name, map: map, size: size)
             .first(where: { $0.id == pairID }) else { throw LoomError("The selected diffuse and target pair is no longer available. Refresh the comparison.") }
         let option = ComparisonWorker.option(pair, first: models[0], second: models[1], projectFolder: projectFolder)
@@ -93,6 +93,14 @@ private enum ComparisonWorker {
         let coreMLHash: String?
     }
 
+    static func commonCropSize(_ models: [Model]) -> Int {
+        let size = models.map(\.imageSize).min()!
+        // Compare the same original pixels at a grid both constructors accept.
+        // Reducing the crop extent never resamples or pads a source image.
+        return models.contains { $0.artifact.architecture == NativeArchitecture.compactIdentifier }
+            ? size - size % 8 : size
+    }
+
     static func models(_ ids: [String], artifacts: [ModelArtifact], projectFolder: URL, projectID: String,
                        datasetID: String, map: MapRole) throws -> [Model] {
         guard ids.count == 2, ids[0] != ids[1] else { throw LoomError("Choose two different saved model versions.") }
@@ -109,9 +117,16 @@ private enum ComparisonWorker {
                   descriptor["dataset_id"] as? String == datasetID,
                   descriptor["map"] as? String == map.rawValue,
                   descriptor["architecture"] as? String == artifact.architecture,
-                  [NativeArchitecture.identifier, NativeArchitecture.pyramidIdentifier].contains(artifact.architecture),
                   let size = descriptor["image_size"] as? Int, (32...8192).contains(size) else {
                 throw LoomError("The saved model descriptor does not match this source project.")
+            }
+            if artifact.architecture == NativeArchitecture.compactIdentifier {
+                _ = try TrainingRunFiles.nativeArchitecture(from: descriptor, map: map)
+                guard size % 8 == 0 else {
+                    throw LoomError("Compact native models require image dimensions that are multiples of eight.")
+                }
+            } else if ![NativeArchitecture.identifier, NativeArchitecture.pyramidIdentifier].contains(artifact.architecture) {
+                throw LoomError("The saved model has an unsupported native architecture identity.")
             }
             let training = descriptor["training"] as? [String: Any]
             return Model(artifact: artifact, imageSize: size,
@@ -209,11 +224,13 @@ private enum ComparisonWorker {
             : "Both outputs are scored against the same original target values. MAE measures numeric agreement on this crop; lower error does not always look better."
         try NativeFactoryTraining.writeJSON(["schema": "loom-factory-comparison-v1", "model_a": models[0].artifact.id,
             "model_b": models[1].artifact.id, "model_a_sha256": modelHashes[0], "model_b_sha256": modelHashes[1],
+            "model_a_architecture": models[0].artifact.architecture, "model_b_architecture": models[1].artifact.architecture,
             "pair_id": pair.id, "input_path": pair.input.url.path, "target_path": pair.target.url.path,
             "input_sha256": inputHash, "target_sha256": targetHash, "crop": ["x": crop.x, "y": crop.y, "size": size],
             "mae_a": a, "mae_b": b, "output_difference_mae": difference,
             "membership_a": option.seenByFirst.rawValue, "membership_b": option.seenBySecond.rawValue,
-            "target_note": note, "display": "16-bit PNG, fixed [0,1] scale; no per-output normalization"],
+            "target_note": note, "output_scoring_transform": "none",
+            "display": "16-bit PNG preview clamped to fixed [0,1] scale; no per-output normalization"],
             to: output.appendingPathComponent("comparison.json"))
         progress(.init(type: "completed", message: "Saved both model outputs and the common input and target crop", progress: 1))
         return ModelComparisonResult(directory: output, inputURL: input, targetURL: target, firstOutputURL: first,

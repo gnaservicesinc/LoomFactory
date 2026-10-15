@@ -99,10 +99,11 @@ enum ModelTestImage {
     }
 
     static func writePNG(_ values: [Float], channels: Int, width: Int, height: Int, to url: URL,
+                         clampPreview: Bool = false,
                          cancellation: NativeCancellation = NativeCancellation()) throws {
         let count = width * height
         guard [1, 3].contains(channels), width > 0, height > 0, values.count == count * channels,
-              values.allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1 }) else {
+              values.allSatisfy({ $0.isFinite && (clampPreview || ($0 >= 0 && $0 <= 1)) }) else {
             throw LoomError("Cannot save invalid model test pixels.")
         }
         var data = Data(count: count * channels * MemoryLayout<UInt16>.stride)
@@ -111,7 +112,9 @@ enum ModelTestImage {
             for pixel in 0..<count {
                 if pixel % 65536 == 0 { try cancellation.check() }
                 for channel in 0..<channels {
-                    pixels[pixel * channels + channel] = UInt16((values[channel * count + pixel] * 65535).rounded()).bigEndian
+                    let value = values[channel * count + pixel]
+                    let preview = clampPreview ? min(1, max(0, value)) : value
+                    pixels[pixel * channels + channel] = UInt16((preview * 65535).rounded()).bigEndian
                 }
             }
         }

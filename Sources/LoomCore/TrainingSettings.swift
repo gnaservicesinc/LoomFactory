@@ -4,12 +4,22 @@ import LoomNative
 public enum TrainingNetwork: String, Codable, CaseIterable, Sendable, Identifiable {
     case pyramid = "loom-factory-material-pyramid-v1"
     case residual = "loom-factory-material-residual-v1"
+    case compactNAF = "loom-factory-material-compact-naf-v1"
     public var id: String { rawValue }
-    public var displayName: String { self == .pyramid ? "Pyramid (experimental)" : "Original residual" }
+    public var displayName: String {
+        switch self {
+        case .pyramid: "Pyramid (experimental)"
+        case .residual: "Original residual"
+        case .compactNAF: "Compact NAF (comparison)"
+        }
+    }
+    public var blocks: Int { self == .compactNAF ? 1 : 4 }
     public var detail: String {
-        self == .pyramid
-            ? "Downsamples learned features. Saved brick models show sampling-grid artifacts; use only for controlled comparisons."
-            : "Runs every layer at native resolution without downsampling or upsampling feature grids. Default for new models."
+        switch self {
+        case .pyramid: "Downsamples learned features. Saved brick models show sampling-grid artifacts; use only for controlled comparisons."
+        case .residual: "Runs every layer at native resolution without downsampling or upsampling feature grids."
+        case .compactNAF: "Earlier fast design with reflection padding, full-resolution skips and a linear output. Compare whole-material detail before choosing it."
+        }
     }
 }
 
@@ -118,7 +128,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
         self.flipCrops = flipCrops; self.rotateCrops = rotateCrops
         self.exaggerateFeatures = exaggerateFeatures; self.seed = seed; self.modelWidth = modelWidth
         self.modelArchitecture = modelArchitecture
-        self.scalarLoss = scalarLoss
+        self.scalarLoss = modelArchitecture == NativeArchitecture.compactIdentifier && scalarLoss == .logitCrossEntropyV2 ? .linearDetailV1 : scalarLoss
         self.continueLatestWeights = continueLatestWeights; self.modelBlocks = modelBlocks
         self.optimizer = optimizer; self.weightDecay = weightDecay; self.beta1 = beta1
         self.beta2 = beta2 ?? (optimizer == .lion ? 0.99 : 0.999); self.momentum = momentum
@@ -164,6 +174,10 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     /// Switching a saved project's fresh run keeps its approximate capacity,
     /// while its saved checkpoints keep their exact recorded architecture.
     public mutating func useFullResolutionForFreshRun(map: MapRole) {
+        if modelArchitecture == NativeArchitecture.compactIdentifier {
+            scalarLoss = .linearDetailV1
+            return
+        }
         if map != .normal { scalarLoss = .logitCrossEntropyV2 }
         guard modelArchitecture != NativeArchitecture.identifier else { return }
         let budget = parameterCount(map: map)
@@ -184,7 +198,14 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
         if !(1...64).contains(batchSize) { return "Batch size must be between 1 and 64." }
         if !learningRate.isFinite || !(0 < learningRate && learningRate <= 1) { return "Learning rate must be greater than zero and at most one." }
         if !(8...256).contains(modelWidth) || !(1...12).contains(modelBlocks) { return "Model width must be 8–256 and residual blocks must be 1–12." }
-        if TrainingNetwork(rawValue: modelArchitecture) == nil { return "This model uses an unsupported network architecture. Choose Pyramid or Original residual." }
+        if TrainingNetwork(rawValue: modelArchitecture) == nil { return "This model uses an unsupported network architecture. Choose a supported network." }
+        if modelArchitecture == NativeArchitecture.compactIdentifier {
+            if modelBlocks != 1 { return "Compact NAF has one block in each of seven stages." }
+            if imageSize % 8 != 0 { return "Compact NAF needs a native crop size that is a multiple of 8." }
+            if scalarLoss != .linearDetailV1 { return "Compact NAF uses its linear pixel and detail objective." }
+        } else if scalarLoss == .linearDetailV1 {
+            return "The linear detail objective belongs to Compact NAF."
+        }
         if !(1...1024).contains(gradientAccumulationSteps) { return "Gradient accumulation must be between 1 and 1,024 batches." }
         if gradientClipPolicy != .off {
             if !gradientClipNorm.isFinite || !(0...1000).contains(gradientClipNorm) { return "Gradient clipping must be between zero and 1,000. Zero disables clipping." }

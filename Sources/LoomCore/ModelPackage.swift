@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import LoomNative
 
 extension LoomProject {
     public func exportPackage(name: String, version: String) async throws -> URL {
@@ -64,6 +65,15 @@ extension LoomProject {
                 }
                 guard !models.isEmpty else { throw LoomError("Train at least one map model for \(categoryName) before exporting the classifier's datasets.") }
                 categories.append(["id": id, "name": categoryName, "version": version, "models": models])
+            }
+            if categories.contains(where: { category in
+                (category["models"] as? [[String: Any]])?.contains {
+                    $0["architecture"] as? String == NativeArchitecture.compactIdentifier
+                } == true
+            }) {
+                let licenses = stage.appendingPathComponent("licenses", isDirectory: true)
+                try FileManager.default.createDirectory(at: licenses, withIntermediateDirectories: true)
+                try NativeLicenses.nafNet.write(to: licenses.appendingPathComponent("NAFNet_LICENSE"), atomically: true, encoding: .utf8)
             }
             let files = try packageFiles(stage)
             let manifest: [String: Any] = ["schema": "texture-loom.package.v1", "id": document.id,

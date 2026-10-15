@@ -15,20 +15,24 @@ public enum NativeTrainingError: Error, LocalizedError {
 public struct NativeArchitecture: Sendable, Equatable {
     public static let identifier = "loom-factory-material-residual-v1"
     public static let pyramidIdentifier = "loom-factory-material-pyramid-v1"
+    public static let compactIdentifier = "loom-factory-material-compact-naf-v1"
     public let identifier: String
     public let mapKind: String
     public let width: Int
     public let blocks: Int
     public var outputChannels: Int { mapKind == "normal" ? 3 : 1 }
     public init(mapKind: String, width: Int, blocks: Int, identifier: String = Self.identifier) throws {
-        guard [Self.identifier, Self.pyramidIdentifier].contains(identifier),
-              ["depth", "roughness", "normal"].contains(mapKind), (1...512).contains(width), (1...64).contains(blocks) else {
+        guard [Self.identifier, Self.pyramidIdentifier, Self.compactIdentifier].contains(identifier),
+              ["depth", "roughness", "normal"].contains(mapKind), (1...512).contains(width), (1...64).contains(blocks),
+              identifier != Self.compactIdentifier || blocks == 1 else {
             throw NativeTrainingError.invalid("Unsupported native architecture identity, map kind, or dimensions.")
         }
         self.identifier = identifier; self.mapKind = mapKind; self.width = width; self.blocks = blocks
     }
     public var isPyramid: Bool { identifier == Self.pyramidIdentifier }
+    public var isCompact: Bool { identifier == Self.compactIdentifier }
     public var parameterShapes: [String: [Int]] {
+        if isCompact { return NativeCompactNetwork.parameterShapes(width: width, outputChannels: outputChannels) }
         var shapes: [String: [Int]] = ["input.weight": [width, 3, 3, 3], "input.bias": [width],
                                       "output.weight": [outputChannels, width, 3, 3], "output.bias": [outputChannels]]
         let bodyWidth = isPyramid ? width * 4 : width
@@ -50,12 +54,36 @@ public struct NativeArchitecture: Sendable, Equatable {
         return shapes
     }
     public var convolutionNames: [String] {
-        ["input"] + (isPyramid ? ["encoder.half", "encoder.quarter"] : [])
+        if isCompact { return NativeCompactNetwork.convolutionNames }
+        return ["input"] + (isPyramid ? ["encoder.half", "encoder.quarter"] : [])
             + (0..<blocks).flatMap { ["body.\($0).conv1", "body.\($0).conv2"] }
             + (isPyramid ? ["decoder.half", "decoder.full"] : []) + ["output"]
     }
     public func convolutionStride(_ name: String) -> Int {
-        isPyramid && ["encoder.half", "encoder.quarter"].contains(name) ? 2 : 1
+        if isCompact { return name.hasPrefix("down.") ? 2 : 1 }
+        return isPyramid && ["encoder.half", "encoder.quarter"].contains(name) ? 2 : 1
+    }
+    public func convolutionKernelSize(_ name: String) -> Int {
+        if isCompact {
+            if name.hasPrefix("down.") { return 2 }
+            return name == "input" || name == "output" || name.hasSuffix(".depthwise") ? 3 : 1
+        }
+        return 3
+    }
+    public func convolutionGroups(_ name: String) -> Int {
+        guard isCompact, name.hasSuffix(".depthwise") else { return 1 }
+        return parameterShapes[name + ".weight"]![0]
+    }
+    /// Depthwise kernels, affine normalization and residual gains remain part
+    /// of the frozen base. Compact LoRA adapts only its dense convolutions.
+    public var adaptableConvolutionNames: [String] {
+        isCompact ? convolutionNames.filter { !$0.hasSuffix(".depthwise") } : convolutionNames
+    }
+    public var usesLinearOutput: Bool { isCompact }
+    /// Compact's three unpadded stride-two levels require exact multiples of
+    /// eight. Unsupported grids fail rather than resizing or padding images.
+    public func supportsGrid(height: Int, width: Int) -> Bool {
+        !isCompact || (height >= 32 && width >= 32 && height % 8 == 0 && width % 8 == 0)
     }
     public var parameterCount: Int { parameterShapes.values.reduce(0) { $0 + $1.reduce(1, *) } }
     public var descriptor: [String: Any] {
@@ -67,6 +95,18 @@ public struct NativeArchitecture: Sendable, Equatable {
             result["scale_channels"] = [width, width * 2, width * 4]
             result["residual_scale"] = 4
             result["upsampling"] = "nearest-2x-trim-to-skip"
+        } else if isCompact {
+            result["output"] = "float32 NCHW raw linear values"
+            result["head_activation"] = "linear"
+            result["padding"] = "reflect-v1"
+            result["scale_channels"] = [width, width * 2, width * 4, width * 8]
+            result["blocks_per_stage"] = 1
+            result["stage_count"] = 7
+            result["upsampling"] = "nearest-2x-exact-repeat"
+            result["grid_multiple"] = 8
+            result["minimum_grid_size"] = 32
+            result["normal_output_transform"] = "none"
+            result["lora_scope"] = "dense-convolutions-only"
         }
         return result
     }
@@ -134,6 +174,10 @@ extension MPSGraph {
     func materialLogits(input: MPSGraphTensor, architecture: NativeArchitecture,
                         parameters: [String: MPSGraphTensor], adapter: NativeAdapterConfiguration?,
                         channelsLast: Bool = false) -> MPSGraphTensor {
+        if architecture.isCompact {
+            return compactMaterialNetwork(input: input, architecture: architecture, parameters: parameters,
+                adapter: adapter, channelsLast: channelsLast)
+        }
         func conv(_ source: MPSGraphTensor, _ name: String) -> MPSGraphTensor {
             let stride = architecture.convolutionStride(name)
             var value = convolution(source, weight: parameters[name + ".weight"]!, kernel: 3,
@@ -174,6 +218,7 @@ extension MPSGraph {
         return value
     }
     func materialPrediction(logits: MPSGraphTensor, architecture: NativeArchitecture) -> MPSGraphTensor {
+        if architecture.usesLinearOutput { return logits }
         var value = sigmoid(with: logits, name: nil)
         if architecture.mapKind == "normal" {
             value = addition(scaled(normalizedVector(subtraction(scaled(value, 2), scalar(1), name: nil)), 0.5), scalar(0.5), name: nil)

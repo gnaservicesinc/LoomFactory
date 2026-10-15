@@ -24,7 +24,7 @@ final class ScalarTrainingContractTests: XCTestCase {
     func testSavedObjectiveIDsRoundTripAndUnknownIDsAreRejected() throws {
         let architecture = try NativeArchitecture(mapKind: "roughness", width: 8, blocks: 1)
         let descriptor: [String: Any] = ["architecture": architecture.identifier, "architecture_config": architecture.descriptor]
-        for objective in NativeScalarLoss.allCases {
+        for objective in NativeScalarLoss.allCases where objective != .linearDetailV1 {
             let settings = TrainingSettings(imageSize: 32, modelWidth: 8, modelBlocks: 1,
                 modelArchitecture: architecture.identifier, scalarLoss: objective)
             let record = NativeFactoryTraining.settingsJSON(settings)

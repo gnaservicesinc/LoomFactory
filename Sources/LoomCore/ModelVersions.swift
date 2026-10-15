@@ -202,7 +202,8 @@ extension LoomProject {
                     meanGradientNorm: row["mean_gradient_norm"] as? Double, peakGradientNorm: row["peak_gradient_norm"] as? Double,
                     clippedUpdates: row["clipped_updates"] as? Int, optimizerUpdates: row["optimizer_updates"] as? Int,
                     gradientClipThreshold: row["gradient_clip_threshold"] as? Double,
-                    scalarLoss: map == .normal ? nil : (row["scalar_loss"] as? String).flatMap(NativeScalarLoss.init(rawValue:)) ?? settings?.scalarLoss)
+                    scalarLoss: map == .normal && settings?.modelArchitecture != NativeArchitecture.compactIdentifier
+                        ? nil : (row["scalar_loss"] as? String).flatMap(NativeScalarLoss.init(rawValue:)) ?? settings?.scalarLoss)
             }
             let selected = selection.models.first { $0.datasetID == datasetID && $0.map == map }
             let active = selected?.runID ?? artifacts.first { $0.kind == "map" && $0.datasetID == datasetID && $0.map == map }?.directory.lastPathComponent
@@ -225,12 +226,22 @@ extension LoomProject {
 
     func prepareTrainingStart(_ start: TrainingStart, datasetID: String, map: MapRole,
                               settings: TrainingSettings, scalarLossOverride: NativeScalarLoss? = nil) throws -> (settings: TrainingSettings, resume: TrainingResume?) {
-        guard scalarLossOverride == nil || map != .normal else {
-            throw LoomError("Scalar training objectives apply to depth and roughness. Normal maps retain their angular objective.")
-        }
         guard start != .fresh else {
             var fresh = settings
-            if map != .normal { fresh.scalarLoss = scalarLossOverride ?? .logitCrossEntropyV2 }
+            if fresh.modelArchitecture == NativeArchitecture.compactIdentifier {
+                guard scalarLossOverride == nil || scalarLossOverride == .linearDetailV1 else {
+                    throw LoomError("Compact native models require their linear pixel and detail objective. Choose a residual model to use another objective.")
+                }
+                fresh.scalarLoss = .linearDetailV1
+            } else {
+                guard scalarLossOverride == nil || map != .normal else {
+                    throw LoomError("Scalar training objectives apply to depth and roughness. Normal maps retain their angular objective.")
+                }
+                guard scalarLossOverride != .linearDetailV1 else {
+                    throw LoomError("The linear pixel and detail objective requires a fresh compact native model.")
+                }
+                if map != .normal { fresh.scalarLoss = scalarLossOverride ?? .logitCrossEntropyV2 }
+            }
             return (fresh, nil)
         }
         let runID: String, source: TrainingWeightSource
@@ -243,6 +254,19 @@ extension LoomProject {
         let descriptor = try TrainingRunFiles.descriptor(at: folder, source: source)
         guard let saved = TrainingRunFiles.settings(from: (source == .checkpoint ? descriptor["settings"] : descriptor["training"]) as? [String: Any] ?? [:], descriptor: descriptor) else {
             throw LoomError("This saved version has no readable native model settings.")
+        }
+        if saved.modelArchitecture == NativeArchitecture.compactIdentifier {
+            guard saved.scalarLoss == .linearDetailV1,
+                  scalarLossOverride == nil || scalarLossOverride == .linearDetailV1 else {
+                throw LoomError("This compact model must continue with its saved linear pixel and detail objective.")
+            }
+        } else {
+            guard scalarLossOverride == nil || map != .normal else {
+                throw LoomError("Scalar training objectives apply to depth and roughness. Normal maps retain their angular objective.")
+            }
+            guard scalarLossOverride != .linearDetailV1 else {
+                throw LoomError("The linear pixel and detail objective requires a fresh compact native model.")
+            }
         }
         var resolved = settings
         if resolved.seed == -1 { resolved.seed = saved.seed }
@@ -428,7 +452,9 @@ enum TrainingRunFiles {
         // Completed native descriptors use the backend's display name, while settings store its stable raw value.
         if converted["device"] as? String == "metal" { converted["device"] = TrainingDevice.metal.rawValue }
         guard let data = try? JSONSerialization.data(withJSONObject: converted),
-              let settings = try? JSONDecoder().decode(TrainingSettings.self, from: data) else { return nil }
+              let settings = try? JSONDecoder().decode(TrainingSettings.self, from: data),
+              identity != NativeArchitecture.compactIdentifier
+                || (blocks == 1 && size % 8 == 0 && settings.scalarLoss == .linearDetailV1) else { return nil }
         return settings
     }
 
@@ -451,6 +477,16 @@ enum TrainingRunFiles {
                   configuration["residual_scale"] as? Int == 4,
                   configuration["upsampling"] as? String == "nearest-2x-trim-to-skip" else {
                 throw LoomError("The saved pyramid model's feature scales are inconsistent.")
+            }
+        } else if architecture.isCompact {
+            let expected = architecture.descriptor
+            for key in ["input", "output", "input_channels", "output_channels", "normal_convention",
+                        "head_activation", "padding", "scale_channels", "blocks_per_stage", "stage_count",
+                        "upsampling", "grid_multiple", "minimum_grid_size", "normal_output_transform", "lora_scope"] {
+                guard let actual = configuration[key], let value = expected[key],
+                      NSDictionary(dictionary: [key: actual]).isEqual(to: [key: value]) else {
+                    throw LoomError("The saved compact model's \(key) contract is inconsistent.")
+                }
             }
         }
         return architecture

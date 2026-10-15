@@ -146,3 +146,18 @@ set `LOOM_NATIVE_ROUGHNESS_RUN_DIRECTORY` to an exported collapsed roughness run
 1K teaching pair, then run `swift test --filter NativeScalarLossTests`. The test
 uses a 64-pixel diagnostic crop and updates only in-memory copies of the saved
 weights. This proves a recoverable teaching signal, not whole-material quality.
+
+
+Compact NAF is available as a separate comparison constructor with immutable ID
+`loom-factory-material-compact-naf-v1`. It restores the earlier seven-stage NAF
+network, reflection borders, exact nearest-repeat decoder and linear output.
+Its fixed `linear-detail-v1` objective compares original pixel values and signed
+differences at 1, 2, 4 and 8 pixels; no objective selection is required. Existing
+residual/Pyramid weights retain their architectures and losses. Compact testing
+and deployment use the complete field because global channel attention cannot
+be reproduced by independently tiled inference. Native dimensions must be
+multiples of eight and at least 32; memory preflight rejects requests exceeding
+its conservative budget without resampling. Raw finite Float32 scalar/normal
+output is preserved through EXR and deployment, with clamping confined to previews.
+See `Docs/Validation/compact-naf-2026-10-14.md` for exact historical pixel parity,
+measured 0.474-second real 1K updates, memory receipts and validation limits.

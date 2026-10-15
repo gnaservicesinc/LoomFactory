@@ -151,7 +151,10 @@ struct TrainingPanel: View {
                 Text("Starts new weights and keeps every previous version. A successful replacement becomes the model used for package export.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-            if model.selectedMap != .normal {
+            if selectedNetwork == .compactNAF {
+                Text("Training compares original pixel values and signed detail at 1, 2, 4 and 8 pixels. The linear output keeps corrective gradients without sigmoid saturation.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            } else if model.selectedMap != .normal {
                 Picker("Training objective", selection: $model.trainingScalarLossOverride) {
                     Text(continuing ? "Keep saved objective" : "Stable pixel loss (v2)").tag(Optional<NativeScalarLoss>.none)
                     Text("Native pixel detail (v3, experimental)").tag(Optional(NativeScalarLoss.nativeDetailV3))
@@ -198,13 +201,15 @@ struct TrainingPanel: View {
                 Text("\(model.effectiveTrainingSettings.parameterCount(map: model.selectedMap).formatted()) trainable parameters")
                     .font(.callout.weight(.semibold)).monospacedDigit()
                 Spacer()
-                Text("\(model.effectiveTrainingSettings.modelWidth) channels · \(model.effectiveTrainingSettings.modelBlocks) blocks")
+                Text(selectedNetwork == .compactNAF ? "\(model.effectiveTrainingSettings.modelWidth) channels · 7 stages" : "\(model.effectiveTrainingSettings.modelWidth) channels · \(model.effectiveTrainingSettings.modelBlocks) blocks")
                     .font(.caption).foregroundStyle(.secondary)
             }.accessibilityElement(children: .combine).accessibilityIdentifier("training.parameterCount")
             DisclosureGroup("Custom architecture", isExpanded: $customArchitecture) {
                 Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 11) {
                     numberRow("Channel width", value: architectureWidthBinding, detail: "8–256 channels. Custom sizes are supported.", identifier: "training.modelWidth")
-                    numberRow("Residual blocks", value: architectureBlocksBinding, detail: "1–12 blocks. More blocks add capacity and compute.", identifier: "training.modelBlocks")
+                    if selectedNetwork != .compactNAF {
+                        numberRow("Residual blocks", value: architectureBlocksBinding, detail: "1–12 blocks. More blocks add capacity and compute.", identifier: "training.modelBlocks")
+                    }
                 }.padding(.top, 8).disabled(continuing)
             }.font(.callout)
         }.toggleStyle(.checkbox)
@@ -450,9 +455,17 @@ struct TrainingPanel: View {
         Binding(get: { selectedNetwork }, set: { network in
             guard network != selectedNetwork else { return }
             let currentPreset = TrainingModelPreset.allCases.first {
-                $0.width(network: selectedNetwork) == model.settings.training.modelWidth && model.settings.training.modelBlocks == 4
+                $0.width(network: selectedNetwork) == model.settings.training.modelWidth && model.settings.training.modelBlocks == selectedNetwork.blocks
             }
             model.settings.training.modelArchitecture = network.rawValue
+            model.settings.training.modelBlocks = network.blocks
+            model.settings.training.scalarLoss = network == .compactNAF ? .linearDetailV1 : .logitCrossEntropyV2
+            model.trainingScalarLossOverride = nil
+            if network == .compactNAF {
+                model.settings.training.learningRate = 0.0001
+                model.settings.training.weightDecay = 0
+                model.settings.training.gradientClipPolicy = .fixed
+            }
             if let width = currentPreset?.width(network: network) {
                 model.settings.training.modelWidth = width
             } else {
@@ -465,12 +478,12 @@ struct TrainingPanel: View {
 
     private var presetBinding: Binding<TrainingModelPreset> {
         Binding(get: {
-            customArchitecture ? .custom : (TrainingModelPreset.allCases.first { $0.width(network: selectedNetwork) == model.effectiveTrainingSettings.modelWidth && model.effectiveTrainingSettings.modelBlocks == 4 } ?? .custom)
+            customArchitecture ? .custom : (TrainingModelPreset.allCases.first { $0.width(network: selectedNetwork) == model.effectiveTrainingSettings.modelWidth && model.effectiveTrainingSettings.modelBlocks == selectedNetwork.blocks } ?? .custom)
         }, set: { preset in
             guard let width = preset.width(network: selectedNetwork) else { customArchitecture = true; return }
             customArchitecture = false
             model.settings.training.modelWidth = width
-            model.settings.training.modelBlocks = 4
+            model.settings.training.modelBlocks = selectedNetwork.blocks
         })
     }
 
@@ -610,11 +623,17 @@ enum TrainingModelPreset: String, CaseIterable, Identifiable {
         case (.residual, .large): 164
         case (.residual, .extraLarge): 204
         case (.residual, .huge): 236
+        case (.compactNAF, .compact): 8
+        case (.compactNAF, .small): 16
+        case (.compactNAF, .medium): 22
+        case (.compactNAF, .large): 32
+        case (.compactNAF, .extraLarge): 46
+        case (.compactNAF, .huge): 64
         }
     }
     func label(map: MapRole, network: TrainingNetwork) -> String {
         guard let width = width(network: network) else { return "Custom" }
-        let count = TrainingSettings(modelWidth: width, modelArchitecture: network.rawValue).parameterCount(map: map)
+        let count = TrainingSettings(modelWidth: width, modelBlocks: network.blocks, modelArchitecture: network.rawValue).parameterCount(map: map)
         return count.formatted(.number.notation(.compactName)) + " parameters"
     }
 }

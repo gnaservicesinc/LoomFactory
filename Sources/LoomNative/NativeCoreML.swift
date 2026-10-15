@@ -42,6 +42,12 @@ public enum NativeCoreML {
             }
             try NativeWeights.validate(tensor, name: name)
         }
+        if architecture.isCompact {
+            guard imageSize.isMultiple(of: 8) else {
+                throw NativeIOError.invalid("Compact Core ML export requires dimensions divisible by eight without resizing or padding.")
+            }
+            return compactModelData(weights: weights, architecture: architecture, imageSize: imageSize)
+        }
 
         var network = CoreMLWire()
         network.integer(5, 1) // EXACT_ARRAY_MAPPING retains NCHW rank 4.
@@ -176,6 +182,129 @@ public enum NativeCoreML {
         model.integer(1, 7)
         model.message(2, description)
         model.message(500, network)
+        return model.data
+    }
+
+    /// The compact model's linear output, reflection borders, channel-wise
+    /// normalization and exact nearest replication are inference contracts.
+    /// Keep this constructor separate so older exported graphs remain unchanged.
+    private static func compactModelData(weights: [String: NativeTensor], architecture: NativeArchitecture,
+                                         imageSize: Int) -> Data {
+        var network = CoreMLWire()
+        network.integer(5, 1) // EXACT_ARRAY_MAPPING
+        network.integer(6, 1) // RANK4_IMAGE_MAPPING
+        func layer(_ name: String, _ inputs: [String], _ outputs: [String], _ field: Int, _ params: CoreMLWire) {
+            var node = CoreMLWire()
+            node.string(1, name)
+            for input in inputs { node.string(2, input) }
+            for output in outputs { node.string(3, output) }
+            for _ in inputs {
+                var tensor = CoreMLWire(); tensor.integer(1, 4); node.message(4, tensor)
+            }
+            for _ in outputs {
+                var tensor = CoreMLWire(); tensor.integer(1, 4); node.message(5, tensor)
+            }
+            node.message(field, params); network.message(1, node)
+        }
+        func operation(_ name: String, _ inputs: [String], _ field: Int, _ params: CoreMLWire = CoreMLWire()) -> String {
+            layer(name, inputs, [name], field, params); return name
+        }
+        func constant(_ name: String, _ values: [Float], shape: [Int]) -> String {
+            var params = CoreMLWire(); params.integers(1, shape)
+            var data = CoreMLWire(); data.floats(1, values); params.message(2, data)
+            return operation(name, [], 1070, params)
+        }
+        func parameter(_ name: String) -> String {
+            let tensor = weights[name]!
+            return constant(name, tensor.values, shape: tensor.shape)
+        }
+        let epsilon = constant("normalization_epsilon", [1e-6], shape: [1, 1, 1, 1])
+        func mean(_ name: String, _ input: String, axes: [Int]) -> String {
+            var params = CoreMLWire(); params.integers(1, axes); params.integer(2, 1)
+            return operation(name, [input], 1280, params)
+        }
+        func convolution(_ name: String, _ input: String, stride: Int = 1, groups: Int = 1) -> String {
+            let weight = weights[name + ".weight"]!, bias = weights[name + ".bias"]!
+            let kernel = weight.shape[2]
+            var source = input
+            if stride == 1, kernel > 1 {
+                var edge = CoreMLWire(); edge.integer(1, kernel / 2); edge.integer(2, kernel / 2)
+                var borders = CoreMLWire(); borders.message(10, edge); borders.message(10, edge)
+                var padding = CoreMLWire(); padding.message(2, CoreMLWire()); padding.message(10, borders)
+                source = operation(name + ".reflect", [input], 200, padding)
+            }
+            var params = CoreMLWire()
+            params.integer(1, weight.shape[0]); params.integer(2, weight.shape[1]); params.integer(10, groups)
+            params.integers(20, [kernel, kernel]); params.integers(30, [stride, stride]); params.integers(40, [1, 1])
+            params.message(50, CoreMLWire()) // VALID: reflection, if needed, is explicit above.
+            params.integer(70, 1)
+            var values = CoreMLWire(); values.floats(1, weight.values); params.message(90, values)
+            var offsets = CoreMLWire(); offsets.floats(1, bias.values); params.message(91, offsets)
+            return operation(name, [source], 100, params)
+        }
+        func normalize(_ name: String, _ input: String) -> String {
+            let average = mean(name + ".mean", input, axes: [1])
+            let centered = operation(name + ".centered", [input, average], 905)
+            let squares = operation(name + ".squares", [centered, centered], 900)
+            let variance = mean(name + ".variance", squares, axes: [1])
+            let adjusted = operation(name + ".adjusted_variance", [variance, epsilon], 880)
+            var squareRoot = CoreMLWire(); squareRoot.integer(1, 0)
+            let denominator = operation(name + ".denominator", [adjusted], 220, squareRoot)
+            let normalized = operation(name + ".normalized", [centered, denominator], 890)
+            let gain = parameter(name + ".weight"), bias = parameter(name + ".bias")
+            let scaled = operation(name + ".scaled", [normalized, gain], 900)
+            return operation(name + ".output", [scaled, bias], 880)
+        }
+        func gate(_ name: String, _ input: String) -> String {
+            var split = CoreMLWire(); split.integer(1, 1); split.integer(2, 2)
+            let first = name + ".first", second = name + ".second"
+            layer(name + ".split", [input], [first, second], 975, split)
+            return operation(name, [first, second], 900)
+        }
+        func block(_ name: String, _ input: String, channels: Int) -> String {
+            var value = convolution(name + ".expand", normalize(name + ".norm1", input))
+            value = convolution(name + ".depthwise", value, groups: channels * 2)
+            value = gate(name + ".gate1", value)
+            let pooled = mean(name + ".pooled", value, axes: [2, 3])
+            let attention = convolution(name + ".attention", pooled)
+            value = operation(name + ".attended", [value, attention], 900)
+            value = convolution(name + ".project", value)
+            let beta = parameter(name + ".beta")
+            let scaled = operation(name + ".scaled_residual", [value, beta], 900)
+            let residual = operation(name + ".residual", [input, scaled], 880)
+            value = convolution(name + ".ffn_expand", normalize(name + ".norm2", residual))
+            value = convolution(name + ".ffn_project", gate(name + ".gate2", value))
+            let gamma = parameter(name + ".gamma")
+            value = operation(name + ".scaled_ffn", [value, gamma], 900)
+            return operation(name + ".output", [residual, value], 880)
+        }
+        var value = convolution("input", "rgb"), skips: [String] = []
+        for level in 0..<3 {
+            value = block("encoder.\(level)", value, channels: architecture.width << level)
+            skips.append(value)
+            value = convolution("down.\(level)", value, stride: 2)
+        }
+        value = block("middle", value, channels: architecture.width * 8)
+        for level in (0..<3).reversed() {
+            value = convolution("up.\(level)", value)
+            var upsample = CoreMLWire(); upsample.integers(1, [2, 2]); upsample.integer(5, 0)
+            value = operation("up.\(level).nearest", [value], 210, upsample)
+            value = operation("up.\(level).skip", [value, skips[level]], 880)
+            value = block("decoder.\(level)", value, channels: architecture.width << level)
+        }
+        value = convolution("output", value)
+        var outputShape = CoreMLWire(); outputShape.integers(1, [1, architecture.outputChannels, 0, 0])
+        layer("output_nchw", [value], ["material_map"], 1150, outputShape)
+
+        var description = CoreMLWire()
+        description.message(1, feature(name: "rgb", channels: 3, size: imageSize, flexible: true))
+        description.message(10, feature(name: "material_map", channels: architecture.outputChannels, size: imageSize, flexible: true))
+        var metadata = CoreMLWire(); metadata.string(1, "Texture Loom model trained natively in Loom Factory")
+        for (key, value) in ["loom.schema": "loom-factory-model-v1", "loom.architecture": architecture.identifier] {
+            var pair = CoreMLWire(); pair.string(1, key); pair.string(2, value); metadata.message(100, pair)
+        }
+        description.message(100, metadata)
+        var model = CoreMLWire(); model.integer(1, 7); model.message(2, description); model.message(500, network)
         return model.data
     }
 

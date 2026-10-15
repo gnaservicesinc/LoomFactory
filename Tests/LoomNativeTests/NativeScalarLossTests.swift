@@ -78,7 +78,7 @@ final class NativeScalarLossTests: XCTestCase {
         let legacy = try NativeTrainingSession(architecture: architecture, options: options(.absoluteV1), seed: 42)
         let expectedLoss = try legacy.train(input: input, target: target, batchSize: 1, height: 5, width: 5)
         let expectedGradients = try legacy.accumulatedGradients()
-        for loss in NativeScalarLoss.allCases {
+        for loss in NativeScalarLoss.allCases where loss != .linearDetailV1 {
             let candidate = try NativeTrainingSession(architecture: architecture, options: options(loss), seed: 42)
             XCTAssertEqual(expectedLoss, try candidate.train(input: input, target: target, batchSize: 1, height: 5, width: 5))
             XCTAssertEqual(expectedGradients, try candidate.accumulatedGradients())

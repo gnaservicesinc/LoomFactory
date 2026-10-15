@@ -305,7 +305,7 @@ struct TrainingSettingValue: Identifiable, Equatable {
         func number(_ value: Double) -> String { ModelVersionPresentation.number(value) }
         func yesNo(_ value: Bool) -> String { value ? "On" : "Off" }
         var values: [Self] = [
-            item("modelArchitecture", "Model architecture", settings.modelArchitecture == NativeArchitecture.pyramidIdentifier ? "Pyramid (experimental)" : "Full-resolution residual"),
+            item("modelArchitecture", "Model architecture", TrainingNetwork(rawValue: settings.modelArchitecture)?.displayName ?? settings.modelArchitecture),
             item("scalarLoss", "Scalar training objective", settings.scalarLoss.displayName),
             item("imageSize", "Training dimensions", "\(settings.imageSize) × \(settings.imageSize)"),
             item("modelWidth", "Channel width", "\(settings.modelWidth)"),

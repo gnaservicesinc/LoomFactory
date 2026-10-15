@@ -48,14 +48,16 @@ extension LoomProject {
                   let architecture = descriptor["architecture_config"] as? [String: Any],
                   let architectureID = architecture["id"] as? String,
                   descriptor["architecture"] as? String == architectureID,
-                  [NativeArchitecture.identifier, NativeArchitecture.pyramidIdentifier].contains(architectureID),
                   let width = architecture["width"] as? Int, (8...256).contains(width),
                   let blocks = architecture["blocks"] as? Int, (1...12).contains(blocks),
                   let savedSettings = descriptor["settings"] as? [String: Any],
                   let scalarLoss = NativeScalarLoss(rawValue: savedSettings["scalar_loss"] as? String ?? NativeScalarLoss.absoluteV1.rawValue),
                   let size = savedSettings["image_size"] as? Int, (32...8192).contains(size),
                   let weights = try? TrainingRunFiles.containedFile(descriptor["weights_path"] as? String ?? "checkpoint.safetensors", directory: directory),
-                  FileManager.default.fileExists(atPath: weights.path) else { return nil }
+                  FileManager.default.fileExists(atPath: weights.path),
+                  let native = try? TrainingRunFiles.nativeArchitecture(from: descriptor, map: map),
+                  native.identifier == architectureID, native.width == width, native.blocks == blocks,
+                  !native.isCompact || (scalarLoss == .linearDetailV1 && size % 8 == 0) else { return nil }
             let modified = (try? path.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
             return TrainingCheckpoint(directory: directory, datasetID: datasetID, map: map, modelWidth: width,
                 modelBlocks: blocks, modelArchitecture: architectureID, imageSize: size, exaggerateFeatures: savedSettings["exaggerate_features"] as? Bool ?? false,

@@ -44,10 +44,11 @@ public struct NativeImagePair: Sendable {
 
 public enum NativeImages {
     /// Keep a bounded share of unified memory for unchanged decoded originals.
-    /// A fixed 512 MiB cache repeatedly evicted 8K pairs between epochs, forcing
-    /// their decode and full-source validation to run again on each visit.
-    public static let decodedPixelCacheByteLimit = Int(min(UInt64(8 * 1024 * 1024 * 1024),
-        max(UInt64(512 * 1024 * 1024), ProcessInfo.processInfo.physicalMemory / 8)))
+    /// The measured 55-pair Bricks corpus needs 7.92 GiB of original numeric
+    /// storage. A quarter of RAM (capped at 16 GiB) leaves room for it and other
+    /// map targets without repeatedly decoding originals between epochs.
+    public static let decodedPixelCacheByteLimit = Int(min(UInt64(16 * 1024 * 1024 * 1024),
+        max(UInt64(512 * 1024 * 1024), ProcessInfo.processInfo.physicalMemory / 4)))
     private static let rawPixelCache = NativeRawPixelCache(limit: decodedPixelCacheByteLimit)
 
     /// Releases the bounded, in-memory cache of decoded original numeric codes.

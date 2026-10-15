@@ -37,6 +37,34 @@ struct TrainingPanelTests {
     }
 
     @Test @MainActor
+    func compactNetworkKeepsItsFixedObjectiveAndFreshSelection() async throws {
+        let fixture = try TrainingPanelFixture()
+        defer { fixture.remove() }
+        let model = FactoryModel(rememberSourceFolder: false)
+        try await load(model, source: fixture.source)
+        model.selectedDatasetID = try #require(model.snapshot?.datasets.first?.id)
+        model.settings.training = TrainingSettings(imageSize: 256, seed: 17, modelWidth: 32,
+            modelBlocks: 1, modelArchitecture: TrainingNetwork.compactNAF.rawValue)
+        model.setTrainingStartMode(.fresh)
+        #expect(model.effectiveTrainingSettings.modelArchitecture == TrainingNetwork.compactNAF.rawValue)
+        #expect(model.effectiveTrainingSettings.scalarLoss == .linearDetailV1)
+        #expect(model.effectiveTrainingSettings.parameterCount(map: .depth) == 999_937)
+        #expect(model.canTrain)
+        model.trainingScalarLossOverride = .nativeDetailV3
+        #expect(model.effectiveTrainingSettings.scalarLoss == .linearDetailV1)
+        for map in [MapRole.depth, .roughness, .normal] {
+            model.selectedMap = map
+            #expect(model.effectiveTrainingSettings.scalarLoss == .linearDetailV1)
+        }
+        for preset in TrainingModelPreset.allCases where preset != .custom {
+            let width = try #require(preset.width(network: .compactNAF))
+            #expect(TrainingSettings(modelWidth: width, modelBlocks: 1,
+                modelArchitecture: TrainingNetwork.compactNAF.rawValue).parameterCount(map: .depth) > 0)
+        }
+        try await render(model, name: "training-controls-compact-linear.png")
+    }
+
+    @Test @MainActor
     func taggedPairsAreReadyWithoutManualReview() async throws {
         let fixture = try TrainingPanelFixture(reviewed: false)
         defer { fixture.remove() }

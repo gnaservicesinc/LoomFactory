@@ -68,3 +68,15 @@ membership, stage input/output compatibility, optional-stage bypass, complete
 category routing, and exact base/adapter identity. Change the package schema when
 its meaning expands; older consumers should reject an unsupported product or
 stage contract clearly.
+
+
+The optional `loom-factory-material-compact-naf-v1` constructor preserves the
+earlier seven-stage NAF design with reflection padding and a raw linear output.
+Its scalar and normal component training uses `linear-detail-v1`, with no
+sigmoid or normal renormalization. It retains the existing RGB sRGB NCHW input,
+native pixel grid and material output name, but declares its raw Float32 output
+contract explicitly. Consumers validate this architecture and its metadata;
+legacy bounded models keep their existing interpretation. Whole-field spatial
+attention precludes silently substituting tiled inference. Widths are editable,
+blocks per stage are fixed at one, and native dimensions must be multiples of
+eight and at least 32. Only dense convolutions are adapted by LoRA.

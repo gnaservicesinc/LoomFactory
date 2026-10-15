@@ -78,7 +78,9 @@ private final class NativeBatchGraph {
         let logits = graph.materialLogits(input: input, architecture: architecture, parameters: parameters,
             adapter: adapter, channelsLast: channelsLast)
         prediction = graph.materialPrediction(logits: logits, architecture: architecture)
-        if architecture.mapKind == "normal" || scalarLoss == .absoluteV1 {
+        if architecture.isCompact {
+            loss = graph.linearDetailLoss(prediction: prediction, target: target)
+        } else if architecture.mapKind == "normal" || scalarLoss == .absoluteV1 {
             loss = graph.materialLoss(prediction: prediction, target: target, mapKind: architecture.mapKind)
         } else {
             let level = graph.scalarLogitCrossEntropy(logits: logits, target: target)
@@ -140,6 +142,12 @@ public final class NativeTrainingSession {
         guard let metal = MTLCreateSystemDefaultDevice(), let queue = metal.makeCommandQueue(), MPSSupportsMTLDevice(metal) else {
             throw NativeTrainingError.unavailable("No Apple GPU supporting native MPSGraph training is available.")
         }
+        guard architecture.isCompact == (options.scalarLoss == .linearDetailV1) else {
+            throw NativeTrainingError.invalid("Compact NAF requires its recorded linear detail objective; residual models retain their own objective.")
+        }
+        if architecture.isCompact, channelsLast == true {
+            throw NativeTrainingError.invalid("Compact NAF currently uses its verified NCHW layout.")
+        }
         guard initialUpdateCount >= 0 else { throw NativeTrainingError.invalid("Optimizer step count cannot be negative.") }
         if adapter != nil && weights == nil { throw NativeTrainingError.invalid("LoRA training requires the exact installed base weights.") }
         if adapter == nil && adapterWeights != nil { throw NativeTrainingError.invalid("Adapter weights require a LoRA configuration.") }
@@ -148,16 +156,16 @@ public final class NativeTrainingSession {
         // Layout performance varies with width and GPU. Large residual batches
         // calibrate both unchanged Float32 graphs before the first real update.
         // Explicit diagnostic choices and Pyramid keep their requested layout.
-        self.channelsLast = channelsLast ?? !architecture.isPyramid
-        automaticallySelectLayout = channelsLast == nil && !architecture.isPyramid
+        self.channelsLast = channelsLast ?? (!architecture.isPyramid && !architecture.isCompact)
+        automaticallySelectLayout = channelsLast == nil && !architecture.isPyramid && !architecture.isCompact
         deviceName = metal.name; updateCount = initialUpdateCount
         var allShapes = architecture.parameterShapes
         var trainedShapes = allShapes
         if let adapter {
             trainedShapes = [:]
-            for name in architecture.convolutionNames {
+            for name in architecture.adaptableConvolutionNames {
                 let baseShape = allShapes[name + ".weight"]!
-                trainedShapes[name + ".down.weight"] = [adapter.rank, baseShape[1], 3, 3]
+                trainedShapes[name + ".down.weight"] = [adapter.rank, baseShape[1], baseShape[2], baseShape[3]]
                 trainedShapes[name + ".up.weight"] = [baseShape[0], adapter.rank, 1, 1]
             }
             allShapes.merge(trainedShapes) { _, new in new }
@@ -173,6 +181,9 @@ public final class NativeTrainingSession {
             let supplied = weights?[name] ?? adapterWeights?[name]
             let values: [Float]
             if let supplied { values = supplied.values }
+            else if architecture.isCompact, architecture.parameterShapes[name] != nil {
+                values = NativeCompactNetwork.initialValues(name: name, shape: shape, random: &random)
+            }
             else if name.hasSuffix(".up.weight") { values = Array(repeating: 0, count: shape.reduce(1, *)) }
             else {
                 let fanIn: Int
@@ -354,7 +365,7 @@ public final class NativeTrainingSession {
         guard let adapter else { return result }
         let deltas = try adapterWeights()
         let scale = Float(adapter.alpha / Double(adapter.rank))
-        for name in architecture.convolutionNames {
+        for name in architecture.adaptableConvolutionNames {
             try cancellation.check()
             let down = deltas[name + ".down.weight"]!
             let up = deltas[name + ".up.weight"]!
@@ -511,6 +522,9 @@ public final class NativeTrainingSession {
         guard (1...256).contains(batchSize), (1...8192).contains(height), (1...8192).contains(width) else {
             throw NativeTrainingError.invalid("Invalid native batch dimensions.")
         }
+        if !architecture.supportsGrid(height: height, width: width) {
+            throw NativeTrainingError.invalid("Compact NAF needs native dimensions of at least 32 pixels and multiples of 8. Choose a matching native crop; originals are unchanged.")
+        }
         let pixels = batchSize * height * width
         guard input.count == pixels * 3, target == nil || target!.count == pixels * architecture.outputChannels else {
             throw NativeTrainingError.invalid("Native NCHW input or target shape does not match its pixels.")
@@ -522,7 +536,7 @@ public final class NativeTrainingSession {
         return pixels
     }
     private static func validate(_ values: [String: NativeTensor], expected: [String: [Int]], purpose: String) throws {
-        guard Set(values.keys) == Set(expected.keys) else { throw NativeTrainingError.invalid("\(purpose) parameter names do not match residual-v1.") }
+        guard Set(values.keys) == Set(expected.keys) else { throw NativeTrainingError.invalid("\(purpose) parameter names do not match the saved architecture.") }
         for (name, shape) in expected {
             guard values[name]!.shape == shape, values[name]!.values.count == shape.reduce(1, *), values[name]!.values.allSatisfy(\.isFinite) else {
                 throw NativeTrainingError.invalid("\(purpose) tensor \(name) has an incompatible shape or non-finite values.")
