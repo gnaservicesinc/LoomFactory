@@ -345,3 +345,61 @@ The recovery folder's `Review.html` now presents the final side-by-side evidence
 `bark-squared-structure-gate/quality-review.json` records the final rejection,
 and `final-recovery-receipt.json` records the cutoff, exact identities, checksum
 checks, stopped processes, paused heartbeat and incomplete category coverage.
+
+## Artistic acceptance correction
+
+The user clarified that the goal is a usable, visually pleasing material for
+its corresponding color/diffuse map, not exact reconstruction of artist maps.
+Depth and normal may encode different spatial scales and need not contain the
+same details. Roughness need not correlate with either map or the color image.
+An artist may have edited the supplied maps deliberately; they are examples,
+not scientific measurements or a unique correct appearance.
+
+Accordingly, earlier numerical findings remain diagnostic observations, but
+the categorical artistic rejection was too strong. Fixed-strength neutral and
+diffuse comparisons did not establish that a candidate cannot be useful after
+reasonable material application adjustments. The user considers several muted
+examples promising. Neither a lower reconstruction loss nor a perfect fit is
+an artistic acceptance requirement. High error can prompt investigation without
+automatically rejecting a material. Confirmed software defects and failed
+execution/lineage checks remain separate findings.
+
+Artistic review now uses Cycles environment lighting at two rotations, plus
+a grazing-light view. Explicit, independent height gain and tangent normal
+strength controls compare unchanged saved predictions. A constant roughness
+control and a geometry-plus-color control distinguish the contributions of
+each component without assuming cross-map correlation. Human review is pending;
+the workflow does not automatically approve candidates or discard roughness.
+
+The PVT repository's `src/displacement_surface.cpp`, `src/obj_surface.h`, and
+`PlaneDisplacementConfig` demonstrate the existing displaced-plane, UV overlay,
+range/midpoint and OBJ workflow. PVT is not Cycles. The Loom review extends its
+existing Blender renderer rather than importing PVT's rendering engine. Baked
+OBJ/MTL assets carry displaced geometry and the byte-identical diffuse overlay;
+editable, packed Blender scenes retain the full normal/roughness material and
+environment. Preview mesh density is explicit (two height pixels per mesh cell),
+and strength changes are application settings, not rewritten source maps.
+
+The user's tag audit is pending; this review changes no tags or original pixels.
+The original training deadline is not extended. Only CPU rendering of existing
+predictions is performed, with new evidence in
+`art-direction-review-20261015` under the recovery folder. Historical receipts
+are preserved and a separate criteria-correction receipt records this change
+in interpretation. No model was selected or approved by this review.
+
+The artistic comparison completed all 120 Cycles CPU views: four saved sets
+(Willow, Pine, Compact brick and selected old brick), five application presets,
+three lighting setups, and neutral/diffuse views. Eight baked OBJ assets and
+four packed editable Blender scenes are preserved. The OBJ preflight re-import
+retained 263,169 vertices, 262,144 faces, UVs and byte-identical diffuse, with
+zero coordinate error. OBJ coordinates are explicitly Z-up; import with Forward
+Y / Up Z in Blender. All 16 unique review inputs, including the environment,
+retained their original hashes, and prior model assignments remain unchanged.
+
+The raw/strength-adjusted views show that application strength materially
+changes visible relief without retraining; they are alternatives for human
+judgment, not an automatic acceptance result. The familiar `Review.html` now
+opens this artistic comparison and links the preserved historical review.
+Local-file browser automation was blocked by URL policy; the rendered images,
+OBJ re-import, packed scene and JavaScript syntax were verified directly.
+No live browser-control acceptance or renewed training is claimed.
