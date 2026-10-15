@@ -12,6 +12,7 @@ struct QueueJob: Codable, Sendable {
     var settings: TrainingSettings
     let seconds: Double
     let parentRunID: String?
+    let parentWeightSource: TrainingWeightSource?
     let evaluationInput: String?
     let evaluationIsHeldOut: Bool?
 }
@@ -289,13 +290,16 @@ func writeJSON(_ value: Any, _ url: URL) throws {
             let began = Date()
             let until = min(deadline, began.addingTimeInterval(job.seconds))
             let start: TrainingStart
-            if let parent = job.parentRunID { start = .checkpoint(runID: parent) }
+            if let parent = job.parentRunID {
+                start = job.parentWeightSource == .model ? .model(runID: parent) : .checkpoint(runID: parent)
+            }
             else { start = .fresh }
             status.update(["job": job.id, "category": job.category, "map": job.map.rawValue,
                 "architecture": job.settings.modelArchitecture, "parameters": job.settings.parameterCount(map: job.map),
                 "objective": job.settings.scalarLoss.rawValue, "learning_rate": job.settings.learningRate,
                 "job_index": index + 1, "update": 0, "epoch": 0,
                 "parent_run_id": job.parentRunID as Any? ?? NSNull(),
+                "parent_weight_source": job.parentRunID == nil ? NSNull() : (job.parentWeightSource ?? .checkpoint).rawValue as Any,
                 "message": "Starting \(job.category) \(job.map.rawValue)"])
             print("Requested start: \(start)"); fflush(stdout)
             let timer = Task {
@@ -328,7 +332,8 @@ func writeJSON(_ value: Any, _ url: URL) throws {
                 if let parent = job.parentRunID {
                     let version = try await project.modelVersions(datasetID: job.datasetID, map: job.map)
                         .first { $0.id == checkpoint.runID }
-                    guard version?.lineage?.parentRunID == parent, version?.lineage?.source == .checkpoint else {
+                    guard version?.lineage?.parentRunID == parent,
+                          version?.lineage?.source == (job.parentWeightSource ?? .checkpoint) else {
                         let message = "The requested continuation did not retain its saved parent. Its checkpoint was preserved; the queue will not continue."
                         result["status"] = "failed"
                         result["error"] = message
