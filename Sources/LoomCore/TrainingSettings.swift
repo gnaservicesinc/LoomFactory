@@ -191,7 +191,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     /// Starting fresh preserves the explicitly selected architecture, capacity
     /// and objective. A new run must not silently reinterpret a saved recipe.
     public mutating func useFullResolutionForFreshRun(map: MapRole) {
-        if modelArchitecture == NativeArchitecture.compactIdentifier {
+        if modelArchitecture == NativeArchitecture.compactIdentifier && !scalarLoss.isCompactObjective {
             scalarLoss = .linearDetailV1
         }
     }
@@ -207,8 +207,8 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
         if modelArchitecture == NativeArchitecture.compactIdentifier {
             if modelBlocks != 1 { return "Compact NAF has one block in each of seven stages." }
             if imageSize % 8 != 0 { return "Compact NAF needs a native crop size that is a multiple of 8." }
-            if scalarLoss != .linearDetailV1 { return "Compact NAF uses its linear pixel and detail objective." }
-        } else if scalarLoss == .linearDetailV1 {
+            if !scalarLoss.isCompactObjective { return "Choose a recorded Compact NAF training objective." }
+        } else if scalarLoss.isCompactObjective {
             return "The linear detail objective belongs to Compact NAF."
         }
         if !(1...1024).contains(gradientAccumulationSteps) { return "Gradient accumulation must be between 1 and 1,024 batches." }

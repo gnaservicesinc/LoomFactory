@@ -312,7 +312,7 @@ func writeJSON(_ value: Any, _ url: URL) throws {
                 let artifact = try await project.trainMap(datasetID: job.datasetID, map: job.map, settings: job.settings,
                     start: start,
                     runLabel: "Overnight quality · \(job.category) · \(job.map.displayName)",
-                    scalarLossOverride: job.map != .normal ? job.settings.scalarLoss : nil,
+                    scalarLossOverride: job.map != .normal || job.settings.modelArchitecture == NativeArchitecture.compactIdentifier ? job.settings.scalarLoss : nil,
                     progress: { status.event($0) })
                 result["status"] = "completed"; result["run_id"] = artifact.id
             } catch {

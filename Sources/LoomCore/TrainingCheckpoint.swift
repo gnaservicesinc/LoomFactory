@@ -83,7 +83,7 @@ extension LoomProject {
                   FileManager.default.fileExists(atPath: weights.path),
                   let native = try? TrainingRunFiles.nativeArchitecture(from: descriptor, map: map),
                   native.identifier == architectureID, native.width == width, native.blocks == blocks,
-                  !native.isCompact || (scalarLoss == .linearDetailV1 && size % 8 == 0) else { return nil }
+                  !native.isCompact || (scalarLoss.isCompactObjective && size % 8 == 0) else { return nil }
             if path.lastPathComponent != "checkpoint.json" {
                 guard let id = descriptor["checkpoint_id"] as? String,
                       (try? CheckpointArchive.filename(id)) == path.lastPathComponent else { return nil }

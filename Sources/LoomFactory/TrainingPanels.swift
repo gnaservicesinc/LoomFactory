@@ -160,7 +160,14 @@ struct TrainingPanel: View {
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if selectedNetwork == .compactNAF {
-                Text("Training compares original pixel values and signed detail at 1, 2, 4 and 8 pixels. The linear output keeps corrective gradients without sigmoid saturation.")
+                Picker("Training objective", selection: $model.trainingScalarLossOverride) {
+                    Text(continuing ? "Keep saved objective" : "Keep configured objective").tag(Optional<NativeScalarLoss>.none)
+                    Text("Linear pixel and detail (v1)").tag(Optional(NativeScalarLoss.linearDetailV1))
+                    Text("Squared pixel and structure (experimental)").tag(Optional(NativeScalarLoss.squaredStructureV1))
+                }.accessibilityIdentifier("training.compactLoss")
+                Text(model.effectiveTrainingSettings.scalarLoss == .squaredStructureV1
+                    ? "Experimental squared pixel and signed structure errors at native offsets 1, 4, 16 and 64. This changes the objective, not the source pixels. Compare all three maps before selecting a candidate."
+                    : "Training compares original pixel values and signed detail at 1, 2, 4 and 8 pixels. The linear output keeps corrective gradients without sigmoid saturation.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             } else if model.selectedMap != .normal {
                 Picker("Training objective", selection: $model.trainingScalarLossOverride) {

@@ -6,6 +6,35 @@ import XCTest
 
 @MainActor
 final class ModelVersionTrainingTests: XCTestCase {
+    func testCompactObjectiveBranchPreservesStartingWeightsAndSelectedParent() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("loom-compact-objective-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let input = try image(at: root.appendingPathComponent("material_diff.png"), role: .diffuse)
+        let target = try image(at: root.appendingPathComponent("material_disp.png"), role: .depth)
+        let originals = try [input, target].map { try Data(contentsOf: $0) }
+        let project = try LoomProject(sourceFolder: root)
+        let dataset = ImageMetadataStore.categoryID("Bricks")
+        let settings = TrainingSettings(imageSize: 32, epochs: 1, seed: 37, modelWidth: 8, modelBlocks: 1,
+            modelArchitecture: "loom-factory-material-compact-naf-v1")
+        let parent = try await project.trainMap(datasetID: dataset, map: .depth, settings: settings, progress: { _ in })
+        try await project.selectModelVersion(runID: parent.id, datasetID: dataset, map: .depth)
+        let files = try savedFiles(parent.directory)
+        let child = try await project.trainMap(datasetID: dataset, map: .depth, settings: settings,
+            start: .checkpoint(runID: parent.id), scalarLossOverride: .squaredStructureV1, progress: { _ in })
+        let request = try NativeFactoryTraining.json(child.directory.appendingPathComponent("request.json"))
+        XCTAssertEqual(request["scalar_loss"] as? String, "squared-structure-v1")
+        XCTAssertEqual((request["lineage"] as? [String: Any])?["parent_run_id"] as? String, parent.id)
+        XCTAssertNotNil(request["resume_weights"])
+        let checkpoint = try NativeFactoryTraining.json(child.directory.appendingPathComponent("checkpoint.json"))
+        XCTAssertEqual(checkpoint["prior_updates"] as? Int, 1)
+        XCTAssertEqual(checkpoint["optimizer_updates"] as? Int, 1)
+        XCTAssertEqual(try savedFiles(parent.directory), files)
+        XCTAssertEqual(try [input, target].map { try Data(contentsOf: $0) }, originals)
+        let selected = try await project.selectedModelArtifact(datasetID: dataset, map: .depth)
+        XCTAssertEqual(selected?.id, parent.id)
+    }
+
     func testCheckpointContinuationRetainsParentWhenOptimizerAndSamplerReset() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("loom-checkpoint-parent-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

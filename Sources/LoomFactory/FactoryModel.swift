@@ -313,7 +313,9 @@ final class FactoryModel {
             }
         }
         if value.modelArchitecture == NativeArchitecture.compactIdentifier {
-            value.scalarLoss = .linearDetailV1
+            if let trainingScalarLossOverride, trainingScalarLossOverride.isCompactObjective {
+                value.scalarLoss = trainingScalarLossOverride
+            } else if !value.scalarLoss.isCompactObjective { value.scalarLoss = .linearDetailV1 }
         } else if selectedMap != .normal, let trainingScalarLossOverride {
             value.scalarLoss = trainingScalarLossOverride
         }
@@ -570,7 +572,7 @@ final class FactoryModel {
         training.exaggerateFeatures = map == .depth && training.exaggerateFeatures
         let configuredTraining = training
         let start = trainingStart
-        let objective = selectedMap == .normal ? nil : trainingScalarLossOverride
+        let objective = selectedMap == .normal && training.modelArchitecture != NativeArchitecture.compactIdentifier ? nil : trainingScalarLossOverride
         let label = runLabel
         let onProgress = progressHandler()
         let current = generation

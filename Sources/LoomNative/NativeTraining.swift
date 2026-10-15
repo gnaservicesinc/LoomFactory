@@ -79,7 +79,9 @@ private final class NativeBatchGraph {
             adapter: adapter, channelsLast: channelsLast)
         prediction = graph.materialPrediction(logits: logits, architecture: architecture)
         if architecture.isCompact {
-            loss = graph.linearDetailLoss(prediction: prediction, target: target)
+            loss = scalarLoss == .squaredStructureV1
+                ? graph.squaredStructureLoss(prediction: prediction, target: target)
+                : graph.linearDetailLoss(prediction: prediction, target: target)
         } else if architecture.mapKind == "normal" || scalarLoss == .absoluteV1 {
             loss = graph.materialLoss(prediction: prediction, target: target, mapKind: architecture.mapKind)
         } else {
@@ -142,7 +144,7 @@ public final class NativeTrainingSession {
         guard let metal = MTLCreateSystemDefaultDevice(), let queue = metal.makeCommandQueue(), MPSSupportsMTLDevice(metal) else {
             throw NativeTrainingError.unavailable("No Apple GPU supporting native MPSGraph training is available.")
         }
-        guard architecture.isCompact == (options.scalarLoss == .linearDetailV1) else {
+        guard architecture.isCompact == options.scalarLoss.isCompactObjective else {
             throw NativeTrainingError.invalid("Compact NAF requires its recorded linear detail objective; residual models retain their own objective.")
         }
         if architecture.isCompact, channelsLast == true {

@@ -265,3 +265,30 @@ Bark Brown 01 and Pine Bark in diffuse and neutral views before judging it.
 All new candidates remain unapproved; the detailed brick reference and other
 prior effective assignments stay selected. Thirty-six jobs in the other twelve
 categories remain unstarted. The original 17:21:18 UTC training cutoff remains.
+
+The Bark pilot completed at 16:03 UTC and failed joint appearance on Willow 02,
+Bark Brown 01 and Pine Bark. Depth standard deviation on Willow was 0.0054
+versus target 0.0932; normal angular error was 28.2 degrees. Pine depth was
+weakly negatively correlated with its target. Roughness followed texture on
+Willow/Pine but had material-dependent level errors. None is a qualified
+three-map replacement, and no category-wide rollout follows.
+
+An explicit, opt-in Compact objective, `squared-structure-v1`, tests squared
+pixel residuals plus four times the mean squared signed-residual differences
+over native offsets 1, 4, 16 and 64 in both directions. Small diagnostic grids
+omit offsets that do not fit. It uses unchanged target pixels, no resampling,
+normalization, variance reward or sharpening. It does not change a constructor,
+prediction head or inference. `linear-detail-v1` and every old default retain
+their prior behavior. Changing the objective branches from exact saved weights
+with a fresh optimizer; original versions and selections remain intact.
+Factory exposes it as experimental for all Compact map components. Workshop
+inherits the recorded Compact objective and binds resume compatibility to it.
+
+An independent 128-grid CPU pixel calculation checks the objective including
+the 64-pixel terms; a finite-difference check validates its GPU gradient.
+Separate tests check exact zero error for a matching valid target, bit-identical
+inference across objectives for all three map types, and a real checkpoint
+branch retaining starting weights/source bytes/selection. These are execution
+and numerical checks, not proof that a squared objective improves materials.
+The final recovery experiment must retain the original training cutoff and
+must pass joint visual review before any quality claim or model selection.

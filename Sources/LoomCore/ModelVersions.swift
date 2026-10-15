@@ -233,15 +233,15 @@ extension LoomProject {
         guard start != .fresh else {
             var fresh = settings
             if fresh.modelArchitecture == NativeArchitecture.compactIdentifier {
-                guard scalarLossOverride == nil || scalarLossOverride == .linearDetailV1 else {
+                guard scalarLossOverride == nil || scalarLossOverride!.isCompactObjective else {
                     throw LoomError("Compact native models require their linear pixel and detail objective. Choose a residual model to use another objective.")
                 }
-                fresh.scalarLoss = .linearDetailV1
+                fresh.scalarLoss = scalarLossOverride ?? (settings.scalarLoss.isCompactObjective ? settings.scalarLoss : .linearDetailV1)
             } else {
                 guard scalarLossOverride == nil || map != .normal else {
                     throw LoomError("Scalar training objectives apply to depth and roughness. Normal maps retain their angular objective.")
                 }
-                guard scalarLossOverride != .linearDetailV1 else {
+                guard !(scalarLossOverride?.isCompactObjective ?? false) else {
                     throw LoomError("The linear pixel and detail objective requires a fresh compact native model.")
                 }
                 if map != .normal { fresh.scalarLoss = scalarLossOverride ?? settings.scalarLoss }
@@ -260,15 +260,15 @@ extension LoomProject {
             throw LoomError("This saved version has no readable native model settings.")
         }
         if saved.modelArchitecture == NativeArchitecture.compactIdentifier {
-            guard saved.scalarLoss == .linearDetailV1,
-                  scalarLossOverride == nil || scalarLossOverride == .linearDetailV1 else {
+            guard saved.scalarLoss.isCompactObjective,
+                  scalarLossOverride == nil || scalarLossOverride!.isCompactObjective else {
                 throw LoomError("This compact model must continue with its saved linear pixel and detail objective.")
             }
         } else {
             guard scalarLossOverride == nil || map != .normal else {
                 throw LoomError("Scalar training objectives apply to depth and roughness. Normal maps retain their angular objective.")
             }
-            guard scalarLossOverride != .linearDetailV1 else {
+            guard !(scalarLossOverride?.isCompactObjective ?? false) else {
                 throw LoomError("The linear pixel and detail objective requires a fresh compact native model.")
             }
         }
@@ -457,7 +457,7 @@ enum TrainingRunFiles {
         guard let data = try? JSONSerialization.data(withJSONObject: converted),
               let settings = try? JSONDecoder().decode(TrainingSettings.self, from: data),
               identity != NativeArchitecture.compactIdentifier
-                || (blocks == 1 && size % 8 == 0 && settings.scalarLoss == .linearDetailV1) else { return nil }
+                || (blocks == 1 && size % 8 == 0 && settings.scalarLoss.isCompactObjective) else { return nil }
         return settings
     }
 

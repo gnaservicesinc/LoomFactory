@@ -8,6 +8,9 @@ public enum NativeScalarLoss: String, Codable, CaseIterable, Sendable {
     case logitCrossEntropyV2 = "logit-cross-entropy-v2"
     case nativeDetailV3 = "native-detail-v3"
     case linearDetailV1 = "linear-detail-v1"
+    case squaredStructureV1 = "squared-structure-v1"
+
+    public var isCompactObjective: Bool { self == .linearDetailV1 || self == .squaredStructureV1 }
 
     public var displayName: String {
         switch self {
@@ -15,6 +18,7 @@ public enum NativeScalarLoss: String, Codable, CaseIterable, Sendable {
         case .logitCrossEntropyV2: "Stable pixel loss (v2)"
         case .nativeDetailV3: "Native pixel detail (v3)"
         case .linearDetailV1: "Linear pixel and detail loss"
+        case .squaredStructureV1: "Squared pixel and structure (experimental)"
         }
     }
 }
