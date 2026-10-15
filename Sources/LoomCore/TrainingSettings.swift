@@ -8,7 +8,7 @@ public enum TrainingNetwork: String, Codable, CaseIterable, Sendable, Identifiab
     public var displayName: String { self == .pyramid ? "Pyramid" : "Original residual" }
     public var detail: String {
         self == .pyramid
-            ? "Learns at several scales, with the main blocks on a smaller feature grid. Recommended for new models."
+            ? "Learns at several scales, with the main blocks on a smaller feature grid. Compare against Original residual for detail-sensitive maps."
             : "Runs every residual block at full image resolution. Retained for existing models and comparisons."
     }
 }
@@ -63,6 +63,8 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     public var flipCrops: Bool
     public var rotateCrops: Bool
     public var exaggerateFeatures: Bool
+    /// -1 chooses a system random seed once when a fresh run starts. Saved run
+    /// settings contain the resolved nonnegative seed for reproducible replay.
     public var seed: Int
     public var modelArchitecture: String
     /// Immutable training objective; inference architecture and pixels stay unchanged.
@@ -96,7 +98,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     public init(imageSize: Int = 1024, sourceResolutionLevels: Int = 1, epochs: Int = 10, batchSize: Int = 1,
                 learningRate: Double = 0.001, shuffleEachEpoch: Bool = true,
                 flipCrops: Bool = false, rotateCrops: Bool = false,
-                exaggerateFeatures: Bool = false, seed: Int = 0, modelWidth: Int = 38,
+                exaggerateFeatures: Bool = false, seed: Int = -1, modelWidth: Int = 38,
                 continueLatestWeights: Bool = false, modelBlocks: Int = 4,
                 optimizer: TrainingOptimizer = .adamW, weightDecay: Double = 0.01,
                 beta1: Double = 0.9, beta2: Double? = nil, momentum: Double = 0.9,
@@ -134,6 +136,17 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     public var effectiveBatchSize: Int {
         guard (1...64).contains(batchSize), (1...1024).contains(gradientAccumulationSteps) else { return 0 }
         return batchSize * gradientAccumulationSteps
+    }
+    /// Resolve the sentinel only once; callers persist this copy in the run's
+    /// metadata, request, checkpoints and exported model.
+    mutating func resolveRandomSeedForRun() {
+        var generator = SystemRandomNumberGenerator()
+        resolveRandomSeedForRun(using: &generator)
+    }
+
+    mutating func resolveRandomSeedForRun<R: RandomNumberGenerator>(using generator: inout R) {
+        guard seed == -1 else { return }
+        seed = Int.random(in: 0...Int(Int32.max), using: &generator)
     }
     public func optimizerStepsPerEpoch(pairCount: Int) -> Int {
         guard pairCount > 0, effectiveBatchSize > 0 else { return 0 }
@@ -187,7 +200,8 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
         if warmupEpochs < 0 || warmupEpochs >= epochs { return "Warmup must be shorter than the training run. Zero disables warmup." }
         if !minimumLearningRateRatio.isFinite || !(0...1).contains(minimumLearningRateRatio) { return "Minimum learning-rate ratio must be between zero and one." }
         if !validationFraction.isFinite || !(0...0.5).contains(validationFraction) { return "Validation must use between zero and 50% of the material folders." }
-        if !(0...Int(Int32.max)).contains(seed) || !(0...Int(Int32.max)).contains(validationSeed) { return "Random seeds must be between zero and 2,147,483,647." }
+        if !(-1...Int(Int32.max)).contains(seed) { return "Random seed must be -1 for a new system seed, or zero to 2,147,483,647." }
+        if !(0...Int(Int32.max)).contains(validationSeed) { return "Validation seed must be between zero and 2,147,483,647." }
         if !(0...100_000).contains(earlyStoppingPatience) { return "Early stopping patience must be zero to 100,000 epochs." }
         if earlyStoppingPatience > 0 && validationFraction == 0 { return "Enable held-out validation to use early stopping." }
         if !(1...100_000).contains(checkpointEveryEpochs) { return "Checkpoint frequency must be between one and 100,000 epochs." }
@@ -215,7 +229,9 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
         flipCrops = try c.decodeIfPresent(Bool.self, forKey: .flipCrops) ?? d.flipCrops
         rotateCrops = try c.decodeIfPresent(Bool.self, forKey: .rotateCrops) ?? d.rotateCrops
         exaggerateFeatures = try c.decodeIfPresent(Bool.self, forKey: .exaggerateFeatures) ?? d.exaggerateFeatures
-        seed = try c.decodeIfPresent(Int.self, forKey: .seed) ?? d.seed
+        // Missing seeds belonged to the original deterministic seed-zero
+        // contract; only newly constructed settings default to system random.
+        seed = try c.decodeIfPresent(Int.self, forKey: .seed) ?? 0
         // Absence identifies the original full-resolution architecture. Never
         // reinterpret an existing run's width as a pyramid channel count.
         modelArchitecture = try c.decodeIfPresent(String.self, forKey: .modelArchitecture) ?? NativeArchitecture.identifier

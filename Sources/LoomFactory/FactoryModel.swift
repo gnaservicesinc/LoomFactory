@@ -601,6 +601,16 @@ final class FactoryModel {
         }
     }
 
+    func useCheckpointAsModel(_ version: ModelVersion) {
+        guard version.checkpoint != nil else { return }
+        let current = generation
+        perform("Exporting selected checkpoint") { [weak self] project in
+            _ = try await project.selectCheckpointModelVersion(runID: version.id, datasetID: version.datasetID, map: version.map)
+            guard let self, self.generation == current else { return }
+            self.invalidateExportedPackage()
+        }
+    }
+
     func useCoverageModel(artifact: ModelArtifact) {
         let current = generation
         perform("Choosing model to use") { [weak self] project in

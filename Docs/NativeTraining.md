@@ -52,7 +52,29 @@ checked per use, and original byte hashes are verified before publishing.
 The decoded numeric cache uses one eighth of physical memory, bounded between
 512 MiB and 8 GiB, and is released at the end of a run. Cached pixels remain
 keyed by source file identity and modification time, with validation retained
-only while those unchanged pixels remain cached.
+independently for at most 4,096 unchanged file identities. Evicting decoded
+pixels does not require rescanning a successfully validated whole image. Both
+caches are released at the end of the run.
+
+Two upcoming batches can prepare concurrently while the serial owner trains
+on the GPU. Running and completed preparation jobs share a two-slot limit;
+results and errors are consumed in the original submission order. Crop and
+augmentation choices are still resolved on the serial owner, and optimizer
+updates retain the same ordering. Cancellation joins both preparation workers
+before clearing decoded pixels.
+
+New training settings use seed `-1`, resolved once from
+`SystemRandomNumberGenerator` before the run is recorded. Requests, run metadata,
+checkpoints and model descriptors contain the resolved nonnegative seed. An
+explicit seed remains reproducible; missing legacy seeds retain their seed-zero
+interpretation. Continuing with `-1` inherits the saved seed. The validation seed
+remains explicit so architecture comparisons can keep a common material split.
+
+Crop coordinates are uniform integer native origins over `0...(width-size)` and
+`0...(height-size)`, including both edges. Input and target share the same crop;
+their refresh follows the selected visit/epoch/run cadence. Source pair selection
+still contributes one crop visit per selected material resolution and paired
+diffuse variant, without enumerating extra crop positions.
 
 Core ML export serializes the selected graph and float32 weights in Swift.
 Apple Core ML compiles the exported `.mlmodel`, and numerical tests compare native

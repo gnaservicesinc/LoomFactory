@@ -239,6 +239,7 @@ extension LoomProject {
             throw LoomError("This saved version has no readable native model settings.")
         }
         var resolved = settings
+        if resolved.seed == -1 { resolved.seed = saved.seed }
         resolved.modelArchitecture = saved.modelArchitecture
         resolved.scalarLoss = saved.scalarLoss
         resolved.modelWidth = saved.modelWidth; resolved.modelBlocks = saved.modelBlocks

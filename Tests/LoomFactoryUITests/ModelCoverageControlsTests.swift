@@ -1,6 +1,8 @@
 import AppKit
+import CryptoKit
 import ImageIO
 import LoomCore
+import LoomNative
 import SwiftUI
 import Testing
 import UniformTypeIdentifiers
@@ -8,6 +10,50 @@ import UniformTypeIdentifiers
 
 @Suite(.serialized)
 struct ModelCoverageControlsTests {
+    @Test @MainActor
+    func selectingCheckpointCreatesChosenCandidateWithoutApprovingOrReplacingOriginal() async throws {
+        let fixture = try await CoverageControlsFixture()
+        defer { fixture.remove() }
+        let checkpointFolder = fixture.source.appendingPathComponent(".loom-factory/runs/cancelled-depth")
+        let weightsFile = checkpointFolder.appendingPathComponent("checkpoint.safetensors")
+        let architecture = try NativeArchitecture(mapKind: "depth", width: 8, blocks: 1)
+        let weights = architecture.parameterShapes.mapValues { shape in
+            NativeTensor(shape: shape, values: [Float](repeating: 0.013, count: shape.reduce(1, *)))
+        }
+        try NativeWeights.write(weights, to: weightsFile)
+        let project = try LoomProject(sourceFolder: fixture.source)
+        let projectID = try await project.snapshot().projectID
+        let descriptor: [String: Any] = ["schema": "loom-factory-checkpoint-v1", "project_id": projectID,
+            "kind": "map", "dataset_id": try #require(fixture.depthSlot.datasetID), "dataset_name": "Bricks",
+            "map": "depth", "status": "saved_stopped", "architecture": architecture.identifier,
+            "architecture_config": architecture.descriptor,
+            "settings": ["image_size": 32, "epochs": 100], "epochs_completed": 19, "updates": 19,
+            "weights_path": "checkpoint.safetensors", "weights_sha256": SHA256.hash(data: try Data(contentsOf: weightsFile)).map { String(format: "%02x", $0) }.joined()]
+        try JSONSerialization.data(withJSONObject: descriptor).write(to: checkpointFolder.appendingPathComponent("checkpoint.json"))
+        let original = try Data(contentsOf: weightsFile)
+        let model = FactoryModel(rememberSourceFolder: false)
+        model.openFolder(fixture.source)
+        try await wait(model)
+        let source = try #require(model.snapshot?.modelVersions.first { $0.id == "cancelled-depth" })
+        model.useCheckpointAsModel(source)
+        try await wait(model)
+        let depth = try #require(model.modelCoverage.first { $0.slot == fixture.depthSlot })
+        let chosen = try #require(ModelCoveragePresentation(depth).chosen)
+        #expect(chosen.id != source.id)
+        #expect(!chosen.isApproved)
+        #expect(depth.availableCount == 3)
+        #expect(depth.checkpointCount == 2)
+        #expect(try Data(contentsOf: weightsFile) == original)
+        #expect(try Data(contentsOf: chosen.artifact.directory.appendingPathComponent("model.safetensors")) == original)
+        #expect(model.snapshot?.modelVersions.first { $0.id == chosen.id }?.lineage?.parentRunID == source.id)
+        model.testCoverageModel(artifact: chosen.artifact)
+        #expect(model.selectedTestVersionID == chosen.id)
+        try await render(FactoryPanel("Saved checkpoint") {
+            ModelCoverageCheckpointRow(model: model, version: source)
+        }.fixedSize(horizontal: false, vertical: true).padding(24).preferredColorScheme(.dark),
+            size: NSSize(width: 1060, height: 330), name: "coverage-select-checkpoint-dark.png")
+    }
+
     @Test @MainActor
     func approveAndUseIsOneActionAndMissingPackageExportDoesNotHideTesting() async throws {
         let fixture = try await CoverageControlsFixture()

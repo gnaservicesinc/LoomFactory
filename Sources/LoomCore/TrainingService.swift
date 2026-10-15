@@ -22,8 +22,10 @@ extension LoomProject {
             requestedStart = .checkpoint(runID: checkpoint.directory.lastPathComponent)
         }
         let prepared = try prepareTrainingStart(requestedStart, datasetID: datasetID, map: map, settings: settings)
-        let settings = prepared.settings
-        if let issue = settings.validationIssue { throw LoomError(issue) }
+        var runSettings = prepared.settings
+        if let issue = runSettings.validationIssue { throw LoomError(issue) }
+        runSettings.resolveRandomSeedForRun()
+        let settings = runSettings
         let current = try snapshot()
         guard let dataset = current.datasets.first(where: { $0.id == datasetID }),
               let plan = try current.trainingPlan(datasetID: datasetID, map: map, settings: settings) else {

@@ -4,6 +4,55 @@ import XCTest
 @testable import LoomCore
 
 final class TrainingSettingsTests: XCTestCase {
+    func testSystemSeedIsTheFreshDefaultButLegacySettingsKeepSeedZero() throws {
+        XCTAssertEqual(TrainingSettings().seed, -1)
+        XCTAssertNil(TrainingSettings().validationIssue)
+        let legacy = try JSONDecoder().decode(TrainingSettings.self, from: Data("{}".utf8))
+        XCTAssertEqual(legacy.seed, 0)
+        let explicit = try JSONDecoder().decode(TrainingSettings.self, from: Data(#"{"seed":9587}"#.utf8))
+        XCTAssertEqual(explicit.seed, 9587)
+        let sentinel = try JSONDecoder().decode(TrainingSettings.self,
+            from: JSONEncoder().encode(TrainingSettings(seed: -1)))
+        XCTAssertEqual(sentinel.seed, -1)
+    }
+
+    func testRandomSeedResolvesOnceAndSavedSettingsRetainTheResolvedValue() throws {
+        var settings = TrainingSettings(seed: -1)
+        var generator = CountingRandom()
+        settings.resolveRandomSeedForRun(using: &generator)
+        XCTAssertTrue((0...Int(Int32.max)).contains(settings.seed))
+        XCTAssertGreaterThan(generator.calls, 0)
+        let seed = settings.seed, calls = generator.calls
+        settings.resolveRandomSeedForRun(using: &generator)
+        XCTAssertEqual(settings.seed, seed)
+        XCTAssertEqual(generator.calls, calls, "A run's saved seed must never be redrawn")
+        let restored = try JSONDecoder().decode(TrainingSettings.self, from: JSONEncoder().encode(settings))
+        XCTAssertEqual(restored.seed, seed)
+        var explicit = TrainingSettings(seed: 9587)
+        explicit.resolveRandomSeedForRun(using: &generator)
+        XCTAssertEqual(explicit.seed, 9587)
+        XCTAssertEqual(generator.calls, calls, "Explicit seeds must not read the system RNG")
+
+        var system = TrainingSettings()
+        system.resolveRandomSeedForRun()
+        XCTAssertTrue((0...Int(Int32.max)).contains(system.seed))
+        let systemSeed = system.seed
+        system.resolveRandomSeedForRun()
+        XCTAssertEqual(system.seed, systemSeed)
+    }
+
+    func testRandomSeedSentinelDoesNotMakeValidationSplitRandom() {
+        for seed in [-1, 0, 1, Int(Int32.max)] {
+            XCTAssertNil(TrainingSettings(seed: seed).validationIssue)
+        }
+        for seed in [-2, Int.min, Int(Int32.max) + 1, Int.max] {
+            XCTAssertEqual(TrainingSettings(seed: seed).validationIssue,
+                "Random seed must be -1 for a new system seed, or zero to 2,147,483,647.")
+        }
+        XCTAssertEqual(TrainingSettings(validationSeed: -1).validationIssue,
+            "Validation seed must be between zero and 2,147,483,647.")
+    }
+
     func testOlderProjectSettingsPreserveTheirValuesAndAcquireNewControls() throws {
         let json = Data("""
         {"imageSize":2048,"epochs":37,"batchSize":2,"learningRate":0.0007,
@@ -132,5 +181,10 @@ final class TrainingSettingsTests: XCTestCase {
         let id = "\(role.rawValue)-\(size)"
         return SourceImage(id: folder.path + id, url: folder.appendingPathComponent(id + ".png"), displayName: id,
             role: role, category: "Bark", verified: true, note: "", pairingKey: folder.path + "-\(size)", width: size, height: size)
+    }
+
+    private struct CountingRandom: RandomNumberGenerator {
+        var calls = 0
+        mutating func next() -> UInt64 { calls += 1; return 0x79dbe82a190ad974 }
     }
 }

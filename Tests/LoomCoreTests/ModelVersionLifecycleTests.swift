@@ -8,6 +8,76 @@ import XCTest
 
 @MainActor
 final class ModelVersionLifecycleTests: XCTestCase {
+    func testCheckpointCanBecomeSelectedModelWithoutChangingStoppedRunOrItsExport() async throws {
+        let fixture = try await Fixture(); defer { fixture.remove() }
+        let parent = try fixture.artifact("stopped", date: Date(timeIntervalSince1970: 100), checkpoint: true)
+        try fixture.nativeCheckpoint(parent)
+        let sourceDescriptorURL = parent.directory.appendingPathComponent("checkpoint.json")
+        var sourceDescriptor = try NativeFactoryTraining.json(sourceDescriptorURL)
+        sourceDescriptor["prior_history"] = [["epoch": 1, "loss": 0.8], ["epoch": 2, "loss": 0.7], ["epoch": 3, "loss": 0.6]]
+        sourceDescriptor["prior_epochs"] = 3; sourceDescriptor["prior_updates"] = 6
+        sourceDescriptor["prior_images"] = 12; sourceDescriptor["completed_images"] = 8
+        sourceDescriptor["prior_duration_seconds"] = 9.0; sourceDescriptor["elapsed_seconds"] = 1.0
+        try NativeFactoryTraining.writeJSON(sourceDescriptor, to: sourceDescriptorURL)
+        try await fixture.project.updateModelVersionMetadata(runID: parent.id, name: "Darker checkpoint", notes: "Compare detail")
+        try await fixture.project.selectModelVersion(runID: parent.id, datasetID: fixture.datasetID, map: .depth)
+        let original = try fixture.savedFiles()
+        let checkpointBytes = try Data(contentsOf: parent.directory.appendingPathComponent("checkpoint.safetensors"))
+        let promoted = try await fixture.project.selectCheckpointModelVersion(runID: parent.id, datasetID: fixture.datasetID, map: .depth)
+        XCTAssertNotEqual(promoted.id, parent.id)
+        XCTAssertEqual(try Data(contentsOf: promoted.directory.appendingPathComponent("model.safetensors")), checkpointBytes)
+        let after = try fixture.savedFiles()
+        for (path, bytes) in original {
+            XCTAssertEqual(after[path], bytes)
+        }
+        let reopened = try LoomProject(sourceFolder: fixture.root)
+        let selected = try await reopened.selectedModelArtifact(datasetID: fixture.datasetID, map: .depth)
+        XCTAssertEqual(selected?.id, promoted.id)
+        let versions = try await reopened.modelVersions()
+        let derived = try XCTUnwrap(versions.first { $0.id == promoted.id })
+        XCTAssertEqual(derived.label, "Darker checkpoint · checkpoint")
+        XCTAssertEqual(derived.lineage?.parentRunID, parent.id)
+        XCTAssertEqual(derived.lineage?.source, .checkpoint)
+        XCTAssertTrue(derived.isActive)
+        XCTAssertFalse(derived.isApproved, "Selection does not invent a human quality approval")
+        XCTAssertEqual(derived.exportedEpochsCompleted, 5)
+        let exportedDescriptor = try NativeFactoryTraining.json(promoted.directory.appendingPathComponent("model.json"))
+        let continuation = TrainingContinuationHistory(descriptor: exportedDescriptor, source: .model,
+            runID: promoted.id, resumingCursor: false, trainingImages: 0)
+        XCTAssertEqual(continuation.epochs, 5)
+        XCTAssertEqual(continuation.updates, 8)
+        XCTAssertEqual(continuation.images, 20)
+        XCTAssertEqual(continuation.elapsedSeconds, 10)
+        let tested = try ModelTestSelection.load(runID: promoted.id, source: .model, datasetID: fixture.datasetID,
+            map: .depth, projectFolder: fixture.project.projectFolder, projectID: fixture.projectID)
+        XCTAssertEqual(try Data(contentsOf: tested.weightsURL), checkpointBytes)
+        try TrainingRunFiles.validateArtifact(promoted, projectFolder: fixture.project.projectFolder, projectID: fixture.projectID)
+        try await reopened.setModelApproval(runID: promoted.id, approved: true)
+        let approved = try await reopened.modelVersions().first { $0.id == promoted.id }
+        XCTAssertTrue(try XCTUnwrap(approved).isApproved)
+    }
+
+    func testCheckpointOnlyRunCanBeSelectedAndCorruptCheckpointLeavesChoiceUntouched() async throws {
+        let fixture = try await Fixture(); defer { fixture.remove() }
+        let parent = try fixture.artifact("unfinished", date: .now, checkpoint: true)
+        try fixture.nativeCheckpoint(parent)
+        for name in ["artifact.json", "model.json", "model.safetensors", "model.mlmodel"] {
+            try FileManager.default.removeItem(at: parent.directory.appendingPathComponent(name))
+        }
+        let promoted = try await fixture.project.selectCheckpointModelVersion(runID: parent.id, datasetID: fixture.datasetID, map: .depth)
+        let originals = try fixture.savedFiles()
+        try Data("corrupt".utf8).write(to: parent.directory.appendingPathComponent("checkpoint.safetensors"))
+        do {
+            _ = try await fixture.project.selectCheckpointModelVersion(runID: parent.id, datasetID: fixture.datasetID, map: .depth)
+            XCTFail("Changed checkpoint weights must not replace the selected version")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("checksum")) }
+        let chosen = try await fixture.project.selectedModelArtifact(datasetID: fixture.datasetID, map: .depth)
+        XCTAssertEqual(chosen?.id, promoted.id)
+        let versions = try await fixture.project.modelVersions()
+        XCTAssertEqual(versions.count, 2)
+        XCTAssertEqual(Set(try fixture.savedFiles().keys), Set(originals.keys))
+    }
+
     func testContinuationUsesSelectedRunAndDistinguishesCheckpointFromExportedBestWeights() async throws {
         let fixture = try await Fixture(); defer { fixture.remove() }
         let old = try fixture.artifact("old", date: Date(timeIntervalSince1970: 100), size: 32, width: 8, checkpoint: true)
@@ -26,6 +96,8 @@ final class ModelVersionLifecycleTests: XCTestCase {
         XCTAssertEqual(continued.settings.scalarLoss, .absoluteV1, "Legacy checkpoint continuation preserves its objective")
         XCTAssertEqual(continued.settings.learningRate, changed.learningRate)
         XCTAssertEqual(continued.settings.optimizer, .adam)
+        XCTAssertEqual(changed.seed, -1)
+        XCTAssertEqual(continued.settings.seed, 0, "Default continuation inherits the historical source seed")
 
         let best = try await fixture.project.prepareTrainingStart(.model(runID: "old"),
             datasetID: fixture.datasetID, map: .depth, settings: changed)
@@ -33,7 +105,12 @@ final class ModelVersionLifecycleTests: XCTestCase {
         XCTAssertEqual(best.resume?.source, .model)
         XCTAssertEqual(best.settings.modelArchitecture, NativeArchitecture.identifier)
         XCTAssertEqual(best.settings.scalarLoss, .absoluteV1)
+        XCTAssertEqual(best.settings.seed, 0)
         XCTAssertNotEqual(best.resume?.sha256, continued.resume?.sha256)
+        changed.seed = 91
+        let override = try await fixture.project.prepareTrainingStart(.checkpoint(runID: "old"),
+            datasetID: fixture.datasetID, map: .depth, settings: changed)
+        XCTAssertEqual(override.settings.seed, 91, "Explicit continuation seed overrides remain available")
         let fresh = try await fixture.project.prepareTrainingStart(.fresh, datasetID: fixture.datasetID, map: .depth, settings: changed)
         XCTAssertNil(fresh.resume)
         XCTAssertEqual(fresh.settings, changed)
@@ -167,7 +244,7 @@ final class ModelVersionLifecycleTests: XCTestCase {
         XCTAssertEqual(restored?.id, replacement.id)
     }
 
-    func testPackageExportsSelectedHistoricalWeightsAfterReopening() async throws {
+    func testPackageExportsSelectedHistoricalAndCheckpointWeightsAfterReopening() async throws {
         let fixture = try await Fixture(); defer { fixture.remove() }
         let classifierURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Resources/DTTC3.mlmodel")
@@ -179,10 +256,16 @@ final class ModelVersionLifecycleTests: XCTestCase {
         var historical: [String: Data] = [:]
         for label in interface.labels {
             let name = ImageMetadataStore.friendlyName(label), id = ImageMetadataStore.categoryID(name)
-            let old = try fixture.artifact("old-\(id)", date: Date(timeIntervalSince1970: 100), datasetID: id, datasetName: name)
+            let old = try fixture.artifact("old-\(id)", date: Date(timeIntervalSince1970: 100), checkpoint: historical.isEmpty, datasetID: id, datasetName: name)
             _ = try fixture.artifact("new-\(id)", date: Date(timeIntervalSince1970: 200), datasetID: id, datasetName: name)
-            try await fixture.project.selectModelVersion(runID: old.id, datasetID: id, map: .depth)
-            historical[id] = try Data(contentsOf: old.directory.appendingPathComponent("model.safetensors"))
+            if historical.isEmpty {
+                try fixture.nativeCheckpoint(old)
+                _ = try await fixture.project.selectCheckpointModelVersion(runID: old.id, datasetID: id, map: .depth)
+                historical[id] = try Data(contentsOf: old.directory.appendingPathComponent("checkpoint.safetensors"))
+            } else {
+                try await fixture.project.selectModelVersion(runID: old.id, datasetID: id, map: .depth)
+                historical[id] = try Data(contentsOf: old.directory.appendingPathComponent("model.safetensors"))
+            }
         }
         let originals = try fixture.savedFiles()
         let reopened = try LoomProject(sourceFolder: fixture.root)
@@ -210,6 +293,18 @@ final class ModelVersionLifecycleTests: XCTestCase {
             projectID = try await project.snapshot().projectID
         }
         func remove() { try? FileManager.default.removeItem(at: root) }
+        func nativeCheckpoint(_ artifact: ModelArtifact) throws {
+            let architecture = try NativeArchitecture(mapKind: "depth", width: 8, blocks: 1)
+            let weights = architecture.parameterShapes.mapValues { shape in
+                NativeTensor(shape: shape, values: [Float](repeating: 0.013, count: shape.reduce(1, *)))
+            }
+            let file = artifact.directory.appendingPathComponent("checkpoint.safetensors")
+            try NativeWeights.write(weights, to: file, metadata: ["checkpoint_test_fixture": "not-trained"])
+            var descriptor = try NativeFactoryTraining.json(artifact.directory.appendingPathComponent("checkpoint.json"))
+            descriptor["weights_sha256"] = try TrainingRunFiles.sha256(file)
+            descriptor["updates"] = 2
+            try NativeFactoryTraining.writeJSON(descriptor, to: artifact.directory.appendingPathComponent("checkpoint.json"))
+        }
         func artifact(_ id: String, date: Date, size: Int = 32, width: Int = 8, checkpoint: Bool = false,
                       datasetID selectedID: String? = nil, datasetName: String = "Bricks") throws -> ModelArtifact {
             let datasetID = selectedID ?? self.datasetID
@@ -219,6 +314,7 @@ final class ModelVersionLifecycleTests: XCTestCase {
                 learningRate: 0.0003, modelWidth: width, modelBlocks: 1, gradientAccumulationSteps: 3,
                 modelArchitecture: NativeArchitecture.identifier))
             settings.removeValue(forKey: "scalar_loss") // Historical runs predate the objective ID.
+            settings.removeValue(forKey: "seed") // Historical omission must retain seed zero.
             let rows: [[String: Any]] = [["epoch": 1, "loss": 0.5, "validation_loss": 0.4, "learning_rate": 0.0003, "updates": 1],
                                         ["epoch": 2, "loss": 0.3, "validation_loss": 0.2, "learning_rate": 0.0003, "updates": 2]]
             settings["history"] = rows

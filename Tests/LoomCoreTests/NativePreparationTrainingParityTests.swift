@@ -66,15 +66,21 @@ final class NativePreparationTrainingParityTests: XCTestCase {
             return Batch(inputs: inputs, targets: targets, count: item.count, windowCount: item.windowCount,
                 beginsWindow: item.begins, endsWindow: item.ends)
         }
-        let pipeline = NativePreparationPipeline<Batch>(cancellation: cancellation)
+        let pipeline = NativePreparationPipeline<Batch>(cancellation: cancellation, capacity: 2)
         defer { pipeline.close() }
-        if preparingAhead { try pipeline.submit { try prepare(0) } }
+        var nextPreparationIndex = 0
+        if preparingAhead {
+            for initial in descriptors.indices.prefix(2) {
+                try pipeline.submit { try prepare(initial) }; nextPreparationIndex += 1
+            }
+        }
         var losses: [Double] = [], norms: [Double] = []
         for index in descriptors.indices {
             let batch = preparingAhead ? try pipeline.take() : try prepare(index)
-            if preparingAhead, index + 1 < descriptors.count {
-                let next = index + 1
+            if preparingAhead, nextPreparationIndex < descriptors.count {
+                let next = nextPreparationIndex
                 try pipeline.submit { try prepare(next) }
+                nextPreparationIndex += 1
             }
             if batch.beginsWindow { session.resetAccumulatedGradients() }
             losses.append(try session.train(input: batch.inputs, target: batch.targets, batchSize: batch.count,

@@ -202,6 +202,65 @@ final class NativeIOTests: XCTestCase {
         XCTAssertEqual(second, resumed)
     }
 
+    func testRandomCropOriginsCoverTheWholeNativeRectangleIncludingEdges() throws {
+        // Every one of the eight possible origins must be reachable. A corner,
+        // center, tile-lattice or square-within-rectangle strategy fails this.
+        var plan = NativeAugmentationPlan(seed: 9587, cropRefresh: "per_epoch", augmentationRefresh: "per_epoch")
+        var origins = Set<String>()
+        for epoch in 0..<1024 {
+            let crop = try plan.transform(sampleID: "rectangular-material", epoch: epoch,
+                width: 7, height: 5, size: 4, flip: false, rotate: false)
+            XCTAssertTrue((0...3).contains(crop.x))
+            XCTAssertTrue((0...1).contains(crop.y))
+            origins.insert("\(crop.x),\(crop.y)")
+        }
+        XCTAssertEqual(origins, Set((0...3).flatMap { x in (0...1).map { y in "\(x),\(y)" } }))
+
+        let exact = try plan.transform(sampleID: "exact-material", epoch: 0,
+            width: 4, height: 4, size: 4, flip: false, rotate: false)
+        XCTAssertEqual(exact.x, 0); XCTAssertEqual(exact.y, 0)
+        let wide = try plan.transform(sampleID: "wide-material", epoch: 0,
+            width: 8192, height: 2048, size: 1024, flip: false, rotate: false)
+        XCTAssertTrue((0...7168).contains(wide.x)); XCTAssertTrue((0...1024).contains(wide.y))
+    }
+
+    func testCropRefreshCadencesRemainDeterministicAndIndependentOfTransforms() throws {
+        for cadence in ["per_run", "per_epoch", "per_sample"] {
+            var first = NativeAugmentationPlan(seed: 42, cropRefresh: cadence, augmentationRefresh: "per_sample")
+            var repeatPlan = NativeAugmentationPlan(seed: 42, cropRefresh: cadence, augmentationRefresh: "per_run")
+            var origins = Set<String>()
+            for visit in 0..<64 {
+                let epoch = visit / 2
+                let a = try first.transform(sampleID: "material", epoch: epoch,
+                    width: 8192, height: 2048, size: 1024, flip: true, rotate: true)
+                let b = try repeatPlan.transform(sampleID: "material", epoch: epoch,
+                    width: 8192, height: 2048, size: 1024, flip: false, rotate: false)
+                XCTAssertEqual(a.x, b.x); XCTAssertEqual(a.y, b.y)
+                origins.insert("\(a.x),\(a.y)")
+            }
+            XCTAssertEqual(origins.count, cadence == "per_run" ? 1 : cadence == "per_epoch" ? 32 : 64)
+        }
+    }
+
+    func testRandomNativeCropsKeepInputAndScalarTargetPixelsExactlyAligned() throws {
+        let values = (0..<35).map { Float($0) / 64 }
+        let input = NativeImage(width: 7, height: 5, channels: 3, values: values.flatMap { [$0, $0, $0] })
+        let target = NativeImage(width: 7, height: 5, channels: 1, values: values)
+        var plan = NativeAugmentationPlan(seed: 19, cropRefresh: "per_sample", augmentationRefresh: "per_sample")
+        for _ in 0..<32 {
+            let transform = try plan.transform(sampleID: "paired", epoch: 0,
+                width: 7, height: 5, size: 4, flip: true, rotate: true)
+            let pair = try NativeImages.pair(input: input, target: target, transform: transform, mapKind: "depth")
+            XCTAssertEqual(pair.crop, transform)
+            XCTAssertEqual(pair.input.shape, [1, 3, 4, 4])
+            XCTAssertEqual(pair.target.shape, [1, 1, 4, 4])
+            for channel in 0..<3 {
+                XCTAssertEqual(Array(pair.input.values[(channel * 16)..<((channel + 1) * 16)]), pair.target.values)
+            }
+            for pixel in pair.target.values { XCTAssertTrue(values.contains(pixel)) }
+        }
+    }
+
     func testImageWorkHonorsAnAlreadyCancelledRun() throws {
         let cancellation = NativeCancellation(); cancellation.cancel()
         XCTAssertThrowsError(try NativeImages.readRGB(from: URL(fileURLWithPath: "/missing.png"), cancellation: cancellation)) {

@@ -101,6 +101,12 @@ struct ModelVersionRow: View {
                     .disabled(model.busy)
                     .accessibilityIdentifier("training.version.delete.\(version.id)")
             }.controlSize(.small)
+            if version.checkpoint != nil {
+                Button("Use checkpoint as model", systemImage: "checkmark.circle") { model.useCheckpointAsModel(version) }
+                    .disabled(model.busy).controlSize(.small)
+                    .help("Exports this checkpoint as a separate selected version, preserving the original run.")
+                    .accessibilityIdentifier("training.version.useCheckpoint.\(version.id)")
+            }
             DisclosureGroup("Run settings and history") {
                 VStack(alignment: .leading, spacing: 10) {
                     TrainingSettingsTable(first: version.settings)

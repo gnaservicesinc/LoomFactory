@@ -8,7 +8,12 @@ enum NativeFactoryTraining {
     static func run(id: String, root: URL, output: URL, projectID: String, dataset: DatasetCategory,
                     map: MapRole, plan: TrainingDataPlan, settings: TrainingSettings, resume: URL?,
                     cancellation: NativeCancellation, progress: @escaping @Sendable (TrainingEvent) -> Void,
-                    prepareAhead: Bool = true, control: TrainingRunControl? = nil) throws -> ModelArtifact {
+                    prepareAhead: Bool = true, control: TrainingRunControl? = nil,
+                    preparationCapacity: Int = 2) throws -> ModelArtifact {
+        var runSettings = settings
+        if let issue = runSettings.validationIssue { throw LoomError(issue) }
+        runSettings.resolveRandomSeedForRun()
+        let settings = runSettings
         let started = Date()
         func clock() -> Double { ProcessInfo.processInfo.systemUptime }
         let stepsPerEpoch = settings.optimizerStepsPerEpoch(pairCount: plan.training.count)
@@ -16,7 +21,8 @@ enum NativeFactoryTraining {
         var tracker = TrainingProgressTracker(totalEpochs: settings.epochs, trainingImages: plan.training.count,
             validationImages: plan.validation.count, stepsPerEpoch: stepsPerEpoch,
             checkpointEveryEpochs: settings.checkpointEveryEpochs, startSeconds: clock())
-        let preparation = NativePreparationPipeline<FactoryPreparedBatch>(cancellation: cancellation)
+        let preparationDepth = min(2, max(1, preparationCapacity))
+        let preparation = NativePreparationPipeline<FactoryPreparedBatch>(cancellation: cancellation, capacity: preparationDepth)
         let runMetadata = try TrainingRunFiles.metadata(at: output)
         var versionJSON: [String: Any] = ["run_id": id, "run_label": runMetadata?.label ?? ""]
         if let lineage = runMetadata?.lineage {
@@ -296,7 +302,7 @@ enum NativeFactoryTraining {
                 var normSum = restoring?.gradientNormSum ?? 0, peakNorm = restoring?.peakGradientNorm ?? 0
                 let firstWindow = restoring?.nextWindow ?? 0
                 // Resolve deterministic transforms on the serial owner. Only the
-                // upcoming minibatch's pixels are prepared by the bounded worker.
+                // bounded upcoming batches' pixels are prepared concurrently.
                 var batches: [FactoryImageBatch] = []
                 var epochCrops = restoring?.crops ?? []
                 for window in stride(from: firstWindow, to: order.count, by: settings.effectiveBatchSize) {
@@ -326,7 +332,10 @@ enum NativeFactoryTraining {
                         try FactoryPreparedBatch.prepare(batch, map: map, settings: settings, cancellation: cancellation)
                     }
                 }
-                if prepareAhead, let first = batches.first { try submit(first) }
+                var nextPreparationIndex = 0
+                if prepareAhead {
+                    for batch in batches.prefix(preparationDepth) { try submit(batch); nextPreparationIndex += 1 }
+                }
                 var batchIndex = 0
                 for window in stride(from: firstWindow, to: order.count, by: settings.effectiveBatchSize) {
                     let cycleStart = clock()
@@ -349,7 +358,9 @@ enum NativeFactoryTraining {
                         preparationSeconds += prepared.preparationSeconds
                         for pair in batch.pairs { try verify(pair) }
                         batchIndex += 1
-                        if prepareAhead, batchIndex < batches.count { try submit(batches[batchIndex]) }
+                        if prepareAhead, nextPreparationIndex < batches.count {
+                            try submit(batches[nextPreparationIndex]); nextPreparationIndex += 1
+                        }
                         try cancellation.check()
                         tracker.begin(stage: .training, image: batch.imageNames,
                                       index: min(offset + batch.pairs.count, order.count), now: clock())

@@ -112,7 +112,7 @@ struct TrainingPanel: View {
                     if model.settings.training.device == .cpu { Text("CPU (unavailable for native training)").tag(TrainingDevice.cpu) }
                 }.labelsHidden().accessibilityIdentifier("training.device")
             }
-            numberRow("Random seed", value: $model.settings.training.seed, detail: "Repeat crop, shuffle and model initialization choices.", identifier: "training.seed")
+            numberRow("Random seed", value: $model.settings.training.seed, detail: "-1 uses a new system seed for a fresh run. Saved runs record their seed; use it to repeat crop, shuffle and initialization choices.", identifier: "training.seed")
         }
     }
 
@@ -306,6 +306,11 @@ struct TrainingPanel: View {
                     .toggleStyle(.checkbox).accessibilityIdentifier("training.exportBest")
                     .help("Off exports the final training weights. Lowest loss does not always produce the best-looking material.")
             }
+            if model.trainingPlan?.validationPairCount == 0 {
+                Text("Without held-out validation, export uses the final weights. You can test and select a saved checkpoint if an earlier result looks better.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("training.finalWeightsWithoutValidation")
+            }
         }
     }
 
@@ -476,11 +481,12 @@ struct TrainingPanel: View {
 
     private func refreshDescription(_ refresh: TrainingRefresh, transform: Bool) -> String {
         let choices = transform ? "transforms" : "positions"
-        return switch refresh {
+        let cadence = switch refresh {
         case .perSample: "Choose fresh \(choices) every time an image is used."
         case .perEpoch: "Choose \(choices) once per image each epoch."
         case .perRun: "Choose \(choices) once per image for this run."
         }
+        return transform ? cadence : cadence + " All valid native pixel origins are eligible, including the image edges."
     }
 
     @ViewBuilder private func trainingSection<Content: View>(_ title: String, symbol: String, @ViewBuilder content: () -> Content) -> some View {

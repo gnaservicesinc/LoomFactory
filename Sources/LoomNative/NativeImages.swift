@@ -342,7 +342,7 @@ public enum NativeImages {
     }
 }
 
-private struct NativeRawPixelKey: Hashable, Sendable {
+struct NativeRawPixelKey: Hashable, Sendable {
     let path: String
     let device: Int32
     let inode: UInt64
@@ -357,7 +357,7 @@ private struct NativeRawPixelKey: Hashable, Sendable {
     }
 }
 
-private struct NativeRawPixels: Sendable {
+struct NativeRawPixels: Sendable {
     let key: NativeRawPixelKey
     let width: Int, height: Int, channels: Int, bits: Int, components: Int, bitsPerPixel: Int, bytesPerRow: Int
     let bitmapInfo: UInt32
@@ -365,15 +365,21 @@ private struct NativeRawPixels: Sendable {
     let storage: Data
 }
 
-private final class NativeRawPixelCache: @unchecked Sendable {
+final class NativeRawPixelCache: @unchecked Sendable {
     private let lock = NSLock()
     private let limit: Int
     private var storage: [NativeRawPixelKey: NativeRawPixels] = [:]
     private var order: [NativeRawPixelKey] = []
     private var validation: [NativeRawPixelKey: Set<String>] = [:]
+    private var validationOrder: [NativeRawPixelKey] = []
+    private let validationLimit: Int
     private var bytes = 0
-    init(limit: Int) { self.limit = limit }
-    func clear() { lock.withLock { storage.removeAll(); order.removeAll(); validation.removeAll(); bytes = 0 } }
+    init(limit: Int, validationLimit: Int = 4096) {
+        self.limit = limit; self.validationLimit = max(1, validationLimit)
+    }
+    func clear() { lock.withLock {
+        storage.removeAll(); order.removeAll(); validation.removeAll(); validationOrder.removeAll(); bytes = 0
+    } }
     func read(_ key: NativeRawPixelKey) -> NativeRawPixels? {
         lock.withLock {
             guard let value = storage[key] else { return nil }
@@ -388,14 +394,26 @@ private final class NativeRawPixelCache: @unchecked Sendable {
             order.removeAll { $0 == value.key }
             while bytes + value.storage.count > limit, let old = order.first {
                 if let removed = storage.removeValue(forKey: old) { bytes -= removed.storage.count }
-                order.removeFirst(); validation.removeValue(forKey: old)
+                order.removeFirst()
             }
             storage[value.key] = value; order.append(value.key); bytes += value.storage.count
         }
     }
     func isValidated(_ key: NativeRawPixelKey, role: String) -> Bool { lock.withLock { validation[key]?.contains(role) == true } }
     func markValidated(_ key: NativeRawPixelKey, role: String) {
-        lock.withLock { if storage[key] != nil { validation[key, default: []].insert(role) } }
+        lock.withLock {
+            // Pixel storage can exceed the cache or be evicted between epochs.
+            // Its successful whole-image validation still applies to this exact
+            // unchanged file identity. Keep these small records independently
+            // bounded so large float/RGB targets are not rescanned each visit.
+            if validation[key] == nil {
+                while validationOrder.count >= validationLimit {
+                    validation.removeValue(forKey: validationOrder.removeFirst())
+                }
+                validationOrder.append(key)
+            }
+            validation[key, default: []].insert(role)
+        }
     }
 }
 

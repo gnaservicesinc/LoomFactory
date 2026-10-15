@@ -322,7 +322,7 @@ struct ModelCoverageView: View {
                     .accessibilityIdentifier("coverage.latestDefault.\(entry.id)")
             }
             if entry.candidates.isEmpty {
-                Text(entry.checkpointCount > 0 ? "No completed model is available. Continue a saved training run or train a new model." : "This group has no saved model for this product. Open training to create one.")
+                Text(entry.checkpointCount > 0 ? "Choose a saved checkpoint as the model, continue training, or train a new model." : "This group has no saved model for this product. Open training to create one.")
                     .font(.callout).foregroundStyle(.secondary).padding(.vertical, 10)
             } else {
                 LazyVStack(spacing: 10) {
@@ -335,7 +335,7 @@ struct ModelCoverageView: View {
             if !checkpoints.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Saved checkpoints (\(checkpoints.count))").font(.callout.weight(.semibold))
-                    Text("These saved training versions can be tested or continued. Complete training to create a model for approval and package use.")
+                    Text("Test or continue any checkpoint. Use checkpoint as model exports its exact weights as a separate selected version for approval and package use.")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     ForEach(checkpoints) { version in
                         ModelCoverageCheckpointRow(model: model, version: version)
@@ -392,6 +392,9 @@ struct ModelCoverageCheckpointRow: View {
             }
             ModelVersionMetadataEditor(model: model, version: version)
             HStack(spacing: 10) {
+                Button("Use checkpoint as model", systemImage: "checkmark.circle") { model.useCheckpointAsModel(version) }
+                    .disabled(model.busy)
+                    .accessibilityIdentifier("coverage.useCheckpoint.\(version.id)")
                 Button("Continue checkpoint", action: continueTraining).disabled(model.busy)
                     .accessibilityIdentifier("coverage.continueCheckpoint.\(version.id)")
                 Button("Test checkpoint") { model.showModelTesting(version) }
@@ -487,6 +490,12 @@ struct ModelCoverageCandidateRow: View {
                     .help("Records your review without changing which saved model is used.")
                     .accessibilityIdentifier("coverage.approve.\(candidate.id)")
             }.controlSize(.small)
+            if let version, version.checkpoint != nil {
+                Button("Use checkpoint as model", systemImage: "square.stack.3d.up") { model.useCheckpointAsModel(version) }
+                    .disabled(model.busy).controlSize(.small)
+                    .help("Exports this run's checkpoint separately, preserving its existing model and continuation state.")
+                    .accessibilityIdentifier("coverage.useCheckpoint.\(candidate.id)")
+            }
         }.padding(13).frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
             .accessibilityIdentifier("coverage.candidate.\(candidate.id)")

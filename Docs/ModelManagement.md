@@ -6,6 +6,14 @@ the current source-folder categories and saved model artifacts. Running, stopped
 and failed training runs remain visible in history but do not count as completed
 models.
 
+Any saved checkpoint with completed training updates can become the selected
+model. In its row, choose **Use checkpoint as model**. Factory copies those exact
+weights into a separate immutable version, exports its Core ML model, and selects
+that version for testing and package export. The original run, its existing
+model, and its continuation checkpoint remain unchanged. The new version records
+the source checkpoint and its checksum. It starts without approval so you can
+inspect its output and compare it with other saved versions before approving it.
+
 Select a cell to review its saved candidates. **Use This Model** saves the model
 assignment for that group and product. **Approve** records your own quality
 decision separately: approving a candidate does not select it, and selecting a

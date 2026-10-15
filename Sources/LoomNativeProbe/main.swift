@@ -9,12 +9,14 @@ private struct ProbeArguments {
     var values: [String: String] = [:]
     var synthetic = false
     var prepareOnly = false
+    var predictOnly = false
     init() throws {
         var arguments = Array(CommandLine.arguments.dropFirst())
         while !arguments.isEmpty {
             let argument = arguments.removeFirst()
             if argument == "--synthetic" { synthetic = true; continue }
             if argument == "--prepare-only" { prepareOnly = true; continue }
+            if argument == "--predict-only" { predictOnly = true; continue }
             guard argument.hasPrefix("--") else { throw NativeTrainingError.invalid("Unknown probe argument: \(argument)") }
             if let equal = argument.firstIndex(of: "=") {
                 values[String(argument[..<equal].dropFirst(2))] = String(argument[argument.index(after: equal)...])
@@ -23,9 +25,31 @@ private struct ProbeArguments {
                 values[String(argument.dropFirst(2))] = arguments.removeFirst()
             }
         }
-        let allowed: Set<String> = ["input", "target", "map", "size", "width", "blocks", "updates", "visits", "seed", "learning-rate", "optimizer", "output", "weights-out", "weights-in", "initial-weights-out", "gradients-out", "cancel-after-ms", "architecture", "layout"]
+        let allowed: Set<String> = ["input", "target", "map", "size", "width", "blocks", "updates", "visits", "seed", "learning-rate", "optimizer", "output", "weights-out", "weights-in", "initial-weights-out", "gradients-out", "cancel-after-ms", "architecture", "layout", "scalar-loss", "prediction-out", "target-out"]
         guard Set(values.keys).isSubset(of: allowed), synthetic || (values["input"] != nil && values["target"] != nil) else {
             throw NativeTrainingError.invalid("Use --synthetic, or --input IMAGE --target IMAGE. Supported options: \(allowed.sorted().joined(separator: ", ")).")
+        }
+        guard !predictOnly || (!prepareOnly && values["weights-in"] != nil) else {
+            throw NativeTrainingError.invalid("--predict-only requires --weights-in and cannot use --prepare-only.")
+        }
+        // Diagnostics must never replace an original image or trained weights,
+        // including through a symbolic link. Output destinations are separate.
+        let sourcePaths = ["input", "target", "weights-in"].compactMap { values[$0] }
+            .map { URL(fileURLWithPath: $0).standardizedFileURL.resolvingSymlinksInPath().path }
+        let outputPaths = ["output", "weights-out", "initial-weights-out", "gradients-out", "prediction-out", "target-out"]
+            .compactMap { values[$0] }.map { URL(fileURLWithPath: $0).standardizedFileURL.resolvingSymlinksInPath().path }
+        func identity(_ path: String) -> String? {
+            var info = stat()
+            guard stat(path, &info) == 0 else { return nil }
+            return "\(info.st_dev):\(info.st_ino)"
+        }
+        let sourceIdentities = Set(sourcePaths.compactMap(identity))
+        let outputIdentities = outputPaths.compactMap(identity)
+        guard Set(outputPaths).count == outputPaths.count,
+              Set(sourcePaths).isDisjoint(with: outputPaths),
+              Set(outputIdentities).count == outputIdentities.count,
+              sourceIdentities.isDisjoint(with: outputIdentities) else {
+            throw NativeTrainingError.invalid("Probe outputs must have distinct paths and cannot replace original images or supplied weights.")
         }
     }
     func integer(_ name: String, _ fallback: Int, range: ClosedRange<Int>) throws -> Int {
@@ -91,6 +115,72 @@ private func hash(_ weights: [String: NativeTensor]) -> String {
     return digest.finalize().map { String(format: "%02x", $0) }.joined()
 }
 
+/// Numeric diagnostics run on the unchanged Float32 NCHW pixels. The edge
+/// measurements compare native pixel differences; they do not resize, filter,
+/// normalize, or repair either image. They describe this pair, not generalization.
+private func pixelStatistics(_ values: [Float]) -> [String: Any] {
+    var sum = 0.0, squareSum = 0.0, nearBlack = 0, nearWhite = 0
+    var minimum = Float.infinity, maximum = -Float.infinity
+    for value in values {
+        let numeric = Double(value)
+        sum += numeric; squareSum += numeric * numeric
+        minimum = min(minimum, value); maximum = max(maximum, value)
+        if value <= 1e-5 { nearBlack += 1 }
+        if value >= 1 - 1e-5 { nearWhite += 1 }
+    }
+    let count = Double(values.count), mean = sum / count
+    return ["value_count": values.count, "minimum": minimum, "maximum": maximum,
+        "mean": mean, "standard_deviation": sqrt(max(0, squareSum / count - mean * mean)),
+        "near_black_fraction": Double(nearBlack) / count, "near_white_fraction": Double(nearWhite) / count,
+        "endpoint_tolerance": 1e-5]
+}
+
+private func predictionDiagnostics(_ prediction: [Float], target: [Float], channels: Int,
+                                   width: Int, height: Int) -> [String: Any] {
+    var absolute = 0.0, squared = 0.0, signed = 0.0
+    var predictionSum = 0.0, targetSum = 0.0, predictionSquared = 0.0, targetSquared = 0.0, productSum = 0.0
+    for (predicted, expected) in zip(prediction, target) {
+        let a = Double(predicted), b = Double(expected), error = a - b
+        absolute += abs(error); squared += error * error; signed += error
+        predictionSum += a; targetSum += b; predictionSquared += a * a; targetSquared += b * b; productSum += a * b
+    }
+    let count = Double(prediction.count)
+    let covariance = productSum - predictionSum * targetSum / count
+    let varianceProduct = max(0, predictionSquared - predictionSum * predictionSum / count)
+        * max(0, targetSquared - targetSum * targetSum / count)
+    var edges: [[String: Any]] = []
+    let plane = width * height
+    for distance in [1, 2, 4] {
+        for (axis, offset) in [("horizontal", distance), ("vertical", width * distance)] {
+            var edgeAbsolute = 0.0, predictionVariation = 0.0, targetVariation = 0.0, comparisons = 0
+            for channel in 0..<channels {
+                for y in 0..<height where axis == "horizontal" || y + distance < height {
+                    for x in 0..<width where axis == "vertical" || x + distance < width {
+                        let index = channel * plane + y * width + x
+                        let predicted = Double(prediction[index + offset]) - Double(prediction[index])
+                        let expected = Double(target[index + offset]) - Double(target[index])
+                        edgeAbsolute += abs(predicted - expected)
+                        predictionVariation += abs(predicted); targetVariation += abs(expected)
+                        comparisons += 1
+                    }
+                }
+            }
+            guard comparisons > 0 else { continue }
+            let divisor = Double(comparisons)
+            edges.append(["axis": axis, "native_pixel_distance": distance, "comparison_count": comparisons,
+                "mean_absolute_difference_error": edgeAbsolute / divisor,
+                "prediction_mean_absolute_difference": predictionVariation / divisor,
+                "target_mean_absolute_difference": targetVariation / divisor])
+        }
+    }
+    return ["prediction_statistics": pixelStatistics(prediction), "target_statistics": pixelStatistics(target),
+        "mean_absolute_error": absolute / count, "root_mean_square_error": sqrt(squared / count),
+        "mean_signed_error": signed / count,
+        "pearson_correlation": varianceProduct > 0 ? covariance / sqrt(varianceProduct) as Any : NSNull(),
+        "native_pixel_differences": edges,
+        "scope": "The exact tested source/target crop; this is not a held-out quality qualification."]
+}
+
 private func run() throws {
     let args = try ProbeArguments()
     guard args.values["layout"] == nil || ["nchw", "nhwc"].contains(args.values["layout"]!) else {
@@ -99,9 +189,12 @@ private func run() throws {
     let size = try args.integer("size", 1024, range: 1...8192)
     let width = try args.integer("width", 164, range: 1...512)
     let blocks = try args.integer("blocks", 4, range: 1...64)
-    let updates = try args.integer("updates", 3, range: 1...100_000)
+    let updates = args.predictOnly ? 0 : try args.integer("updates", 3, range: 1...100_000)
     let seed = try args.integer("seed", 42, range: 0...Int(Int32.max))
     let map = args.values["map"] ?? "depth"
+    guard let scalarLoss = NativeScalarLoss(rawValue: args.values["scalar-loss"] ?? NativeScalarLoss.absoluteV1.rawValue) else {
+        throw NativeTrainingError.invalid("Choose --scalar-loss absolute-v1 or logit-cross-entropy-v2 to match the recorded training objective.")
+    }
     guard let rate = Double(args.values["learning-rate"] ?? "0.001"), rate.isFinite, rate > 0, rate <= 1 else { throw NativeTrainingError.invalid("Invalid probe learning rate") }
     let cancellation = NativeCancellation()
     signal(SIGTERM, SIG_IGN); signal(SIGINT, SIG_IGN)
@@ -118,7 +211,8 @@ private func run() throws {
         "machine": sysctlString("machdep.cpu.brand_string"), "os": ProcessInfo.processInfo.operatingSystemVersionString,
         "size": size, "width": width, "blocks": blocks, "map": map, "requested_updates": updates,
         "synthetic": args.synthetic, "seed": seed, "learning_rate": rate,
-        "quality_note": "This measures execution and cancellation, not learned prediction quality."]
+        "predict_only": args.predictOnly, "scalar_loss": scalarLoss.rawValue,
+        "quality_note": "Execution timings and paired pixel diagnostics do not qualify learned texture quality or held-out generalization."]
     let start = ProcessInfo.processInfo.systemUptime
     if args.prepareOnly {
         guard let inputPath = args.values["input"], let targetPath = args.values["target"], !args.synthetic else {
@@ -196,9 +290,15 @@ private func run() throws {
         }
         try cancellation.check()
         let initStart = ProcessInfo.processInfo.systemUptime
+        if let path = args.values["weights-in"] {
+            let url = URL(fileURLWithPath: path)
+            sources[url] = try hash(url)
+            report["supplied_weights_path"] = url.path
+            report["supplied_weights_sha256"] = sources[url]
+        }
         let supplied = try args.values["weights-in"].map { try NativeWeights.read(from: URL(fileURLWithPath: $0)) }
         let session = try NativeTrainingSession(architecture: architecture,
-            options: NativeTrainingOptions(optimizer: args.values["optimizer"] ?? "adamw"), seed: UInt64(seed),
+            options: NativeTrainingOptions(optimizer: args.values["optimizer"] ?? "adamw", scalarLoss: scalarLoss), seed: UInt64(seed),
             weights: supplied, cancellation: cancellation,
             channelsLast: args.values["layout"].map { $0 == "nhwc" })
         report["graph_execution"] = "synchronous"
@@ -212,7 +312,8 @@ private func run() throws {
         }
         emit(["event": "prepared", "decode_seconds": report["decode_seconds"]!, "crop_seconds": report["crop_seconds"]!,
               "initialization_seconds": report["initialization_seconds"]!, "gpu": session.deviceName, "memory": memory()])
-        for update in 1...updates {
+        for index in 0..<updates {
+            let update = index + 1
             try cancellation.check()
             let trainStart = ProcessInfo.processInfo.systemUptime
             let loss = try session.train(input: input, target: target, batchSize: 1, height: size, width: size)
@@ -240,6 +341,22 @@ private func run() throws {
             stepRecords.append(result); emit(result)
         }
         try cancellation.check()
+        let predictionStart = ProcessInfo.processInfo.systemUptime
+        let prediction = try session.predict(input: input, batchSize: 1, height: size, width: size)
+        report["prediction_seconds"] = ProcessInfo.processInfo.systemUptime - predictionStart
+        report["pixel_diagnostics"] = predictionDiagnostics(prediction, target: target,
+            channels: architecture.outputChannels, width: size, height: size)
+        report["evaluation_loss"] = try session.evaluate(input: input, target: target, batchSize: 1, height: size, width: size)
+        if let path = args.values["prediction-out"] {
+            try NativeFloatEXR.write(prediction, channels: architecture.outputChannels, width: size, height: size,
+                to: URL(fileURLWithPath: path), cancellation: cancellation)
+            report["prediction_path"] = path
+        }
+        if let path = args.values["target-out"] {
+            try NativeFloatEXR.write(target, channels: architecture.outputChannels, width: size, height: size,
+                to: URL(fileURLWithPath: path), cancellation: cancellation)
+            report["target_path"] = path
+        }
         report["status"] = "completed"
     } catch {
         failure = error
