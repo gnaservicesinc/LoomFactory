@@ -8,6 +8,63 @@ import XCTest
 
 @MainActor
 final class ModelVersionLifecycleTests: XCTestCase {
+    func testBestValidationExportUsesSavedBestBytesAndPreservesLatestAndSelection() async throws {
+        let fixture = try await Fixture(); defer { fixture.remove() }
+        let selected = try fixture.artifact("selected", date: Date(timeIntervalSince1970: 100))
+        let parent = try fixture.artifact("candidate", date: .now, checkpoint: true)
+        try fixture.nativeCheckpoint(parent)
+        try await fixture.project.selectModelVersion(runID: selected.id, datasetID: fixture.datasetID, map: .depth)
+        let best = parent.directory.appendingPathComponent("best-immutable.safetensors")
+        let architecture = try NativeArchitecture(mapKind: "depth", width: 8, blocks: 1)
+        try NativeWeights.write(architecture.parameterShapes.mapValues {
+            NativeTensor(shape: $0, values: Array(repeating: 0.007, count: $0.reduce(1, *)))
+        }, to: best)
+        let file = parent.directory.appendingPathComponent("checkpoint.json")
+        var descriptor = try NativeFactoryTraining.json(file)
+        descriptor["best_weights_path"] = best.lastPathComponent
+        descriptor["best_weights_sha256"] = try TrainingRunFiles.sha256(best)
+        descriptor["best_epoch"] = 1
+        descriptor["history"] = [["epoch": 1, "loss": 0.5, "validation_loss": 0.1],
+                                 ["epoch": 2, "loss": 0.3, "validation_loss": 0.2]]
+        try NativeFactoryTraining.writeJSON(descriptor, to: file)
+        let original = try fixture.savedFiles()
+        let selectionURL = fixture.project.projectFolder.appendingPathComponent("model-selection.json")
+        let selection = try Data(contentsOf: selectionURL)
+        let candidate = try await fixture.project.exportCheckpointModelVersion(runID: parent.id,
+            datasetID: fixture.datasetID, map: .depth, preferBestValidation: true)
+        XCTAssertEqual(try Data(contentsOf: candidate.directory.appendingPathComponent("model.safetensors")), try Data(contentsOf: best))
+        XCTAssertEqual(try Data(contentsOf: selectionURL), selection)
+        let after = try fixture.savedFiles()
+        for (path, bytes) in original { XCTAssertEqual(after[path], bytes) }
+        let model = try NativeFactoryTraining.json(candidate.directory.appendingPathComponent("model.json"))
+        let training = try XCTUnwrap(model["training"] as? [String: Any])
+        XCTAssertEqual(training["export_epoch"] as? Int, 1)
+        XCTAssertEqual(training["epochs"] as? Int, 2, "Retain the actual parent training history")
+        XCTAssertEqual(training["export_weight_policy"] as? String, "best-validation")
+        XCTAssertEqual(model["final_loss"] as? Double, 0.5)
+        XCTAssertEqual(model["final_validation_loss"] as? Double, 0.1)
+        let lineage = try XCTUnwrap(model["lineage"] as? [String: Any])
+        XCTAssertEqual(lineage["weights_sha256"] as? String, try TrainingRunFiles.sha256(best))
+        try TrainingRunFiles.validateArtifact(candidate, projectFolder: fixture.project.projectFolder, projectID: fixture.projectID)
+        let versions = try await fixture.project.modelVersions()
+        XCTAssertFalse(try XCTUnwrap(versions.first { $0.id == candidate.id }).isApproved)
+        let exact = try await fixture.project.exportCheckpointModelVersion(runID: parent.id,
+            datasetID: fixture.datasetID, map: .depth)
+        XCTAssertEqual(try Data(contentsOf: exact.directory.appendingPathComponent("model.safetensors")),
+            try Data(contentsOf: parent.directory.appendingPathComponent("checkpoint.safetensors")),
+            "Manual exact checkpoint exports retain their original behavior even when a best version exists")
+
+        try Data("corrupted best weights".utf8).write(to: best)
+        let beforeFailure = try fixture.savedFiles()
+        do {
+            _ = try await fixture.project.exportCheckpointModelVersion(runID: parent.id,
+                datasetID: fixture.datasetID, map: .depth, preferBestValidation: true)
+            XCTFail("A corrupt saved best must not silently export latest weights")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("best-validation")) }
+        XCTAssertEqual(try fixture.savedFiles(), beforeFailure)
+        XCTAssertEqual(try Data(contentsOf: selectionURL), selection)
+    }
+
     func testCheckpointCandidateExportPreservesExplicitSelectionAndSourceWeights() async throws {
         let fixture = try await Fixture(); defer { fixture.remove() }
         let selected = try fixture.artifact("selected", date: Date(timeIntervalSince1970: 100))
@@ -18,7 +75,7 @@ final class ModelVersionLifecycleTests: XCTestCase {
         let selection = try Data(contentsOf: selectionURL)
         let checkpoint = try Data(contentsOf: parent.directory.appendingPathComponent("checkpoint.safetensors"))
         let candidate = try await fixture.project.exportCheckpointModelVersion(runID: parent.id,
-            datasetID: fixture.datasetID, map: .depth)
+            datasetID: fixture.datasetID, map: .depth, preferBestValidation: true)
         XCTAssertNotEqual(candidate.id, parent.id)
         XCTAssertEqual(try Data(contentsOf: candidate.directory.appendingPathComponent("model.safetensors")), checkpoint)
         XCTAssertEqual(try Data(contentsOf: selectionURL), selection)

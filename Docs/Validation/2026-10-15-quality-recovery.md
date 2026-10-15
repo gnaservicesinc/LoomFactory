@@ -134,3 +134,45 @@ be reviewed. The 39 remaining jobs are explicit but unstarted. They may only
 start after all three maps pass a combined visual review, and must fit the
 unchanged 17:21:18 UTC deadline. No new constructor, objective or production
 selection is introduced by this gate; its quality is not yet established.
+
+The 18-minute Compact gate also failed joint visual review on brick_wall_10,
+and a separate known-brick evaluation remained too flat. Its held-out depth
+standard deviation was 0.011 versus target 0.154, with correlation -0.538.
+The remaining 39 jobs were kept unstarted.
+
+Two direct diagnostics narrow the problem. An eight-update, real 1024-grid,
+width-32 Compact replay alternated three original material pairs. The persistent
+session did not materialize gradients, weights or moments between updates; its
+losses, gradient norms, final weights and optimizer moments matched exactly a
+reference that recreated the session from CPU-restored state at every update.
+This rules out the suspected changing-feed buffer error for that workload.
+It does not prove long-run training quality. Separately, 100 extra updates on
+one known brick recovered fitted normal structure and accurate roughness:
+roughness MAE 0.007 and correlation 0.995; depth MAE 0.082 and correlation 0.513.
+The combined surface still lacked much artist microrelief. That is a fitting
+diagnostic, not a usable category or unseen-material result. A read-only
+cross-map directional audit found consistent height/normal signs for 14 of 15
+current brick materials; brick_wall_11 needs separate source review. No source
+pixel or tag was modified or excluded on that diagnostic alone.
+
+A concrete queue policy bug was found: every timed Save & Stop reviewed and
+exported the last checkpoint tensors despite `exportBestWeights: true`.
+The queue now exports the immutable saved best-validation tensors when present,
+then tests and renders that exact model version. Checkpoints now record the
+best epoch and validation score explicitly. Older checkpoints derive the epoch
+from completed validation history. Corrupt best tensors fail rather than
+silently exporting latest; pre-validation checkpoints use latest. Manual exact
+checkpoint selection retains its original behavior. Focused lifecycle tests
+check exact best bytes, lineage, epoch/loss receipts, no automatic approval,
+reference/source preservation, latest fallback before validation, and corruption
+rejection. A real three-map re-export from the saved Compact gate confirms
+the lower validation score still does not provide usable held-out relief.
+
+The next bounded gate continues the three saved Compact category checkpoints
+with a fresh optimizer/sampler, LR 0.0002, no weight decay, and four-image
+gradient accumulation (physical batch one). This tests whether steadier updates
+and about 25 minutes per product can retain the structure recovered by the
+single-material diagnostic across the category. It keeps native pixels,
+the same two source levels and whole-material split. The remaining categories
+are still gated on visible joint improvement. Best-validation candidates are
+reviewed by the corrected queue; the original deadline is not extended.

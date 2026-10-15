@@ -52,6 +52,15 @@ not change explicit production assignments. The queue first pins every existing 
 newest-model fallbacks, and saves reference-models.json. Categories with no
 existing export gain their first review candidate. The runner does not approve quality or publish a package.
 
+When `exportBestWeights` is enabled, a stopped job exports its saved
+best-validation tensors if validation has completed, then tests and renders
+that exact exported version. A checkpoint taken before any validation uses its
+latest tensors. Corrupt best tensors fail export rather than silently choosing
+the latest. Both the last optimizer checkpoint and the immutable best tensor
+file remain intact. `--export-best-checkpoint SOURCE DATASET MAP RUN_ID` creates
+the same non-selecting candidate for an earlier saved run. Manual
+`--select-checkpoint` continues to select the exact requested checkpoint.
+
 Optional joint reviews require Blender at `/Applications/Blender.app`, Python
 with NumPy/Pillow, and ffmpeg. They save unchanged map references, native numeric
 metrics, and rendered source/candidate materials with the same camera, lights,

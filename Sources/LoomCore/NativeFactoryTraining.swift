@@ -262,6 +262,10 @@ enum NativeFactoryTraining {
             descriptor["completed_images"] = measured.completedImages - inherited.images
             descriptor["elapsed_seconds"] = measured.elapsedSeconds - inherited.elapsedSeconds
             descriptor["epoch_elapsed_seconds"] = measured.epochElapsedSeconds
+            if let bestEpoch, let bestLoss {
+                descriptor["best_epoch"] = bestEpoch
+                descriptor["best_validation_loss"] = bestLoss
+            }
             if let cursor, fingerprint != nil {
                 descriptor["resume_cursor"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(cursor))
             }

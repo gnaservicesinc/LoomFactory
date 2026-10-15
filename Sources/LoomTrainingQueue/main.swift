@@ -122,10 +122,14 @@ func writeJSON(_ value: Any, _ url: URL) throws {
                 try await run(URL(fileURLWithPath: args[1]))
             } else if args.count == 2, args[0] == "--evaluate" {
                 try await evaluate(URL(fileURLWithPath: args[1]))
-            } else if args.count == 5, ["--select-model", "--select-checkpoint"].contains(args[0]),
+            } else if args.count == 5, ["--select-model", "--select-checkpoint", "--export-best-checkpoint"].contains(args[0]),
                       let map = MapRole(rawValue: args[3]), MapRole.targets.contains(map) {
                 let project = try LoomProject(sourceFolder: URL(fileURLWithPath: args[1]))
-                if args[0] == "--select-checkpoint" {
+                if args[0] == "--export-best-checkpoint" {
+                    let exported = try await project.exportCheckpointModelVersion(runID: args[4], datasetID: args[2], map: map,
+                        preferBestValidation: true)
+                    print(exported.id)
+                } else if args[0] == "--select-checkpoint" {
                     let selected = try await project.selectCheckpointModelVersion(runID: args[4], datasetID: args[2], map: map)
                     print(selected.id)
                 } else {
@@ -133,7 +137,7 @@ func writeJSON(_ value: Any, _ url: URL) throws {
                     print(args[4])
                 }
             } else {
-                throw LoomError("Use --inventory SOURCE OUTPUT.json, --run CONFIGURATION.json, --evaluate REVIEW.json, or --select-model/--select-checkpoint SOURCE DATASET MAP RUN_ID")
+                throw LoomError("Use --inventory SOURCE OUTPUT.json, --run CONFIGURATION.json, --evaluate REVIEW.json, or --select-model/--select-checkpoint/--export-best-checkpoint SOURCE DATASET MAP RUN_ID")
             }
         } catch {
             let args = Array(CommandLine.arguments.dropFirst())
@@ -315,11 +319,24 @@ func writeJSON(_ value: Any, _ url: URL) throws {
             }) {
                 result["run_id"] = checkpoint.runID
                 result["updates"] = checkpoint.totalUpdatesCompleted
-                if let input = job.evaluationInput, Date() < deadline {
+                var reviewRunID = checkpoint.runID
+                var reviewSource = TrainingWeightSource.checkpoint
+                if Date() < deadline {
                     do {
-                        let test = try await project.testModel(datasetID: job.datasetID, map: job.map, runID: checkpoint.runID,
-                            source: .checkpoint, inputURL: URL(fileURLWithPath: input), progress: { status.event($0) })
+                        let exported = try await project.exportCheckpointModelVersion(runID: checkpoint.runID,
+                            datasetID: job.datasetID, map: job.map, preferBestValidation: job.settings.exportBestWeights,
+                            progress: { status.event($0) })
+                        result["exported_run_id"] = exported.id
+                        reviewRunID = exported.id; reviewSource = .model
+                    } catch { result["export_error"] = String(describing: error) }
+                }
+                if let input = job.evaluationInput, Date() < deadline, result["export_error"] == nil {
+                    do {
+                        let test = try await project.testModel(datasetID: job.datasetID, map: job.map, runID: reviewRunID,
+                            source: reviewSource, inputURL: URL(fileURLWithPath: input), progress: { status.event($0) })
                         result["test_directory"] = test.directory.path
+                        result["test_run_id"] = reviewRunID
+                        result["test_weight_source"] = reviewSource.rawValue
                         var set = materialTests[job.datasetID] ?? ["category": job.category, "input": input]
                         let current = try await project.snapshot()
                         if let diffuse = current.images.first(where: { $0.url.path == input }) {
@@ -332,7 +349,8 @@ func writeJSON(_ value: Any, _ url: URL) throws {
                             }
                         }
                         set[job.map.rawValue] = test.outputURL.path
-                        set[job.map.rawValue + "_run_id"] = checkpoint.runID
+                        set[job.map.rawValue + "_run_id"] = reviewRunID
+                        set[job.map.rawValue + "_checkpoint_parent"] = checkpoint.runID
                         materialTests[job.datasetID] = set
                         if MapRole.targets.allSatisfy({ set[$0.rawValue] != nil }) {
                             let name = job.datasetID + "-material-set.json"
@@ -347,13 +365,6 @@ func writeJSON(_ value: Any, _ url: URL) throws {
                             }
                         }
                     } catch { result["evaluation_error"] = String(describing: error) }
-                }
-                if Date() < deadline {
-                    do {
-                        let exported = try await project.exportCheckpointModelVersion(runID: checkpoint.runID,
-                            datasetID: job.datasetID, map: job.map, progress: { status.event($0) })
-                        result["exported_run_id"] = exported.id
-                    } catch { result["export_error"] = String(describing: error) }
                 }
             }
             result["elapsed_seconds"] = Date().timeIntervalSince(began)
