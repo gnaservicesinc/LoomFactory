@@ -107,7 +107,8 @@ public final class NativeTrainingSession {
     public let adapter: NativeAdapterConfiguration?
     public let cancellation: NativeCancellation
     public let deviceName: String
-    public let channelsLast: Bool
+    public private(set) var channelsLast: Bool
+    public private(set) var trainingLayoutSelection: NativeTrainingLayoutSelection?
     public private(set) var updateCount: Int
     public private(set) var lastExecutionMeasurements: NativeGraphExecutionMeasurements?
     public var trainableParameterCount: Int { trainableShapes.values.reduce(0) { $0 + $1.reduce(1, *) } }
@@ -124,6 +125,7 @@ public final class NativeTrainingSession {
     private let optimizerGraph: NativeOptimizerGraph
     private let optimizerStorage = NativeGraphStorage()
     private var accumulatedBatches = 0
+    private let automaticallySelectLayout: Bool
 
     public init(architecture: NativeArchitecture, options: NativeTrainingOptions,
                 seed: UInt64, weights: [String: NativeTensor]? = nil,
@@ -143,10 +145,11 @@ public final class NativeTrainingSession {
         if adapter == nil && adapterWeights != nil { throw NativeTrainingError.invalid("Adapter weights require a LoRA configuration.") }
         self.architecture = architecture; self.options = options; self.adapter = adapter
         self.cancellation = cancellation; self.device = metal; self.queue = queue
-        // The full-resolution residual convolution path is faster in NHWC and
-        // avoids the allocation-sensitive large NCHW gradient implementation.
-        // Pyramid's smaller feature grids are faster and validated in NCHW.
+        // Layout performance varies with width and GPU. Large residual batches
+        // calibrate both unchanged Float32 graphs before the first real update.
+        // Explicit diagnostic choices and Pyramid keep their requested layout.
         self.channelsLast = channelsLast ?? !architecture.isPyramid
+        automaticallySelectLayout = channelsLast == nil && !architecture.isPyramid
         deviceName = metal.name; updateCount = initialUpdateCount
         var allShapes = architecture.parameterShapes
         var trainedShapes = allShapes
@@ -202,6 +205,23 @@ public final class NativeTrainingSession {
             let executionStart = ProcessInfo.processInfo.systemUptime
             try cancellation.check()
             guard weight.isFinite, weight > 0 else { throw NativeTrainingError.invalid("Gradient accumulation weight must be positive and finite.") }
+            if automaticallySelectLayout, trainingLayoutSelection == nil, min(height, width) >= 512,
+               (1...256).contains(batchSize), (1...8192).contains(height), (1...8192).contains(width),
+               UInt64(device.currentAllocatedSize) < device.recommendedMaxWorkingSetSize,
+               UInt64(batchSize) * UInt64(height) * UInt64(width) * UInt64(architecture.width) * 4
+                    * UInt64(2 * architecture.blocks + 12)
+                    <= (device.recommendedMaxWorkingSetSize - UInt64(device.currentAllocatedSize)) / 2 {
+                _ = try validateBatch(input: input, target: target, batchSize: batchSize, height: height, width: width)
+                let selection = try NativeTrainingLayout.select(architecture: architecture, options: options,
+                    adapter: adapter, input: input, target: target,
+                    batch: batchSize, height: height, width: width, weights: { try self.weights() },
+                    adapters: { try self.adapter.map { _ in try self.adapterWeights() } }, cancellation: cancellation)
+                if channelsLast != selection.channelsLast {
+                    batchGraphs.removeAll()
+                    channelsLast = selection.channelsLast
+                }
+                trainingLayoutSelection = selection
+            }
             let compiled = try batchGraph(input: input, target: target, batchSize: batchSize, height: height, width: width)
             compiled.storage.beginOperation()
             var feeds = parameterFeeds(compiled)

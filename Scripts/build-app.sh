@@ -56,4 +56,7 @@ if [[ -e "$factory_bundle" ]]; then
     /bin/mv "$factory_bundle" "$factory_previous"
 fi
 /bin/mv "$factory_stage" "$factory_bundle"
+if [[ -n "${factory_previous:-}" && -e "$factory_previous" ]]; then
+    /bin/rm -rf "$factory_previous"
+fi
 printf '%s\n' "$factory_bundle"

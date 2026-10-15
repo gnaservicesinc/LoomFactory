@@ -111,10 +111,20 @@ Its native resize has fixed graph dimensions and a supported GPU gradient.
 Training keeps the established synchronous graph path and explicit owned,
 initialized buffers for gradients and optimizer state. An experiment combining
 initialization with command-buffer encoding was rejected after the real 1K
-gradient regression diverged. Internal NHWC/HWIO convolutions improve measured
-residual throughput; Pyramid retains NCHW because it was faster in measurements.
-The optional probe exposes execution timings and layout switches without adding
-those details to training progress.
+gradient regression diverged. Full-resolution residual sessions compare the two
+Float32 convolution layouts once before their first eligible large-grid update.
+Independent sessions use the actual starting weights and input, check the loss
+and all gradient tensors, and time warmed execution. NCHW is selected when it
+passes numerical checks and is at least 3% faster; otherwise training retains
+NHWC. Failed optional profiling also retains NHWC, while cancellation propagates.
+Pyramid and explicit diagnostic layout choices keep their selected layout.
+Calibration preserves optimizer state, update counts and accumulated gradients.
+It adds a one-time startup cost, included in the first reported training cycle;
+the request/probe report records that cost and the measured selection. A working
+set admission check skips calibration for oversized grids. The optional probe
+also exposes execution timings and explicit layout switches. See
+`Docs/Validation/residual-throughput-2026-10-14.md` for the measured width-118
+regression and the historical architecture comparison.
 
 Existing `.loom-factory/runtime` folders are unused by the app and preserved in
 place. No interpreter or Python worker is shipped, installed or launched.

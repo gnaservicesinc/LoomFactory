@@ -174,8 +174,7 @@ enum NativeFactoryTraining {
         }
         let session = try NativeTrainingSession(architecture: architecture, options: options, seed: UInt64(settings.seed),
             weights: initial, optimizerState: optimizerState, initialUpdateCount: restoredUpdateCount,
-            device: settings.device.rawValue, cancellation: cancellation,
-            channelsLast: !architecture.isPyramid)
+            device: settings.device.rawValue, cancellation: cancellation)
         var update = restoredCursor != nil ? (restoredDescriptor?["updates"] as? Int ?? 0) : 0
         var history: [[String: Any]] = restoredCursor != nil ? (restoredDescriptor?["history"] as? [[String: Any]] ?? []) : []
         var bestLoss = restoredCursor?.bestLoss, bestEpoch = restoredCursor?.bestEpoch, stale = restoredCursor?.staleEpochs ?? 0
@@ -184,6 +183,7 @@ enum NativeFactoryTraining {
         var augmentation = restoredCursor?.augmentation ?? NativeAugmentationPlan(seed: settings.seed, cropRefresh: settings.cropRefresh.rawValue,
                                                   augmentationRefresh: settings.augmentationRefresh.rawValue)
         var rng = FactoryRandom(seed: UInt64(settings.seed))
+        var recordedTrainingLayout = false
         if let state = restoredCursor?.randomState { rng.state = state }
         var cursor = restoredCursor
         if var sourceDescriptor, let sourceKind, let sourceRunID, let resume {
@@ -370,6 +370,15 @@ enum NativeFactoryTraining {
                         let loss = try session.train(input: prepared.input, target: prepared.target, batchSize: batch.pairs.count,
                             height: settings.imageSize, width: settings.imageSize, weight: Float(batch.pairs.count) / Float(end - window))
                         trainingSeconds += clock() - trainingStart
+                        if !recordedTrainingLayout, let selection = session.trainingLayoutSelection {
+                            recordedTrainingLayout = true
+                            request["gpu_activation_layout"] = session.channelsLast ? "NHWC" : "NCHW"
+                            request["layout_selection"] = ["nchw_seconds": selection.nchwSeconds,
+                                "nhwc_seconds": selection.nhwcSeconds, "gradients_agree": selection.gradientsAgree,
+                                "calibration_seconds": selection.calibrationSeconds, "fallback_reason": selection.fallbackReason ?? ""]
+                            try writeJSON(request, to: output.appendingPathComponent("request.json"))
+                            emit(.init(type: "status", message: "Selected \(session.channelsLast ? "channels-last" : "channels-first") Float32 GPU training after comparing both layouts."))
+                        }
                         guard loss.isFinite else { throw LoomError("Native training produced a non-finite loss. The last finite checkpoint was preserved.") }
                         epochLoss += Double(loss) * Double(batch.pairs.count); count += batch.pairs.count
                     }

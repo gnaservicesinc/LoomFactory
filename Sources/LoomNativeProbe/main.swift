@@ -347,6 +347,12 @@ private func run() throws {
         report["pixel_diagnostics"] = predictionDiagnostics(prediction, target: target,
             channels: architecture.outputChannels, width: size, height: size)
         report["evaluation_loss"] = try session.evaluate(input: input, target: target, batchSize: 1, height: size, width: size)
+        report["gpu_activation_layout"] = session.channelsLast ? "NHWC" : "NCHW"
+        if let selection = session.trainingLayoutSelection {
+            report["layout_selection"] = ["nchw_seconds": selection.nchwSeconds, "nhwc_seconds": selection.nhwcSeconds,
+                "gradients_agree": selection.gradientsAgree, "calibration_seconds": selection.calibrationSeconds,
+                "fallback_reason": selection.fallbackReason ?? ""]
+        }
         if let path = args.values["prediction-out"] {
             try NativeFloatEXR.write(prediction, channels: architecture.outputChannels, width: size, height: size,
                 to: URL(fileURLWithPath: path), cancellation: cancellation)
