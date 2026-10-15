@@ -827,7 +827,7 @@ struct RunPanel: View {
             DisclosureGroup("Training measurements", isExpanded: $showMeasurements) {
               VStack(alignment: .leading, spacing: 7) {
                 if let epoch = metrics.epoch { metric("Epoch", epoch.formatted()) }
-                if let loss = metrics.trainingLoss { metric("Training objective", loss.formatted(.number.precision(.significantDigits(5)))) }
+                if let loss = metrics.trainingLoss { metric("Training loss", loss.formatted(.number.precision(.significantDigits(5)))) }
                 if model.effectiveTrainingSettings.scalarLoss == .logitCrossEntropyV2 && model.selectedMap != .normal {
                     Text("This cross-entropy objective includes target entropy: its minimum is usually above zero for grayscale maps. Compare checkpoints on the same image to judge detail.")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
