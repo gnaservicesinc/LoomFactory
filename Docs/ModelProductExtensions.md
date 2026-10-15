@@ -31,9 +31,12 @@ Scalar training objectives have independent immutable IDs: `absolute-v1`
 preserves the original sigmoid/L1 objective and `logit-cross-entropy-v2`
 trains from pre-sigmoid logits to retain gradients at saturated endpoints.
 The objective ID is recorded in run settings, requests, checkpoints and exported
-model descriptors. Missing IDs identify v1. Fresh scalar runs use v2; continuation
-retains the saved objective. Objective changes must start a separate loss history
-and optimizer state. These objectives share the exact same inference graph,
+model descriptors. Missing IDs identify v1. Fresh scalar runs default to v2;
+continuation retains the saved objective. The explicit experimental
+`native-detail-v3` choice adds signed original-pixel difference matching at
+1, 2 and 4 pixels to stable v2 cross-entropy. Objective changes start a new loss
+history, optimizer state and epoch schedule. Prior metrics retain their original
+objective labels. These objectives share the exact same inference graph,
 tensor interface and architecture IDs, so changing the objective does not
 reinterpret existing weights or require another inference constructor.
 

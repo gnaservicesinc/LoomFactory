@@ -12,7 +12,7 @@ enum ModelVersionPresentation {
 
     static func summary(_ settings: TrainingSettings, map: MapRole? = nil) -> String {
         let objective = map == .depth || map == .roughness
-            ? (settings.scalarLoss == .absoluteV1 ? " · original scalar loss (v1)" : " · stable scalar loss (v2)") : ""
+            ? " · \(settings.scalarLoss.displayName)" : ""
         return "\(settings.optimizer.displayName) · LR \(number(settings.learningRate)) · batch \(settings.batchSize) × \(settings.gradientAccumulationSteps) · \(settings.imageSize) px · \(settings.modelWidth) channels / \(settings.modelBlocks) blocks" + objective
     }
 
@@ -113,7 +113,7 @@ struct ModelVersionRow: View {
                     if !version.history.isEmpty {
                         Grid(alignment: .leading, horizontalSpacing: 20, verticalSpacing: 5) {
                             GridRow {
-                                Text("Epoch"); Text("Training loss"); Text("Validation loss"); Text("Learning rate")
+                                Text("Epoch"); Text("Training loss"); Text("Validation loss"); Text("Learning rate"); Text("Objective")
                             }.foregroundStyle(.secondary)
                             ForEach(Array(version.history.enumerated()), id: \.offset) { _, metric in
                                 GridRow {
@@ -121,6 +121,7 @@ struct ModelVersionRow: View {
                                     Text(metric.loss.map(ModelVersionPresentation.number) ?? "—")
                                     Text(metric.validationLoss.map(ModelVersionPresentation.number) ?? "—")
                                     Text(metric.learningRate.map(ModelVersionPresentation.number) ?? "—")
+                                    Text(metric.scalarLoss?.displayName ?? (version.map == .normal ? "Normal angular" : "—"))
                                 }
                             }
                         }.font(.caption).monospacedDigit()
@@ -304,8 +305,8 @@ struct TrainingSettingValue: Identifiable, Equatable {
         func number(_ value: Double) -> String { ModelVersionPresentation.number(value) }
         func yesNo(_ value: Bool) -> String { value ? "On" : "Off" }
         var values: [Self] = [
-            item("modelArchitecture", "Model architecture", settings.modelArchitecture == NativeArchitecture.pyramidIdentifier ? "Efficient multiscale" : "Full-resolution residual"),
-            item("scalarLoss", "Scalar training objective", settings.scalarLoss == .absoluteV1 ? "Original absolute error (v1)" : "Stable cross-entropy (v2)"),
+            item("modelArchitecture", "Model architecture", settings.modelArchitecture == NativeArchitecture.pyramidIdentifier ? "Pyramid (experimental)" : "Full-resolution residual"),
+            item("scalarLoss", "Scalar training objective", settings.scalarLoss.displayName),
             item("imageSize", "Training dimensions", "\(settings.imageSize) × \(settings.imageSize)"),
             item("modelWidth", "Channel width", "\(settings.modelWidth)"),
             item("modelBlocks", "Residual blocks", "\(settings.modelBlocks)"),

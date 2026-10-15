@@ -2,10 +2,19 @@ import Foundation
 import MetalPerformanceShadersGraph
 
 /// Loss contracts are versioned independently of the unchanged inference graph.
-/// Existing checkpoints retain L1 unless their training request selects v2.
+/// Existing checkpoints retain their recorded objective unless explicitly changed.
 public enum NativeScalarLoss: String, Codable, CaseIterable, Sendable {
     case absoluteV1 = "absolute-v1"
     case logitCrossEntropyV2 = "logit-cross-entropy-v2"
+    case nativeDetailV3 = "native-detail-v3"
+
+    public var displayName: String {
+        switch self {
+        case .absoluteV1: "Original absolute error (v1)"
+        case .logitCrossEntropyV2: "Stable pixel loss (v2)"
+        case .nativeDetailV3: "Native pixel detail (v3)"
+        }
+    }
 }
 
 public struct NativeTrainingOptions: Sendable, Equatable {

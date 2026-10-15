@@ -193,7 +193,7 @@ private func run() throws {
     let seed = try args.integer("seed", 42, range: 0...Int(Int32.max))
     let map = args.values["map"] ?? "depth"
     guard let scalarLoss = NativeScalarLoss(rawValue: args.values["scalar-loss"] ?? NativeScalarLoss.absoluteV1.rawValue) else {
-        throw NativeTrainingError.invalid("Choose --scalar-loss absolute-v1 or logit-cross-entropy-v2 to match the recorded training objective.")
+        throw NativeTrainingError.invalid("Choose --scalar-loss absolute-v1, logit-cross-entropy-v2 or native-detail-v3 to match the recorded training objective.")
     }
     guard let rate = Double(args.values["learning-rate"] ?? "0.001"), rate.isFinite, rate > 0, rate <= 1 else { throw NativeTrainingError.invalid("Invalid probe learning rate") }
     let cancellation = NativeCancellation()

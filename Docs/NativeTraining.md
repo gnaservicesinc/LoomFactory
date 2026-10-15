@@ -8,17 +8,23 @@ updates every weight; Workshop freezes the exact installed base and learns only
 low-rank convolution deltas. Safetensors names and OIHW layouts remain compatible
 with previously saved models.
 
-Fresh training defaults to Pyramid: three feature scales with widths w, 2w and
-4w, residual blocks at quarter resolution, and skip-connected nearest-neighbor
-decoders. The width-38, four-block scalar model has 1,926,373 parameters. Most
-computation runs on smaller feature maps; original image crops remain exact.
-The output retains the same sRGB RGB input, scalar/normal output and Float32
-precision contract. The network picker also permits the original residual
-architecture. Saved identities are checked rather than inferred from width or
-parameter count, and unknown or contradictory descriptors are rejected.
+Fresh training defaults to the full-resolution residual network, width 164 and
+four blocks (1,943,893 scalar parameters). Every feature layer retains the input
+pixel grid. Selecting a fresh run from saved Pyramid settings switches to this
+network at approximately the same parameter count; the original weights cannot
+be continued under a different architecture and remain preserved.
+
+Pyramid remains an explicit experimental choice for existing versions and A/B
+work: three scales with widths w, 2w and 4w, residual blocks at quarter
+resolution, and skip-connected nearest-neighbor decoders. Its saved brick models
+show phase-dependent depth changes under one-pixel crop shifts, including after
+detail-loss fine-tuning. It is not the default for geometry-sensitive maps.
+Original image crops are exact under both architectures; this sampling is inside
+the learned network. Saved identities and output contracts remain unchanged,
+and unknown or contradictory descriptors are rejected.
 
 Scalar training has an explicit, independently versioned loss contract. Fresh
-Factory depth and roughness runs use `logit-cross-entropy-v2`: soft-target binary
+Factory depth and roughness runs default to `logit-cross-entropy-v2`: soft-target binary
 cross-entropy computed directly from pre-sigmoid logits. Its derivative is
 `sigmoid(logit) - target`, preserving a teaching signal when an incorrect scalar
 prediction has saturated to white or black. Its stable expression multiplies
@@ -30,11 +36,31 @@ existing cosine loss.
 
 Training settings, run requests, checkpoints and exports record `scalar_loss`.
 Absent loss identities mean legacy `absolute-v1` (mean absolute error after
-sigmoid), and continuing a saved run preserves its recorded objective. The loss
+sigmoid), and continuing a saved run preserves its recorded objective unless the
+user explicitly changes **Training objective**. The loss
 version changes training behavior without changing either registered inference
 architecture, checkpoint tensor shapes or Core ML output interpretation. V2 loss
 values include target entropy and must not be compared numerically with V1 L1
 values. Original saved runs and source images remain untouched.
+
+The opt-in **Native pixel detail (v3, experimental)** objective is
+`native-detail-v3`: v2's stable logit cross-entropy plus twice the arithmetic
+mean of the signed native difference errors at offsets 1, 2 and 4 along both
+image axes. Each error is `mean(abs((prediction[b]-prediction[a]) -
+(target[b]-target[a])))` over all batches, channels and valid pixel positions.
+Offsets that do not fit a dimension are omitted; a 1×1 map has no detail term.
+Targets are neither resized nor filtered, and output images are not sharpened.
+The level term retains corrective gradients when sigmoid detail gradients
+vanish at saturation. Normal-map training is unchanged.
+
+Selecting a different objective on saved weights creates a separate run with a
+fresh optimizer and epoch schedule; old optimizer moments, best-validation
+selection and partial-epoch cursor are not reused across objectives. Lineage,
+cumulative work and earlier metrics are preserved, with each earlier loss
+labelled by its actual objective. `trainMap` callers opt in with
+`scalarLossOverride`; omitting it retains the existing default/resume behavior.
+V3 is a candidate for A/B inspection, not a guarantee of artifact-free depth or
+roughness. Evaluate whole unseen materials and the intended displacement use.
 
 Training runs outside the project actor so the Stop action can signal a locked
 cancellation token immediately. Pixel decoding, conversion and crop loops check

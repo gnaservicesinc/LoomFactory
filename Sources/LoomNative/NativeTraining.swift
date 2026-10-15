@@ -78,9 +78,14 @@ private final class NativeBatchGraph {
         let logits = graph.materialLogits(input: input, architecture: architecture, parameters: parameters,
             adapter: adapter, channelsLast: channelsLast)
         prediction = graph.materialPrediction(logits: logits, architecture: architecture)
-        loss = architecture.mapKind != "normal" && scalarLoss == .logitCrossEntropyV2
-            ? graph.scalarLogitCrossEntropy(logits: logits, target: target)
-            : graph.materialLoss(prediction: prediction, target: target, mapKind: architecture.mapKind)
+        if architecture.mapKind == "normal" || scalarLoss == .absoluteV1 {
+            loss = graph.materialLoss(prediction: prediction, target: target, mapKind: architecture.mapKind)
+        } else {
+            let level = graph.scalarLogitCrossEntropy(logits: logits, target: target)
+            loss = scalarLoss == .nativeDetailV3
+                ? graph.addition(level, graph.scaled(graph.nativeDetailLoss(prediction: prediction, target: target), 2), name: nil)
+                : level
+        }
         let weightedLoss = graph.multiplication(loss, weight, name: nil)
         let names = trainable.sorted()
         let gradients = graph.gradients(of: weightedLoss, with: names.map { parameters[$0]! }, name: nil)

@@ -26,6 +26,9 @@ struct TrainingPanelTests {
         #expect(model.effectiveTrainingSettings.parameterCount(map: .depth) > 500_000)
         #expect(model.settings.training.effectiveBatchSize == 6)
         try await render(model, name: "training-controls-depth.png")
+        model.trainingScalarLossOverride = .nativeDetailV3
+        #expect(model.canTrain)
+        try await render(model, name: "training-controls-native-detail.png")
         model.selectedMap = .normal
         model.settings.training.optimizer = .sgd
         model.settings.training.momentum = 0.9

@@ -112,11 +112,15 @@ final class TrainingSettingsTests: XCTestCase {
         XCTAssertNotNil(settings.validationIssue)
     }
 
-    func testNewProjectsUsePyramidAndParameterCountMatchesItsNativeConstructor() throws {
+    func testNewProjectsUseFullResolutionAndParameterCountMatchesItsNativeConstructor() throws {
         let settings = TrainingSettings()
-        XCTAssertEqual(settings.modelArchitecture, NativeArchitecture.pyramidIdentifier)
+        XCTAssertEqual(settings.modelArchitecture, NativeArchitecture.identifier)
         XCTAssertEqual(settings.scalarLoss, .logitCrossEntropyV2)
-        XCTAssertEqual(settings.modelWidth, 38)
+        XCTAssertEqual(settings.modelWidth, 164)
+        let oldPyramid = try JSONDecoder().decode(TrainingSettings.self,
+            from: Data("{\"modelArchitecture\":\"loom-factory-material-pyramid-v1\"}".utf8))
+        XCTAssertEqual(oldPyramid.modelWidth, 38, "Changing new-project defaults cannot reinterpret old settings")
+        XCTAssertEqual(oldPyramid.modelArchitecture, NativeArchitecture.pyramidIdentifier)
         for map in MapRole.targets {
             let architecture = try NativeArchitecture(mapKind: map.rawValue, width: settings.modelWidth,
                 blocks: settings.modelBlocks, identifier: settings.modelArchitecture)
@@ -130,18 +134,18 @@ final class TrainingSettingsTests: XCTestCase {
 
     func testFreshRunMigrationKeepsApproximateCapacityAndOtherTrainingChoices() {
         var settings = TrainingSettings(imageSize: 1024, epochs: 500, learningRate: 0.0002,
-            seed: 9587, modelWidth: 164, gradientAccumulationSteps: 2,
-            modelArchitecture: NativeArchitecture.identifier)
+            seed: 9587, modelWidth: 38, gradientAccumulationSteps: 2,
+            modelArchitecture: NativeArchitecture.pyramidIdentifier)
         let oldCount = settings.parameterCount(map: .depth)
-        settings.usePyramidForFreshRun(map: .depth)
-        XCTAssertEqual(settings.modelArchitecture, NativeArchitecture.pyramidIdentifier)
-        XCTAssertEqual(settings.modelWidth, 38)
+        settings.useFullResolutionForFreshRun(map: .depth)
+        XCTAssertEqual(settings.modelArchitecture, NativeArchitecture.identifier)
+        XCTAssertEqual(settings.modelWidth, 163)
         XCTAssertLessThan(abs(settings.parameterCount(map: .depth) - oldCount), oldCount / 20)
         XCTAssertEqual(settings.imageSize, 1024); XCTAssertEqual(settings.epochs, 500)
         XCTAssertEqual(settings.learningRate, 0.0002); XCTAssertEqual(settings.seed, 9587)
         XCTAssertEqual(settings.gradientAccumulationSteps, 2)
         let repeatSettings = settings
-        settings.usePyramidForFreshRun(map: .depth)
+        settings.useFullResolutionForFreshRun(map: .depth)
         XCTAssertEqual(settings, repeatSettings)
     }
 

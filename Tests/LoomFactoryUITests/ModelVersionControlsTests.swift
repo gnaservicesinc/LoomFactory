@@ -66,7 +66,13 @@ struct ModelVersionControlsTests {
         #expect(model.effectiveTrainingSettings.learningRate == 0.02)
         #expect(model.effectiveTrainingSettings.optimizer == .sgd)
         #expect(model.canTrain)
+        model.trainingScalarLossOverride = .nativeDetailV3
+        #expect(model.effectiveTrainingSettings.scalarLoss == .nativeDetailV3)
+        #expect(model.effectiveTrainingSettings.modelWidth == oldest.settings?.modelWidth)
+        #expect(model.canTrain)
         model.continueModelVersion(oldest, source: .checkpoint)
+        #expect(model.trainingScalarLossOverride == nil)
+        #expect(model.effectiveTrainingSettings.scalarLoss == oldest.settings?.scalarLoss)
         #expect(model.trainingStart == .checkpoint(runID: oldest.id))
         #expect(model.selectedCheckpoint?.directory == oldest.directory)
         #expect(model.effectiveTrainingSettings.modelWidth == oldest.checkpoint?.modelWidth)
@@ -79,7 +85,10 @@ struct ModelVersionControlsTests {
         #expect(model.effectiveTrainingSettings.modelWidth == 164)
         #expect(model.effectiveTrainingSettings.imageSize == 2048)
         #expect(model.selectedModelVersions.count == 6)
+        model.trainingScalarLossOverride = .nativeDetailV3
+        #expect(model.effectiveTrainingSettings.scalarLoss == .nativeDetailV3)
         model.selectedMap = .normal
+        #expect(model.trainingScalarLossOverride == nil)
         #expect(model.selectedModelVersions.isEmpty)
         #expect(model.exportedModelVersions.isEmpty)
     }

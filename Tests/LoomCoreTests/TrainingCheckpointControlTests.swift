@@ -94,6 +94,10 @@ final class TrainingCheckpointControlTests: XCTestCase {
         XCTAssertTrue(TrainingCheckpointCursor.compatibleSettings(saved, current: legacy))
         XCTAssertFalse(TrainingCheckpointCursor.compatibleSettings(saved, current: stable))
         XCTAssertFalse(TrainingCheckpointCursor.compatibleSettings(saved, current: stable, keys: ["optimizer", "scalar_loss"]))
+        var detail = stable; detail["scalar_loss"] = "native-detail-v3"
+        XCTAssertFalse(TrainingCheckpointCursor.compatibleSettings(stable, current: detail))
+        XCTAssertFalse(TrainingCheckpointCursor.compatibleSettings(stable, current: detail, keys: ["optimizer", "scalar_loss"]))
+        XCTAssertTrue(TrainingCheckpointCursor.compatibleSettings(detail, current: detail))
     }
 
     private func waitForPending(_ control: TrainingRunControl) async throws {

@@ -11,6 +11,7 @@ extension LoomProject {
 
     public func trainMap(datasetID: String, map: MapRole, settings: TrainingSettings,
                          start: TrainingStart? = nil, runLabel: String = "",
+                         scalarLossOverride: NativeScalarLoss? = nil,
                          progress: @escaping @Sendable (TrainingEvent) -> Void) async throws -> ModelArtifact {
         guard !operationActive else { throw LoomError("An operation is already running in this source project. Stop it before starting another.") }
         guard MapRole.targets.contains(map) else { throw LoomError("Choose depth, roughness or normal training.") }
@@ -21,7 +22,8 @@ extension LoomProject {
             }
             requestedStart = .checkpoint(runID: checkpoint.directory.lastPathComponent)
         }
-        let prepared = try prepareTrainingStart(requestedStart, datasetID: datasetID, map: map, settings: settings)
+        let prepared = try prepareTrainingStart(requestedStart, datasetID: datasetID, map: map,
+            settings: settings, scalarLossOverride: scalarLossOverride)
         var runSettings = prepared.settings
         if let issue = runSettings.validationIssue { throw LoomError(issue) }
         runSettings.resolveRandomSeedForRun()

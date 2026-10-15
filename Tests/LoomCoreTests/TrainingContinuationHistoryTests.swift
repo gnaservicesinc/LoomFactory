@@ -3,6 +3,24 @@ import XCTest
 @testable import LoomCore
 
 final class TrainingContinuationHistoryTests: XCTestCase {
+    func testObjectiveLabelsSurviveSeveralBranchesWithoutRelabellingOldLosses() {
+        let first: [String: Any] = ["settings": ["scalar_loss": "logit-cross-entropy-v2"],
+            "prior_history": [["epoch": 1, "loss": 0.2, "scalar_loss": "absolute-v1"]],
+            "prior_epochs": 1, "epochs_completed": 1,
+            "history": [["epoch": 1, "loss": 0.6]]]
+        let branch = TrainingContinuationHistory(descriptor: first, source: .checkpoint,
+            runID: "v2-parent", resumingCursor: false)
+        var next = branch.json
+        next["scalar_loss"] = "native-detail-v3"
+        next["epochs"] = 1
+        next["history"] = [["epoch": 1, "loss": 0.7]]
+        let continued = TrainingContinuationHistory(descriptor: ["training": next], source: .model,
+            runID: "v3-parent", resumingCursor: false)
+        XCTAssertEqual(continued.rows.compactMap { $0["scalar_loss"] as? String },
+            ["absolute-v1", "logit-cross-entropy-v2", "native-detail-v3"])
+        XCTAssertEqual(continued.rows.compactMap { $0["loss"] as? Double }, [0.2, 0.6, 0.7])
+    }
+
     func testLegacyTimingRecoveryUsesOnlyAMeasuredMatchingSavedUpdate() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("legacy-progress-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

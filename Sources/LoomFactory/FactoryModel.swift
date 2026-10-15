@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import LoomCore
+import LoomNative
 import Observation
 import UniformTypeIdentifiers
 
@@ -39,6 +40,7 @@ final class FactoryModel {
         }
     }
     var trainingStartMode: FactoryTrainingStartMode = .checkpoint
+    var trainingScalarLossOverride: NativeScalarLoss?
     var selectedTrainingVersionID = "" {
         didSet {
             if selectedTrainingVersionID != oldValue { restoreSelectedTrainingSettings() }
@@ -296,6 +298,7 @@ final class FactoryModel {
             }
         }
         if !continuingTraining && selectedMap != .normal { value.scalarLoss = .logitCrossEntropyV2 }
+        if selectedMap != .normal, let trainingScalarLossOverride { value.scalarLoss = trainingScalarLossOverride }
         return value
     }
     var trainingOptionsIssue: String? {
@@ -549,20 +552,22 @@ final class FactoryModel {
         training.exaggerateFeatures = map == .depth && training.exaggerateFeatures
         let configuredTraining = training
         let start = trainingStart
+        let objective = selectedMap == .normal ? nil : trainingScalarLossOverride
         let label = runLabel
         let onProgress = progressHandler()
         let current = generation
         perform("Training \(dataset.name) · \(map.displayName)", clearEvents: true, training: true) { [weak self] project in
             try await project.updateSettings(value)
             _ = try await project.trainMap(datasetID: dataset.id, map: map, settings: configuredTraining,
-                                          start: start, runLabel: label, progress: onProgress)
+                                          start: start, runLabel: label, scalarLossOverride: objective, progress: onProgress)
             guard let self, self.generation == current else { return }
             self.invalidateExportedPackage()
         }
     }
 
     func setTrainingStartMode(_ mode: FactoryTrainingStartMode) {
-        if mode == .fresh { settings.training.usePyramidForFreshRun(map: selectedMap) }
+        trainingScalarLossOverride = nil
+        if mode == .fresh { settings.training.useFullResolutionForFreshRun(map: selectedMap) }
         trainingStartMode = mode == .fresh ? .checkpoint : mode
         settings.training.continueLatestWeights = mode != .fresh
         selectedTrainingVersionID = ""
@@ -579,6 +584,7 @@ final class FactoryModel {
     }
 
     func restoreSelectedTrainingSettings() {
+        trainingScalarLossOverride = nil
         guard continuingTraining, let saved = selectedTrainingVersion?.savedSettings else { return }
         var restored = saved
         restored.continueLatestWeights = true

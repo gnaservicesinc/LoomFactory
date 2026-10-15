@@ -32,15 +32,17 @@ public struct TrainingMetric: Sendable, Equatable {
     public let clippedUpdates: Int?
     public let optimizerUpdates: Int?
     public let gradientClipThreshold: Double?
+    public let scalarLoss: NativeScalarLoss?
     public init(epoch: Int, loss: Double? = nil, validationLoss: Double? = nil,
                 learningRate: Double? = nil, update: Int? = nil, meanGradientNorm: Double? = nil,
                 peakGradientNorm: Double? = nil, clippedUpdates: Int? = nil, optimizerUpdates: Int? = nil,
-                gradientClipThreshold: Double? = nil) {
+                gradientClipThreshold: Double? = nil, scalarLoss: NativeScalarLoss? = nil) {
         self.epoch = epoch; self.loss = loss; self.validationLoss = validationLoss
         self.learningRate = learningRate; self.update = update
         self.meanGradientNorm = meanGradientNorm; self.peakGradientNorm = peakGradientNorm
         self.clippedUpdates = clippedUpdates; self.optimizerUpdates = optimizerUpdates
         self.gradientClipThreshold = gradientClipThreshold
+        self.scalarLoss = scalarLoss
     }
 }
 
@@ -199,7 +201,8 @@ extension LoomProject {
                     update: row["update"] as? Int ?? row["updates"] as? Int,
                     meanGradientNorm: row["mean_gradient_norm"] as? Double, peakGradientNorm: row["peak_gradient_norm"] as? Double,
                     clippedUpdates: row["clipped_updates"] as? Int, optimizerUpdates: row["optimizer_updates"] as? Int,
-                    gradientClipThreshold: row["gradient_clip_threshold"] as? Double)
+                    gradientClipThreshold: row["gradient_clip_threshold"] as? Double,
+                    scalarLoss: map == .normal ? nil : (row["scalar_loss"] as? String).flatMap(NativeScalarLoss.init(rawValue:)) ?? settings?.scalarLoss)
             }
             let selected = selection.models.first { $0.datasetID == datasetID && $0.map == map }
             let active = selected?.runID ?? artifacts.first { $0.kind == "map" && $0.datasetID == datasetID && $0.map == map }?.directory.lastPathComponent
@@ -221,10 +224,13 @@ extension LoomProject {
     }
 
     func prepareTrainingStart(_ start: TrainingStart, datasetID: String, map: MapRole,
-                              settings: TrainingSettings) throws -> (settings: TrainingSettings, resume: TrainingResume?) {
+                              settings: TrainingSettings, scalarLossOverride: NativeScalarLoss? = nil) throws -> (settings: TrainingSettings, resume: TrainingResume?) {
+        guard scalarLossOverride == nil || map != .normal else {
+            throw LoomError("Scalar training objectives apply to depth and roughness. Normal maps retain their angular objective.")
+        }
         guard start != .fresh else {
             var fresh = settings
-            if map != .normal { fresh.scalarLoss = .logitCrossEntropyV2 }
+            if map != .normal { fresh.scalarLoss = scalarLossOverride ?? .logitCrossEntropyV2 }
             return (fresh, nil)
         }
         let runID: String, source: TrainingWeightSource
@@ -241,7 +247,7 @@ extension LoomProject {
         var resolved = settings
         if resolved.seed == -1 { resolved.seed = saved.seed }
         resolved.modelArchitecture = saved.modelArchitecture
-        resolved.scalarLoss = saved.scalarLoss
+        resolved.scalarLoss = scalarLossOverride ?? saved.scalarLoss
         resolved.modelWidth = saved.modelWidth; resolved.modelBlocks = saved.modelBlocks
         resolved.imageSize = saved.imageSize; resolved.exaggerateFeatures = saved.exaggerateFeatures
         let path = source == .checkpoint ? (descriptor["weights_path"] as? String ?? "checkpoint.safetensors") : descriptor["weights_path"] as? String

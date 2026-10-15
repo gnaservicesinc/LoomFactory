@@ -5,11 +5,11 @@ public enum TrainingNetwork: String, Codable, CaseIterable, Sendable, Identifiab
     case pyramid = "loom-factory-material-pyramid-v1"
     case residual = "loom-factory-material-residual-v1"
     public var id: String { rawValue }
-    public var displayName: String { self == .pyramid ? "Pyramid" : "Original residual" }
+    public var displayName: String { self == .pyramid ? "Pyramid (experimental)" : "Original residual" }
     public var detail: String {
         self == .pyramid
-            ? "Learns at several scales, with the main blocks on a smaller feature grid. Compare against Original residual for detail-sensitive maps."
-            : "Runs every residual block at full image resolution. Retained for existing models and comparisons."
+            ? "Downsamples learned features. Saved brick models show sampling-grid artifacts; use only for controlled comparisons."
+            : "Runs every layer at native resolution without downsampling or upsampling feature grids. Default for new models."
     }
 }
 
@@ -98,7 +98,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     public init(imageSize: Int = 1024, sourceResolutionLevels: Int = 1, epochs: Int = 10, batchSize: Int = 1,
                 learningRate: Double = 0.001, shuffleEachEpoch: Bool = true,
                 flipCrops: Bool = false, rotateCrops: Bool = false,
-                exaggerateFeatures: Bool = false, seed: Int = -1, modelWidth: Int = 38,
+                exaggerateFeatures: Bool = false, seed: Int = -1, modelWidth: Int = 164,
                 continueLatestWeights: Bool = false, modelBlocks: Int = 4,
                 optimizer: TrainingOptimizer = .adamW, weightDecay: Double = 0.01,
                 beta1: Double = 0.9, beta2: Double? = nil, momentum: Double = 0.9,
@@ -110,7 +110,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
                 augmentationRefresh: TrainingRefresh = .perEpoch, device: TrainingDevice = .automatic,
                 validationFraction: Double = 0.1, validationSeed: Int = 42, earlyStoppingPatience: Int = 0,
                 exportBestWeights: Bool = true, checkpointEveryEpochs: Int = 1,
-                modelArchitecture: String = NativeArchitecture.pyramidIdentifier,
+                modelArchitecture: String = NativeArchitecture.identifier,
                 scalarLoss: NativeScalarLoss = .logitCrossEntropyV2) {
         self.imageSize = imageSize; self.sourceResolutionLevels = sourceResolutionLevels
         self.epochs = epochs; self.batchSize = batchSize
@@ -163,19 +163,19 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     }
     /// Switching a saved project's fresh run keeps its approximate capacity,
     /// while its saved checkpoints keep their exact recorded architecture.
-    public mutating func usePyramidForFreshRun(map: MapRole) {
+    public mutating func useFullResolutionForFreshRun(map: MapRole) {
         if map != .normal { scalarLoss = .logitCrossEntropyV2 }
-        guard modelArchitecture != NativeArchitecture.pyramidIdentifier else { return }
+        guard modelArchitecture != NativeArchitecture.identifier else { return }
         let budget = parameterCount(map: map)
-        modelArchitecture = NativeArchitecture.pyramidIdentifier
-        guard budget > 0 else { modelWidth = 38; return }
+        modelArchitecture = NativeArchitecture.identifier
+        guard budget > 0 else { modelWidth = 164; return }
         modelWidth = (8...256).min { left, right in
             let a = try? NativeArchitecture(mapKind: map.rawValue, width: left, blocks: modelBlocks,
                 identifier: modelArchitecture).parameterCount
             let b = try? NativeArchitecture(mapKind: map.rawValue, width: right, blocks: modelBlocks,
                 identifier: modelArchitecture).parameterCount
             return abs((a ?? 0) - budget) < abs((b ?? 0) - budget)
-        } ?? 38
+        } ?? 164
     }
     public var validationIssue: String? {
         if !(32...8192).contains(imageSize) { return "Training dimensions must be between 32 and 8,192 pixels." }
@@ -238,7 +238,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
         // Missing IDs identify the original sigmoid/L1 training contract.
         scalarLoss = try c.decodeIfPresent(NativeScalarLoss.self, forKey: .scalarLoss) ?? .absoluteV1
         modelWidth = try c.decodeIfPresent(Int.self, forKey: .modelWidth)
-            ?? (modelArchitecture == NativeArchitecture.identifier ? 84 : d.modelWidth)
+            ?? (modelArchitecture == NativeArchitecture.identifier ? 84 : 38)
         continueLatestWeights = try c.decodeIfPresent(Bool.self, forKey: .continueLatestWeights) ?? false
         modelBlocks = try c.decodeIfPresent(Int.self, forKey: .modelBlocks) ?? d.modelBlocks
         optimizer = try c.decodeIfPresent(TrainingOptimizer.self, forKey: .optimizer) ?? d.optimizer

@@ -8,6 +8,43 @@ import XCTest
 @testable import LoomCore
 
 final class NativeFactoryWorkflowTests: XCTestCase {
+    func testDetailObjectiveBranchResetsOptimizerAndPreservesWeightsHistoryAndSources() async throws {
+        let (project, root) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let originalPixels = try pixels(root)
+        let datasetID = ImageMetadataStore.categoryID("Bricks")
+        var settings = TrainingSettings(imageSize: 32, epochs: 2, shuffleEachEpoch: false, seed: 42,
+            modelWidth: 8, modelBlocks: 1, validationFraction: 0, exportBestWeights: false)
+        let original = try await project.trainMap(datasetID: datasetID, map: .depth, settings: settings, progress: { _ in })
+        let originalCheckpoint = try Data(contentsOf: original.directory.appendingPathComponent("checkpoint.json"))
+        let originalWeights = try Data(contentsOf: original.directory.appendingPathComponent("model.safetensors"))
+        settings.epochs = 1
+        let checkpointBranch = try await project.trainMap(datasetID: datasetID, map: .depth, settings: settings,
+            start: .checkpoint(runID: original.id), scalarLossOverride: .nativeDetailV3, progress: { _ in })
+        let modelBranch = try await project.trainMap(datasetID: datasetID, map: .depth, settings: settings,
+            start: .model(runID: original.id), scalarLossOverride: .nativeDetailV3, progress: { _ in })
+        XCTAssertEqual(try NativeWeights.read(from: checkpointBranch.directory.appendingPathComponent("model.safetensors")),
+            try NativeWeights.read(from: modelBranch.directory.appendingPathComponent("model.safetensors")),
+            "Changing the checkpoint objective must use the same fresh optimizer as exported weights")
+        let saved = try NativeFactoryTraining.json(checkpointBranch.directory.appendingPathComponent("checkpoint.json"))
+        XCTAssertEqual(saved["optimizer_updates"] as? Int, 1)
+        XCTAssertEqual(saved["updates"] as? Int, 1)
+        XCTAssertEqual((saved["settings"] as? [String: Any])?["scalar_loss"] as? String, NativeScalarLoss.nativeDetailV3.rawValue)
+        let request = try NativeFactoryTraining.json(checkpointBranch.directory.appendingPathComponent("request.json"))
+        XCTAssertEqual(request["scalar_loss"] as? String, NativeScalarLoss.nativeDetailV3.rawValue)
+        let metadata = try XCTUnwrap(TrainingRunFiles.metadata(at: checkpointBranch.directory))
+        XCTAssertEqual(metadata.settings.scalarLoss, .nativeDetailV3)
+        XCTAssertEqual(metadata.lineage?.parentRunID, original.id)
+        let versions = try await project.modelVersions()
+        let version = try XCTUnwrap(versions.first { $0.id == checkpointBranch.id })
+        XCTAssertEqual(version.history.map(\.scalarLoss), [.logitCrossEntropyV2, .logitCrossEntropyV2, .nativeDetailV3])
+        XCTAssertEqual(try Data(contentsOf: original.directory.appendingPathComponent("checkpoint.json")), originalCheckpoint)
+        XCTAssertEqual(try Data(contentsOf: original.directory.appendingPathComponent("model.safetensors")), originalWeights)
+        XCTAssertEqual(try pixels(root), originalPixels)
+        let resumed = try await project.prepareTrainingStart(.checkpoint(runID: checkpointBranch.id),
+            datasetID: datasetID, map: .depth, settings: settings)
+        XCTAssertEqual(resumed.settings.scalarLoss, .nativeDetailV3, "Later continuation retains v3 without another override")
+    }
+
     func testNativeRunUsesTheBuildersSelectedResolutionPlanAndRecordsItsCounts() async throws {
         let (project, root) = try fixture(resolutions: [64, 128, 256])
         defer { try? FileManager.default.removeItem(at: root) }
@@ -203,6 +240,24 @@ final class NativeFactoryWorkflowTests: XCTestCase {
         let resumedDescriptor = try NativeFactoryTraining.json(resumed.directory.appendingPathComponent("checkpoint.json"))
         XCTAssertEqual(resumedDescriptor["optimizer_updates"] as? Int, 9)
         XCTAssertEqual(resumedDescriptor["updates"] as? Int, 9)
+
+        // A different objective must branch from the partial weights rather
+        // than reuse this interrupted cursor, moments or augmentation position.
+        let checkpointBytes = try Data(contentsOf: directory.appendingPathComponent("checkpoint.json"))
+        let changed = try await project.trainMap(datasetID: dataset.id, map: .depth, settings: settings,
+            start: .checkpoint(runID: id), scalarLossOverride: .nativeDetailV3, progress: { _ in })
+        let promoted = try await project.selectCheckpointModelVersion(runID: id, datasetID: dataset.id, map: .depth)
+        let fromExported = try await project.trainMap(datasetID: dataset.id, map: .depth, settings: settings,
+            start: .model(runID: promoted.id), scalarLossOverride: .nativeDetailV3, progress: { _ in })
+        XCTAssertEqual(try NativeWeights.read(from: changed.directory.appendingPathComponent("model.safetensors")),
+            try NativeWeights.read(from: fromExported.directory.appendingPathComponent("model.safetensors")))
+        let branch = try NativeFactoryTraining.json(changed.directory.appendingPathComponent("checkpoint.json"))
+        XCTAssertEqual(branch["optimizer_updates"] as? Int, 9)
+        XCTAssertEqual(branch["prior_updates"] as? Int, 1)
+        XCTAssertEqual(branch["prior_images"] as? Int, 1)
+        XCTAssertEqual((branch["prior_history"] as? [[String: Any]])?.count, 0)
+        XCTAssertEqual((branch["history"] as? [[String: Any]])?.count, 3)
+        XCTAssertEqual(try Data(contentsOf: directory.appendingPathComponent("checkpoint.json")), checkpointBytes)
     }
 
     private func waitForCheckpointRequest(_ control: TrainingRunControl) async throws {

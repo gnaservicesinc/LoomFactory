@@ -1,4 +1,5 @@
 import Foundation
+import LoomNative
 
 /// Keep lineage separate from this run's epoch cursor. A changed training plan
 /// starts its own schedule, while retaining the measured work behind its weights.
@@ -15,6 +16,13 @@ struct TrainingContinuationHistory {
     init(descriptor: [String: Any], source: TrainingWeightSource, runID: String, resumingCursor: Bool,
          trainingImages: Int = 0) {
         let training = source == .model ? descriptor["training"] as? [String: Any] ?? [:] : descriptor
+        let settings = source == .model ? training : descriptor["settings"] as? [String: Any] ?? [:]
+        let objective = settings["scalar_loss"] as? String ?? NativeScalarLoss.absoluteV1.rawValue
+        func identified(_ row: [String: Any]) -> [String: Any] {
+            var result = row
+            if result["scalar_loss"] == nil { result["scalar_loss"] = objective }
+            return result
+        }
         let inherited = training["prior_history"] as? [[String: Any]] ?? []
         let local = training["history"] as? [[String: Any]] ?? []
         let priorEpochs = Self.count(training["prior_epochs"])
@@ -22,12 +30,12 @@ struct TrainingContinuationHistory {
         let priorImages = Self.count(training["prior_images"])
         let priorDuration = Self.duration(training["prior_duration_seconds"])
         let ownDuration = Self.duration(training["elapsed_seconds"] ?? training["duration_seconds"] ?? descriptor["duration_seconds"])
-        rows = inherited; epochs = priorEpochs; updates = priorUpdates; images = priorImages; elapsedSeconds = priorDuration
+        rows = inherited.map(identified); epochs = priorEpochs; updates = priorUpdates; images = priorImages; elapsedSeconds = priorDuration
         if resumingCursor {
             restoredRunElapsedSeconds = ownDuration
         } else {
             rows += local.map { row in
-                var result = row
+                var result = identified(row)
                 result["epoch"] = Self.count(row["epoch"]) + priorEpochs
                 if let update = row["update"] as? Int { result["update"] = Self.count(update) + priorUpdates }
                 result["run_id"] = row["run_id"] as? String ?? runID

@@ -1,5 +1,6 @@
 import AppKit
 import LoomCore
+import LoomNative
 import SwiftUI
 
 struct TrainingPanel: View {
@@ -142,13 +143,34 @@ struct TrainingPanel: View {
                 }
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 if model.selectedMap != .normal && model.effectiveTrainingSettings.scalarLoss == .absoluteV1 {
-                    Text("This version keeps the original scalar training loss. If its output has saturated to white or black, choose Start a fresh model to use stable scalar training.")
+                    Text("This version keeps the original scalar training loss. For saturated white or black output, choose a stable objective below to branch from these weights with a fresh optimizer.")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("training.legacyScalarLoss")
                 }
             } else {
                 Text("Starts new weights and keeps every previous version. A successful replacement becomes the model used for package export.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            if model.selectedMap != .normal {
+                Picker("Training objective", selection: $model.trainingScalarLossOverride) {
+                    Text(continuing ? "Keep saved objective" : "Stable pixel loss (v2)").tag(Optional<NativeScalarLoss>.none)
+                    Text("Native pixel detail (v3, experimental)").tag(Optional(NativeScalarLoss.nativeDetailV3))
+                    if continuing {
+                        Text("Stable pixel loss (v2)").tag(Optional(NativeScalarLoss.logitCrossEntropyV2))
+                    }
+                }.accessibilityIdentifier("training.scalarLoss")
+                Text(model.effectiveTrainingSettings.scalarLoss == .nativeDetailV3
+                    ? "Compares original pixel values and signed differences at 1, 2 and 4 pixels. Check whole-material outputs against the original version before choosing this candidate."
+                    : model.effectiveTrainingSettings.scalarLoss == .absoluteV1
+                        ? "Preserves the original absolute-error objective recorded by this version."
+                        : "Compares pixel values with a saturation-resistant objective. Saved versions retain their recorded objective unless changed here.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if continuing, model.trainingScalarLossOverride != nil,
+                   model.effectiveTrainingSettings.scalarLoss != model.selectedTrainingVersion?.savedSettings?.scalarLoss {
+                    Text("Changing the objective keeps the selected weights and starts a new optimizer and epoch schedule. Earlier losses retain their original objective label in the saved history.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("training.changedScalarLoss")
+                }
             }
             VStack(alignment: .leading, spacing: 5) {
                 Text("Model / checkpoint name").font(.caption.weight(.medium)).foregroundStyle(.secondary)
@@ -421,7 +443,7 @@ struct TrainingPanel: View {
     }
 
     private var selectedNetwork: TrainingNetwork {
-        TrainingNetwork(rawValue: model.effectiveTrainingSettings.modelArchitecture) ?? .pyramid
+        TrainingNetwork(rawValue: model.effectiveTrainingSettings.modelArchitecture) ?? .residual
     }
 
     private var networkBinding: Binding<TrainingNetwork> {

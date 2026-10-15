@@ -76,10 +76,13 @@ final class NativeScalarLossTests: XCTestCase {
         let input = (0..<(3 * 5 * 5)).map { Float($0 % 17) / 16 }
         let target = Array(repeating: Float(0.5), count: 50) + Array(repeating: Float(1), count: 25)
         let legacy = try NativeTrainingSession(architecture: architecture, options: options(.absoluteV1), seed: 42)
-        let stable = try NativeTrainingSession(architecture: architecture, options: options(.logitCrossEntropyV2), seed: 42)
-        XCTAssertEqual(try legacy.train(input: input, target: target, batchSize: 1, height: 5, width: 5),
-            try stable.train(input: input, target: target, batchSize: 1, height: 5, width: 5))
-        XCTAssertEqual(try legacy.accumulatedGradients(), try stable.accumulatedGradients())
+        let expectedLoss = try legacy.train(input: input, target: target, batchSize: 1, height: 5, width: 5)
+        let expectedGradients = try legacy.accumulatedGradients()
+        for loss in NativeScalarLoss.allCases {
+            let candidate = try NativeTrainingSession(architecture: architecture, options: options(loss), seed: 42)
+            XCTAssertEqual(expectedLoss, try candidate.train(input: input, target: target, batchSize: 1, height: 5, width: 5))
+            XCTAssertEqual(expectedGradients, try candidate.accumulatedGradients())
+        }
     }
 
     func testStableLossOptimizerStateResumesExactly() throws {

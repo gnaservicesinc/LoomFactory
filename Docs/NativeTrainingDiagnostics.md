@@ -29,7 +29,8 @@ Source and weight hashes are checked again before completing the report.
 
 The report records the selected objective and evaluation loss. The default
 objective remains `absolute-v1` for compatibility with old probe invocations;
-always pass `--scalar-loss` when comparing recorded training losses. Both
+always pass `--scalar-loss` when comparing recorded training losses. Supported
+values are `absolute-v1`, `logit-cross-entropy-v2` and `native-detail-v3`. All
 objectives share the same inference interpretation.
 
 `pixel_diagnostics` includes the raw target and prediction range, mean, standard

@@ -94,6 +94,18 @@ final class ModelVersionLifecycleTests: XCTestCase {
         XCTAssertEqual(continued.settings.modelBlocks, 1)
         XCTAssertEqual(continued.settings.modelArchitecture, NativeArchitecture.identifier)
         XCTAssertEqual(continued.settings.scalarLoss, .absoluteV1, "Legacy checkpoint continuation preserves its objective")
+        let detail = try await fixture.project.prepareTrainingStart(.checkpoint(runID: "old"),
+            datasetID: fixture.datasetID, map: .depth, settings: changed, scalarLossOverride: .nativeDetailV3)
+        XCTAssertEqual(detail.settings.scalarLoss, .nativeDetailV3)
+        XCTAssertEqual(detail.resume?.weights, continued.resume?.weights)
+        let freshDetail = try await fixture.project.prepareTrainingStart(.fresh,
+            datasetID: fixture.datasetID, map: .depth, settings: changed, scalarLossOverride: .nativeDetailV3)
+        XCTAssertEqual(freshDetail.settings.scalarLoss, .nativeDetailV3)
+        do {
+            _ = try await fixture.project.prepareTrainingStart(.fresh, datasetID: fixture.datasetID,
+                map: .normal, settings: changed, scalarLossOverride: .nativeDetailV3)
+            XCTFail("Scalar objective overrides cannot change normal training")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("Normal maps")) }
         XCTAssertEqual(continued.settings.learningRate, changed.learningRate)
         XCTAssertEqual(continued.settings.optimizer, .adam)
         XCTAssertEqual(changed.seed, -1)

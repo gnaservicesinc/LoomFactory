@@ -230,4 +230,31 @@ extension MPSGraph {
             exponent(with: scaled(absolute, -1), name: nil), name: nil), name: nil)
         return mean(of: addition(linear, softplusTail, name: nil), axes: [0, 1, 2, 3], name: nil)
     }
+
+    /// Match signed native pixel differences at 1, 2 and 4 pixels in both axes.
+    /// No resized targets, edge enhancement, absolute-gradient ambiguity, or
+    /// image smoothing: every term compares the same original pixel positions.
+    /// Averaging directions/offsets keeps the contract independent of image size.
+    /// Combined with logit BCE, saturated wrong predictions still have a
+    /// corrective level gradient even when sigmoid's detail gradient vanishes.
+    func nativeDetailLoss(prediction: MPSGraphTensor, target: MPSGraphTensor) -> MPSGraphTensor {
+        let shape = prediction.shape!.map(\.intValue)
+        let residual = subtraction(prediction, target, name: nil)
+        var terms: [MPSGraphTensor] = []
+        for offset in [1, 2, 4] {
+            for axis in [2, 3] where shape[axis] > offset {
+                var starts = [0, 0, 0, 0], ends = shape
+                starts[axis] = offset
+                let right = sliceTensor(residual, starts: starts.map(NSNumber.init(value:)),
+                    ends: shape.map(NSNumber.init(value:)), strides: [1, 1, 1, 1], name: nil)
+                ends[axis] -= offset
+                let left = sliceTensor(residual, starts: [0, 0, 0, 0],
+                    ends: ends.map(NSNumber.init(value:)), strides: [1, 1, 1, 1], name: nil)
+                terms.append(mean(of: absolute(with: subtraction(right, left, name: nil), name: nil),
+                    axes: [0, 1, 2, 3], name: nil))
+            }
+        }
+        guard let first = terms.first else { return scalar(0) }
+        return scaled(terms.dropFirst().reduce(first) { addition($0, $1, name: nil) }, 1 / Double(terms.count))
+    }
 }
