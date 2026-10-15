@@ -235,3 +235,33 @@ three legacy checkpoints before launch. Budgets are 12/12/6 minutes, retaining
 the original 17:21:18 UTC cutoff. These are unapproved recovery experiments.
 The failed Compact recipes for 39 unfinished jobs remain preserved and cannot
 be rolled out merely because a different constructor's gate completes.
+
+The legacy reference gate completed at 15:02 UTC, with correct parent paths and
+checksums for all three maps. Best depth and normal exports came from epoch two;
+later training worsened their validation scores. Native combined reviews of
+both best exports and latest optimizer checkpoints show no sufficient joint
+improvement. Bricks072 retains depth geometry but has nearly flat normals and
+roughness bias +0.291 (best) / +0.305 (latest). Known brick_wall_005 retains the
+old depth bias and loses detail at latest. The inherited brick_wall_10 diagnostic
+is better structured than Compact but still lacks target relief. Neither the
+best score nor the liked old depth image qualifies the three-map recipe.
+
+No generic category rollout follows. A separate bounded Bark pilot uses the
+settings of its pre-existing Compact depth model: width 32, linear-detail-v1,
+LR 0.0001, no weight decay, physical batch one with accumulation one, and native
+1024 crops from all current source levels. Normals start fresh for 15 minutes,
+roughness starts fresh for ten, and depth continues the original Bark checkpoint
+for five. Depth retains its original explicit feature-exaggeration teaching
+setting; source files remain unchanged. The selected model and same-run
+checkpoint have identical parameter tensor bytes despite different safetensors
+file/header hashes. The exact runner's one-update Bark continuation preflight
+checks its actual parent, path, checksum and settings before launch.
+
+The shared current split uses validation seed 9587. Fresh normal/roughness maps
+exclude those materials, but inherited Bark depth has already seen the entire
+current Bark corpus, so the joint material is explicitly not an independent
+unseen-material test. Review Bark Willow 02 plus saved-model diagnostics on
+Bark Brown 01 and Pine Bark in diffuse and neutral views before judging it.
+All new candidates remain unapproved; the detailed brick reference and other
+prior effective assignments stay selected. Thirty-six jobs in the other twelve
+categories remain unstarted. The original 17:21:18 UTC training cutoff remains.
