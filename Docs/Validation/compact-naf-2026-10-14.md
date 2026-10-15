@@ -1,7 +1,7 @@
 # Compact NAF native comparison model
 
-Status: implementation, historical parity and real 55-pair timing verified;
-complete suites and installed Release verification pending.
+Status: implementation, historical parity, real 55-pair timing, regression
+suites and installed Release verification complete.
 
 ## Performance requirement and first measurement
 
@@ -141,7 +141,31 @@ can reject large repeated requests when framework caches remain resident.
 
 Workshop passed all 38 core XCTest cases (two opt-in skips) and 13 serialized UI
 tests, including compact frozen-base adaptation and Core ML fusion parity.
-Installed Release verification remains pending. These execution,
+`make install INSTALL_LAUNCH=1` built, verified, installed and launched all three
+optimized Release apps successfully. Installed executable hashes match their
+signed packaged bundles, and deep/strict code signatures passed:
+
+- Texture Studio: `459eb6272f4b0b4c983fa1e5bbaf512801ab3c3d5bfa5e959d6051cfdcddb012`
+- Loom Factory: `2b971298503e22cc1a41b44229aaaaf4ee4f5e27cb2fb0742cc21f96a13427cc`
+- Loom Workshop: `b246c80c748d056f86db764b7c3946a82628dcd3df94b23536d3d93f4f4a26ce`
+
+Factory and Workshop include the NAFNet license in their app resources and
+compact model/adapter exports. No staging, rollback or previous app copies
+remained after installation. Eighteen obsolete Workshop backups were also
+removed after checking their bundle identities. Temporary diagnostic executables
+were removed; receipts, source probes and test logs remain as validation evidence.
+
+The compact training panel rendered successfully in the serialized UI check,
+including fixed objective, editable width, seven-stage description and persisted
+fresh selection. The retained render is `compact-ui/training-controls-compact-linear.png`.
+Native live UI automation was unavailable (`Sky Computer Use native pipe startup
+failed`), so installed process/bundle checks and rendered-control tests are
+reported separately from live gestures.
+
+Factory implementation commit: `6ffc27bf2a4cd6ecd8ea68c7debf5711fc32631a`.
+Workshop dependency pins that exact native implementation. Studio consumer commit:
+`cbf957de7d7676de81ef94cb038021bb734affe6`; Workshop:
+`c2bbfa0ad1a552d3343f391a37785db43e59b78c`. All were pushed and remote hashes verified. These execution,
 compatibility and export checks do not establish artifact-free learned output,
 held-out detail quality, or larger-grid training capacity. Existing runs and
 original checkpoints remain preserved for visual whole-material comparisons.
