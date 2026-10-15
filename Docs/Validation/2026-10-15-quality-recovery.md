@@ -292,3 +292,56 @@ branch retaining starting weights/source bytes/selection. These are execution
 and numerical checks, not proof that a squared objective improves materials.
 The final recovery experiment must retain the original training cutoff and
 must pass joint visual review before any quality claim or model selection.
+
+## Final outcome at the original cutoff
+
+The squared-structure Bark queue finished at 17:07:38 UTC, before the unchanged
+17:21:18 UTC deadline. Its read-only best-export evaluations finished at
+17:08:30 UTC. At closeout, both saved PIDs and the queue/probe/evaluation process
+search were empty; the heartbeat was paused. No further training was started.
+
+All three actual requests retained their intended parents and checksum-matched
+checkpoint paths. Normal completed 1,177 new updates (2,963 cumulative), depth
+1,217 (7,409 cumulative), and roughness 590 (1,797 cumulative). Best exports
+came from branch epochs 12, 4 and 3 respectively. The exact reviewed models are
+normal `checkpoint-model-dd6ac2ab-227d-4e75-a49d-360231c34801`, depth
+`checkpoint-model-dec90a30-5924-4896-8e02-d6c30ba88cd4`, and roughness
+`checkpoint-model-2518b9d6-8765-41cc-8779-363ca12d9ee3`. Latest optimizer states
+are preserved separately and are not substituted for these reviewed exports.
+
+This final experiment **failed the joint material-quality gate**. Visual review
+covered Willow 02, Brown 01 and Pine Bark, with neutral and diffuse combined
+surfaces under both lights, alongside original artist targets and the preceding
+Bark pilot. Target hashes match between the two comparison sets. Directional
+normal detail improved slightly, but grooves remain rounded or missing and
+depth relief is much weaker than the targets. Diffuse color hides some of the
+missing geometry; it does not make the neutral surface usable.
+
+| Material | Depth standard deviation / target | Depth correlation | Normal mean angle | Roughness signed bias |
+| --- | --- | --- | --- | --- |
+| Bark Willow 02 | 0.0089 / 0.0932 | 0.134 | 28.1 degrees | +0.0184 |
+| Bark Brown 01 | 0.0193 / 0.1563 | 0.597 | 21.6 degrees | -0.0656 |
+| Pine Bark | 0.0066 / 0.0649 | -0.026 | 16.4 degrees | +0.0791 |
+
+Brown roughness also exceeds one in the raw linear prediction. These native
+metrics accompany the visual rejection; they are not standalone acceptance
+thresholds. Normal/roughness excluded Willow 02, but inherited depth had seen
+the Bark corpus, so this remains a mixed seen-material diagnostic rather than
+an independent joint generalization result. The new objective is still an
+unproven experiment, not a recommended quality fix.
+
+No three-map replacement was qualified for Bricks or Bark. The other twelve
+categories remain untrained in this recovery: Cement Concrete Pavement,
+Drywall, Fabric, Ground, Leather, Medium Particles, Metal, Paper, Rock Cliff
+Marble, Small Particles, Tiles And Pavers, and Wood (36 unstarted map jobs).
+Their preserved recipes are not recommendations. The overall fourteen-category
+quality goal is incomplete, and the cause of the remaining learning-quality
+failure is unresolved despite the export and continuation safeguards.
+
+The known detailed brick reference and all six prior effective assignments were
+verified unchanged at closeout. No final candidate was approved or selected.
+Original pixels, old models, checkpoints and earlier receipts remain preserved.
+The recovery folder's `Review.html` now presents the final side-by-side evidence,
+`bark-squared-structure-gate/quality-review.json` records the final rejection,
+and `final-recovery-receipt.json` records the cutoff, exact identities, checksum
+checks, stopped processes, paused heartbeat and incomplete category coverage.
