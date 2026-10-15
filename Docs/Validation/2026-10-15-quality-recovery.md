@@ -171,7 +171,7 @@ the lower validation score still does not provide usable held-out relief.
 The next bounded gate continues the three saved Compact category checkpoints
 with a fresh optimizer/sampler, LR 0.0002, no weight decay, and four-image
 gradient accumulation (physical batch one). This tests whether steadier updates
-and about 25 minutes per product can retain the structure recovered by the
+and 20 minutes per product can retain the structure recovered by the
 single-material diagnostic across the category. It keeps native pixels,
 the same two source levels and whole-material split. The remaining categories
 are still gated on visible joint improvement. Best-validation candidates are
