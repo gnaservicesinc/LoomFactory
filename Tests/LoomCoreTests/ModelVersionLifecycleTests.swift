@@ -8,6 +8,25 @@ import XCTest
 
 @MainActor
 final class ModelVersionLifecycleTests: XCTestCase {
+    func testCheckpointCandidateExportPreservesExplicitSelectionAndSourceWeights() async throws {
+        let fixture = try await Fixture(); defer { fixture.remove() }
+        let selected = try fixture.artifact("selected", date: Date(timeIntervalSince1970: 100))
+        let parent = try fixture.artifact("candidate", date: .now, checkpoint: true)
+        try fixture.nativeCheckpoint(parent)
+        try await fixture.project.selectModelVersion(runID: selected.id, datasetID: fixture.datasetID, map: .depth)
+        let selectionURL = fixture.project.projectFolder.appendingPathComponent("model-selection.json")
+        let selection = try Data(contentsOf: selectionURL)
+        let checkpoint = try Data(contentsOf: parent.directory.appendingPathComponent("checkpoint.safetensors"))
+        let candidate = try await fixture.project.exportCheckpointModelVersion(runID: parent.id,
+            datasetID: fixture.datasetID, map: .depth)
+        XCTAssertNotEqual(candidate.id, parent.id)
+        XCTAssertEqual(try Data(contentsOf: candidate.directory.appendingPathComponent("model.safetensors")), checkpoint)
+        XCTAssertEqual(try Data(contentsOf: selectionURL), selection)
+        XCTAssertEqual(try Data(contentsOf: parent.directory.appendingPathComponent("checkpoint.safetensors")), checkpoint)
+        let active = try await fixture.project.selectedModelArtifact(datasetID: fixture.datasetID, map: .depth)
+        XCTAssertEqual(active?.id, selected.id)
+    }
+
     func testCheckpointCanBecomeSelectedModelWithoutChangingStoppedRunOrItsExport() async throws {
         let fixture = try await Fixture(); defer { fixture.remove() }
         let parent = try fixture.artifact("stopped", date: Date(timeIntervalSince1970: 100), checkpoint: true)

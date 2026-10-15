@@ -39,6 +39,9 @@ public struct TrainingDataPlan: Sendable {
     public let resolutions: [TrainingResolutionPlan]
     let training: [TrainingPair]
     let validation: [TrainingPair]
+    /// Actual whole-material holdouts selected by this plan. Review tools use
+    /// these paths rather than independently reconstructing the split.
+    public var validationInputs: [URL] { validation.map { $0.input.url } }
 
     init(pairs: [TrainingPair], settings: TrainingSettings, sourceFolder: URL,
          sourceImages: [SourceImage]? = nil, eligiblePairs: [TrainingPair]? = nil) {

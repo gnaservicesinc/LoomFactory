@@ -108,3 +108,19 @@ included once every source proof is complete; earlier saves continue with a new
 epoch schedule. Final export verifies every registered source before and after
 export. Each successful save keeps immutable tensors and a matching checkpoint
 descriptor, alongside the latest-checkpoint alias for older consumers.
+
+`loom-factory-material-pyramid-v2` retains Pyramid v1's native tensor shapes,
+three feature scales, nearest replication/trimming, full-resolution skip,
+zero padding and bounded output. Its hidden activations use leaky ReLU with a
+0.1 negative slope at every encoder, residual and decoder activation. Both
+activation fields, Pyramid scale fields and output-head identity are mandatory
+in its descriptor. Normal output uses a normalized raw vector encoded into
+[0,1], avoiding the legacy sigmoid head's zero gradient at saturation; scalar
+heads retain sigmoid and use the explicitly recorded stable logit objective.
+It is a separate constructor; choosing it creates fresh weights, and legacy
+Pyramid checkpoints retain their original ReLU graph. Its purpose is to keep
+Pyramid's larger spatial context and lower-resolution computation without a
+completely inactive hidden branch. That arithmetic property is tested separately
+from whole-material learned quality. Core ML export and Workshop validate the
+same versioned graph. New source projects retain existing defaults; an explicit
+saved architecture/objective is never silently migrated when starting fresh.

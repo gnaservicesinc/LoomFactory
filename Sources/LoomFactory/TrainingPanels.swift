@@ -164,11 +164,10 @@ struct TrainingPanel: View {
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             } else if model.selectedMap != .normal {
                 Picker("Training objective", selection: $model.trainingScalarLossOverride) {
-                    Text(continuing ? "Keep saved objective" : "Stable pixel loss (v2)").tag(Optional<NativeScalarLoss>.none)
+                    Text(continuing ? "Keep saved objective" : "Keep configured objective").tag(Optional<NativeScalarLoss>.none)
+                    Text("Original absolute error (v1)").tag(Optional(NativeScalarLoss.absoluteV1))
+                    Text("Stable pixel loss (v2)").tag(Optional(NativeScalarLoss.logitCrossEntropyV2))
                     Text("Native pixel detail (v3, experimental)").tag(Optional(NativeScalarLoss.nativeDetailV3))
-                    if continuing {
-                        Text("Stable pixel loss (v2)").tag(Optional(NativeScalarLoss.logitCrossEntropyV2))
-                    }
                 }.accessibilityIdentifier("training.scalarLoss")
                 Text(model.effectiveTrainingSettings.scalarLoss == .nativeDetailV3
                     ? "Compares original pixel values and signed differences at 1, 2 and 4 pixels. Check whole-material outputs against the original version before choosing this candidate."
@@ -467,7 +466,11 @@ struct TrainingPanel: View {
             }
             model.settings.training.modelArchitecture = network.rawValue
             model.settings.training.modelBlocks = network.blocks
-            model.settings.training.scalarLoss = network == .compactNAF ? .linearDetailV1 : .logitCrossEntropyV2
+            if network == .compactNAF {
+                model.settings.training.scalarLoss = .linearDetailV1
+            } else if model.settings.training.scalarLoss == .linearDetailV1 {
+                model.settings.training.scalarLoss = model.selectedMap == .roughness ? .logitCrossEntropyV2 : .absoluteV1
+            }
             model.trainingScalarLossOverride = nil
             if network == .compactNAF {
                 model.settings.training.learningRate = 0.0001
@@ -619,12 +622,12 @@ enum TrainingModelPreset: String, CaseIterable, Identifiable {
     func width(network: TrainingNetwork) -> Int? {
         switch (network, self) {
         case (_, .custom): nil
-        case (.pyramid, .compact): 8
-        case (.pyramid, .small): 19
-        case (.pyramid, .medium): 27
-        case (.pyramid, .large): 38
-        case (.pyramid, .extraLarge): 47
-        case (.pyramid, .huge): 55
+        case (.pyramid, .compact), (.pyramidV2, .compact): 8
+        case (.pyramid, .small), (.pyramidV2, .small): 19
+        case (.pyramid, .medium), (.pyramidV2, .medium): 27
+        case (.pyramid, .large), (.pyramidV2, .large): 38
+        case (.pyramid, .extraLarge), (.pyramidV2, .extraLarge): 47
+        case (.pyramid, .huge), (.pyramidV2, .huge): 55
         case (.residual, .compact), (.residualV2, .compact): 24
         case (.residual, .small), (.residualV2, .small): 84
         case (.residual, .medium), (.residualV2, .medium): 116

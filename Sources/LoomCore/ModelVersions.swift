@@ -244,7 +244,7 @@ extension LoomProject {
                 guard scalarLossOverride != .linearDetailV1 else {
                     throw LoomError("The linear pixel and detail objective requires a fresh compact native model.")
                 }
-                if map != .normal { fresh.scalarLoss = scalarLossOverride ?? .logitCrossEntropyV2 }
+                if map != .normal { fresh.scalarLoss = scalarLossOverride ?? settings.scalarLoss }
             }
             return (fresh, nil)
         }
@@ -475,7 +475,7 @@ enum TrainingRunFiles {
               (configuration["output_channels"] as? Int).map({ $0 == architecture.outputChannels }) ?? true else {
             throw LoomError("The saved model's channels do not match its material map.")
         }
-        if identity == NativeArchitecture.pyramidIdentifier {
+        if architecture.isPyramid {
             guard configuration["scale_channels"] as? [Int] == [width, width * 2, width * 4],
                   configuration["residual_scale"] as? Int == 4,
                   configuration["upsampling"] as? String == "nearest-2x-trim-to-skip" else {
@@ -492,10 +492,15 @@ enum TrainingRunFiles {
                 }
             }
         }
-        if architecture.isResidualV2 {
+        if architecture.usesLeakyActivation {
             guard configuration["hidden_activation"] as? String == "leaky-relu",
                   configuration["negative_slope"] as? Double == 0.1 else {
-                throw LoomError("The saved residual-v2 model's hidden activation is inconsistent.")
+                throw LoomError("The saved model's versioned hidden activation is inconsistent.")
+            }
+        }
+        if architecture.isPyramidV2 {
+            guard configuration["head_activation"] as? String == architecture.descriptor["head_activation"] as? String else {
+                throw LoomError("The saved Pyramid v2 model's output head is inconsistent.")
             }
         }
         return architecture

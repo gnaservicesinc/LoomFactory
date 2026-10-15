@@ -9,6 +9,24 @@ import UniformTypeIdentifiers
 @Suite(.serialized)
 struct TrainingPanelTests {
     @Test @MainActor
+    func freshPyramidSelectionPreservesTheDetailedBrickRecipe() async throws {
+        let fixture = try TrainingPanelFixture()
+        defer { fixture.remove() }
+        let model = FactoryModel(rememberSourceFolder: false)
+        try await load(model, source: fixture.source)
+        model.selectedDatasetID = try #require(model.snapshot?.datasets.first?.id)
+        model.selectedMap = .depth
+        model.settings.training = TrainingSettings(imageSize: 256, learningRate: 0.001,
+            modelWidth: 55, modelBlocks: 4, modelArchitecture: TrainingNetwork.pyramid.rawValue,
+            scalarLoss: .absoluteV1)
+        model.setTrainingStartMode(.fresh)
+        #expect(model.effectiveTrainingSettings.modelArchitecture == TrainingNetwork.pyramid.rawValue)
+        #expect(model.effectiveTrainingSettings.modelWidth == 55)
+        #expect(model.effectiveTrainingSettings.scalarLoss == .absoluteV1)
+        #expect(model.effectiveTrainingSettings.learningRate == 0.001)
+        #expect(model.canTrain)
+    }
+    @Test @MainActor
     func allActiveTrainingControlsRenderWithARealValidationPlan() async throws {
         let fixture = try TrainingPanelFixture()
         defer { fixture.remove() }

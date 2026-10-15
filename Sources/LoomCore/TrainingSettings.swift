@@ -3,6 +3,7 @@ import LoomNative
 
 public enum TrainingNetwork: String, Codable, CaseIterable, Sendable, Identifiable {
     case pyramid = "loom-factory-material-pyramid-v1"
+    case pyramidV2 = "loom-factory-material-pyramid-v2"
     case residual = "loom-factory-material-residual-v1"
     case residualV2 = "loom-factory-material-residual-v2"
     case compactNAF = "loom-factory-material-compact-naf-v1"
@@ -10,6 +11,7 @@ public enum TrainingNetwork: String, Codable, CaseIterable, Sendable, Identifiab
     public var displayName: String {
         switch self {
         case .pyramid: "Pyramid (experimental)"
+        case .pyramidV2: "Pyramid v2 (comparison)"
         case .residual: "Original residual"
         case .residualV2: "Residual v2"
         case .compactNAF: "Compact NAF (comparison)"
@@ -19,6 +21,7 @@ public enum TrainingNetwork: String, Codable, CaseIterable, Sendable, Identifiab
     public var detail: String {
         switch self {
         case .pyramid: "Downsamples learned features. Saved brick models show sampling-grid artifacts; use only for controlled comparisons."
+        case .pyramidV2: "Keeps Pyramid's wider feature context and full-resolution skips, with a nonzero negative gradient in hidden branches. Compare combined material results before selecting a version."
         case .residual: "Runs every layer at native resolution. Its ReLU branches can become inactive in long training runs."
         case .residualV2: "Native-resolution residual layers with a nonzero negative activation gradient. Starts new weights; saved original models retain their original behavior."
         case .compactNAF: "Earlier fast design with reflection padding, full-resolution skips and a linear output. Compare whole-material detail before choosing it."
@@ -185,25 +188,12 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
         return (try? NativeArchitecture(mapKind: map.rawValue, width: modelWidth, blocks: modelBlocks,
             identifier: modelArchitecture).parameterCount) ?? 0
     }
-    /// Switching a saved project's fresh run keeps its approximate capacity,
-    /// while its saved checkpoints keep their exact recorded architecture.
+    /// Starting fresh preserves the explicitly selected architecture, capacity
+    /// and objective. A new run must not silently reinterpret a saved recipe.
     public mutating func useFullResolutionForFreshRun(map: MapRole) {
         if modelArchitecture == NativeArchitecture.compactIdentifier {
             scalarLoss = .linearDetailV1
-            return
         }
-        if map != .normal { scalarLoss = .logitCrossEntropyV2 }
-        guard modelArchitecture != NativeArchitecture.identifier, modelArchitecture != TrainingNetwork.residualV2.rawValue else { return }
-        let budget = parameterCount(map: map)
-        modelArchitecture = NativeArchitecture.identifier
-        guard budget > 0 else { modelWidth = 164; return }
-        modelWidth = (8...256).min { left, right in
-            let a = try? NativeArchitecture(mapKind: map.rawValue, width: left, blocks: modelBlocks,
-                identifier: modelArchitecture).parameterCount
-            let b = try? NativeArchitecture(mapKind: map.rawValue, width: right, blocks: modelBlocks,
-                identifier: modelArchitecture).parameterCount
-            return abs((a ?? 0) - budget) < abs((b ?? 0) - budget)
-        } ?? 164
     }
     public var validationIssue: String? {
         if !(32...8192).contains(imageSize) { return "Training dimensions must be between 32 and 8,192 pixels." }

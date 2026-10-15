@@ -99,10 +99,10 @@ public enum NativeCoreML {
             layer(name, [input], output, 130, params)
         }
         func hiddenActivation(_ name: String, _ input: String, _ output: String) {
-            guard architecture.isResidualV2 else { activation(name, input, output, 10); return }
+            guard architecture.usesLeakyActivation else { activation(name, input, output, 10); return }
             // ActivationParams.leakyReLU = 15, ActivationLeakyReLU.alpha = 1.
             // The separate model identity preserves existing exported graphs.
-            var slope = CoreMLWire(); slope.float(1, Float(architecture.residualNegativeSlope))
+            var slope = CoreMLWire(); slope.float(1, Float(architecture.hiddenNegativeSlope))
             var params = CoreMLWire(); params.message(15, slope)
             layer(name, [input], output, 130, params)
         }
@@ -157,17 +157,24 @@ public enum NativeCoreML {
             value = "decoder.full.relu"
         }
         convolution("output", value, "logits")
-        activation("output_sigmoid", "logits", mapKind == "normal" ? "sigmoid" : "material_value", 40)
+        if mapKind != "normal" || !architecture.isPyramidV2 {
+            activation("output_sigmoid", "logits", mapKind == "normal" ? "sigmoid" : "material_value", 40)
+        }
         if mapKind == "normal" {
             // Match torch.normalize(v, dim=1, eps=1e-6): denominator is
             // max(sqrt(sum(v*v)), eps), not sqrt(sum(v*v) + eps).
-            scalar("normal_scale", "sigmoid", "normal_scaled", field: 231, value: 2)
-            scalar("normal_center", "normal_scaled", "normal_vector", field: 230, value: -1)
+            let vector: String
+            if architecture.isPyramidV2 { vector = "logits" }
+            else {
+                scalar("normal_scale", "sigmoid", "normal_scaled", field: 231, value: 2)
+                scalar("normal_center", "normal_scaled", "normal_vector", field: 230, value: -1)
+                vector = "normal_vector"
+            }
             var reduce = CoreMLWire(); reduce.integers(1, [1]); reduce.integer(2, 1)
-            layer("normal_length", ["normal_vector"], "normal_length", 1255, reduce)
+            layer("normal_length", [vector], "normal_length", 1255, reduce)
             var clamp = CoreMLWire(); clamp.float(1, 1e-6); clamp.float(2, Float.greatestFiniteMagnitude)
             layer("normal_denominator", ["normal_length"], "normal_denominator", 660, clamp)
-            layer("normal_unit", ["normal_vector", "normal_denominator"], "normal_unit", 890, CoreMLWire())
+            layer("normal_unit", [vector, "normal_denominator"], "normal_unit", 890, CoreMLWire())
             scalar("normal_half", "normal_unit", "normal_half", field: 231, value: 0.5)
             scalar("normal_output", "normal_half", "material_value", field: 230, value: 0.5)
         }

@@ -40,6 +40,8 @@ extension LoomProject {
     public func testModel(datasetID: String, map: MapRole, runID: String, source: TrainingWeightSource,
                           inputURL: URL, checkpointID: String? = nil,
                           progress: @escaping @Sendable (TrainingEvent) -> Void) async throws -> ModelTestResult {
+        let operationLease = try TrainingQueueLease.requireAvailable(projectFolder: projectFolder)
+        defer { withExtendedLifetime(operationLease) {} }
         guard !operationActive else { throw LoomError("Stop the current operation before testing a model.") }
         let model = try ModelTestSelection.load(runID: runID, source: source, datasetID: datasetID,
             map: map, projectFolder: projectFolder, projectID: document.id, checkpointID: checkpointID)

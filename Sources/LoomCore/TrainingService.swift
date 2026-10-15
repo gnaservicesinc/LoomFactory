@@ -13,6 +13,8 @@ extension LoomProject {
                          start: TrainingStart? = nil, runLabel: String = "",
                          scalarLossOverride: NativeScalarLoss? = nil,
                          progress: @escaping @Sendable (TrainingEvent) -> Void) async throws -> ModelArtifact {
+        let operationLease = try TrainingQueueLease.requireAvailable(projectFolder: projectFolder)
+        defer { withExtendedLifetime(operationLease) {} }
         guard !operationActive else { throw LoomError("An operation is already running in this source project. Stop it before starting another.") }
         guard MapRole.targets.contains(map) else { throw LoomError("Choose depth, roughness or normal training.") }
         var requestedStart = start ?? .fresh

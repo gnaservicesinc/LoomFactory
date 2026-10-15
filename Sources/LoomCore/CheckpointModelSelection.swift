@@ -8,6 +8,20 @@ extension LoomProject {
     public func selectCheckpointModelVersion(runID: String, datasetID: String, map: MapRole,
                                             checkpointID: String? = nil,
                                             progress: @escaping @Sendable (TrainingEvent) -> Void = { _ in }) async throws -> ModelArtifact {
+        let artifact = try await exportCheckpointModelVersion(runID: runID, datasetID: datasetID, map: map,
+            checkpointID: checkpointID, progress: progress)
+        try activateModelVersion(runID: artifact.id, datasetID: datasetID, map: map)
+        return artifact
+    }
+
+    /// Creates a reviewable Core ML candidate without changing the user's
+    /// selected production model. Overnight queues use this non-selecting path.
+    @discardableResult
+    public func exportCheckpointModelVersion(runID: String, datasetID: String, map: MapRole,
+                                            checkpointID: String? = nil,
+                                            progress: @escaping @Sendable (TrainingEvent) -> Void = { _ in }) async throws -> ModelArtifact {
+        let operationLease = try TrainingQueueLease.requireAvailable(projectFolder: projectFolder)
+        defer { withExtendedLifetime(operationLease) {} }
         guard !operationActive else { throw LoomError("Finish or stop the current project operation before choosing a checkpoint.") }
         let source = try ModelTestSelection.load(runID: runID, source: .checkpoint, datasetID: datasetID,
             map: map, projectFolder: projectFolder, projectID: document.id, checkpointID: checkpointID)
@@ -26,7 +40,6 @@ extension LoomProject {
                     projectID: projectID, cancellation: cancellation, progress: progress)
             }.value
         } onCancel: { cancellation.cancel() }
-        try activateModelVersion(runID: artifact.id, datasetID: datasetID, map: map)
         return artifact
     }
 }

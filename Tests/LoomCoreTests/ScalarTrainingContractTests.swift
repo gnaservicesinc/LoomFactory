@@ -4,7 +4,7 @@ import XCTest
 @testable import LoomCore
 
 final class ScalarTrainingContractTests: XCTestCase {
-    func testFreshScalarRunsUpgradeAnOldProjectWithoutChangingNormalTraining() async throws {
+    func testFreshScalarRunsPreserveSelectedObjectiveWithoutChangingNormalTraining() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("scalar-contract-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -13,7 +13,7 @@ final class ScalarTrainingContractTests: XCTestCase {
         XCTAssertEqual(legacy.scalarLoss, .absoluteV1)
         for map in [MapRole.depth, .roughness] {
             let prepared = try await project.prepareTrainingStart(.fresh, datasetID: "fixture", map: map, settings: legacy)
-            XCTAssertEqual(prepared.settings.scalarLoss, .logitCrossEntropyV2)
+            XCTAssertEqual(prepared.settings.scalarLoss, .absoluteV1)
             XCTAssertEqual(prepared.settings.modelArchitecture, legacy.modelArchitecture)
             XCTAssertNil(prepared.resume)
         }
@@ -35,4 +35,5 @@ final class ScalarTrainingContractTests: XCTestCase {
         unsupported["scalar_loss"] = "unknown-objective"
         XCTAssertNil(TrainingRunFiles.settings(from: unsupported, descriptor: descriptor))
     }
+
 }

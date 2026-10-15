@@ -314,9 +314,8 @@ final class FactoryModel {
         }
         if value.modelArchitecture == NativeArchitecture.compactIdentifier {
             value.scalarLoss = .linearDetailV1
-        } else {
-            if !continuingTraining && selectedMap != .normal { value.scalarLoss = .logitCrossEntropyV2 }
-            if selectedMap != .normal, let trainingScalarLossOverride { value.scalarLoss = trainingScalarLossOverride }
+        } else if selectedMap != .normal, let trainingScalarLossOverride {
+            value.scalarLoss = trainingScalarLossOverride
         }
         return value
     }

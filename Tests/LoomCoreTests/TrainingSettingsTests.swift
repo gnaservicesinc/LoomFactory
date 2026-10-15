@@ -132,21 +132,16 @@ final class TrainingSettingsTests: XCTestCase {
         XCTAssertEqual(unknown.parameterCount(map: .depth), 0)
     }
 
-    func testFreshRunMigrationKeepsApproximateCapacityAndOtherTrainingChoices() {
-        var settings = TrainingSettings(imageSize: 1024, epochs: 500, learningRate: 0.0002,
-            seed: 9587, modelWidth: 38, gradientAccumulationSteps: 2,
-            modelArchitecture: NativeArchitecture.pyramidIdentifier)
-        let oldCount = settings.parameterCount(map: .depth)
+    func testFreshRunPreservesExplicitPyramidRecipeAndObjective() {
+        var settings = TrainingSettings(imageSize: 1024, epochs: 500, learningRate: 0.001,
+            seed: 9587, modelWidth: 55, gradientAccumulationSteps: 2,
+            modelArchitecture: NativeArchitecture.pyramidIdentifier, scalarLoss: .absoluteV1)
+        let selected = settings
         settings.useFullResolutionForFreshRun(map: .depth)
-        XCTAssertEqual(settings.modelArchitecture, NativeArchitecture.identifier)
-        XCTAssertEqual(settings.modelWidth, 163)
-        XCTAssertLessThan(abs(settings.parameterCount(map: .depth) - oldCount), oldCount / 20)
-        XCTAssertEqual(settings.imageSize, 1024); XCTAssertEqual(settings.epochs, 500)
-        XCTAssertEqual(settings.learningRate, 0.0002); XCTAssertEqual(settings.seed, 9587)
-        XCTAssertEqual(settings.gradientAccumulationSteps, 2)
-        let repeatSettings = settings
+        XCTAssertEqual(settings, selected)
+        XCTAssertEqual(settings.parameterCount(map: .depth), 4_033_591)
         settings.useFullResolutionForFreshRun(map: .depth)
-        XCTAssertEqual(settings, repeatSettings)
+        XCTAssertEqual(settings, selected)
     }
 
     func testOnlyActiveOptimizerCoefficientsCanDisableTraining() {

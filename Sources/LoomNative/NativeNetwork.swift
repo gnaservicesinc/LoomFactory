@@ -19,23 +19,28 @@ public struct NativeArchitecture: Sendable, Equatable {
     /// Existing residual-v1 and Pyramid checkpoints keep their original graph.
     public static let residualV2Identifier = "loom-factory-material-residual-v2"
     public static let pyramidIdentifier = "loom-factory-material-pyramid-v1"
+    public static let pyramidV2Identifier = "loom-factory-material-pyramid-v2"
     public static let compactIdentifier = "loom-factory-material-compact-naf-v1"
+    public static let supportedIdentifiers = [identifier, residualV2Identifier, pyramidIdentifier, pyramidV2Identifier, compactIdentifier]
     public let identifier: String
     public let mapKind: String
     public let width: Int
     public let blocks: Int
     public var outputChannels: Int { mapKind == "normal" ? 3 : 1 }
     public init(mapKind: String, width: Int, blocks: Int, identifier: String = Self.identifier) throws {
-        guard [Self.identifier, Self.residualV2Identifier, Self.pyramidIdentifier, Self.compactIdentifier].contains(identifier),
+        guard Self.supportedIdentifiers.contains(identifier),
               ["depth", "roughness", "normal"].contains(mapKind), (1...512).contains(width), (1...64).contains(blocks),
               identifier != Self.compactIdentifier || blocks == 1 else {
             throw NativeTrainingError.invalid("Unsupported native architecture identity, map kind, or dimensions.")
         }
         self.identifier = identifier; self.mapKind = mapKind; self.width = width; self.blocks = blocks
     }
-    public var isPyramid: Bool { identifier == Self.pyramidIdentifier }
+    public var isPyramid: Bool { identifier == Self.pyramidIdentifier || isPyramidV2 }
+    public var isPyramidV2: Bool { identifier == Self.pyramidV2Identifier }
     public var isCompact: Bool { identifier == Self.compactIdentifier }
     public var isResidualV2: Bool { identifier == Self.residualV2Identifier }
+    public var usesLeakyActivation: Bool { isResidualV2 || isPyramidV2 }
+    public var hiddenNegativeSlope: Double { usesLeakyActivation ? 0.1 : 0 }
     public var isFullResolutionResidual: Bool { identifier == Self.identifier || isResidualV2 }
     public var residualNegativeSlope: Double { isResidualV2 ? 0.1 : 0 }
     public var parameterShapes: [String: [Int]] {
@@ -98,9 +103,12 @@ public struct NativeArchitecture: Sendable, Equatable {
          "output_channels": outputChannels, "input": "RGB sRGB float32 NCHW [0,1]",
          "output": "float32 NCHW [0,1]", "padding": "zero",
          "normal_convention": mapKind == "normal" ? "OpenGL" as Any : NSNull()]
-        if isResidualV2 {
+        if usesLeakyActivation {
             result["hidden_activation"] = "leaky-relu"
-            result["negative_slope"] = residualNegativeSlope
+            result["negative_slope"] = hiddenNegativeSlope
+        }
+        if isPyramidV2 {
+            result["head_activation"] = mapKind == "normal" ? "unit-linear-vector-v1" : "sigmoid"
         }
         if isPyramid {
             result["scale_channels"] = [width, width * 2, width * 4]
@@ -190,8 +198,8 @@ extension MPSGraph {
                 adapter: adapter, channelsLast: channelsLast)
         }
         func activation(_ value: MPSGraphTensor) -> MPSGraphTensor {
-            architecture.isResidualV2
-                ? leakyReLU(with: value, alpha: architecture.residualNegativeSlope, name: nil)
+            architecture.usesLeakyActivation
+                ? leakyReLU(with: value, alpha: architecture.hiddenNegativeSlope, name: nil)
                 : reLU(with: value, name: nil)
         }
         func conv(_ source: MPSGraphTensor, _ name: String) -> MPSGraphTensor {
@@ -235,6 +243,9 @@ extension MPSGraph {
     }
     func materialPrediction(logits: MPSGraphTensor, architecture: NativeArchitecture) -> MPSGraphTensor {
         if architecture.usesLinearOutput { return logits }
+        if architecture.isPyramidV2 && architecture.mapKind == "normal" {
+            return addition(scaled(normalizedVector(logits), 0.5), scalar(0.5), name: nil)
+        }
         var value = sigmoid(with: logits, name: nil)
         if architecture.mapKind == "normal" {
             value = addition(scaled(normalizedVector(subtraction(scaled(value, 2), scalar(1), name: nil)), 0.5), scalar(0.5), name: nil)
