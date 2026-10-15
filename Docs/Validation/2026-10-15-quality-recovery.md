@@ -111,3 +111,26 @@ the stable scalar-logit and raw-vector heads. Prior runs are parent versions,
 not overwritten. Separate retry settings, lineage and quality receipts remain
 in user storage. The original 17:21:18 UTC deadline is unchanged. These remain
 unapproved candidates until their three-map material renders pass review.
+
+At 12:22 UTC the native-crop retry also failed. The completed normal prediction
+on Stone Wall had per-channel standard deviations 0.000459, 0.001343 and
+0.000030, against target values 0.162, 0.176 and 0.097. The neutral combined
+surface was nearly flat. Separate saved-checkpoint evaluations confirmed the
+same normal collapse on brick_wall_10 and the known brick_wall_005 training
+material. Known-brick depth also drifted bright (MAE 0.544, correlation 0.016).
+Roughness improved on that known brick (correlation 0.837), but this does not
+make the three-map material usable. Native metrics and all matched renders
+remain in `native-crop-retry/diagnostics` under the bounded queue directory.
+Save & Stop was acknowledged at 12:22:34 UTC; the active Bark checkpoint and
+every completed Bricks child version were preserved. Restoring source levels
+did not solve the failure, and Pyramid v2 arithmetic tests do not establish a
+successful learning recipe.
+
+A separate three-job quality gate now compares the existing Compact NAF v1
+constructor, width 32, raw linear component/detail objective, native 1024 grid,
+two available native source levels, LR 0.001 and two warmup epochs. It uses the
+shared brick_wall_10 whole-material holdout; a known-brick diagnostic must also
+be reviewed. The 39 remaining jobs are explicit but unstarted. They may only
+start after all three maps pass a combined visual review, and must fit the
+unchanged 17:21:18 UTC deadline. No new constructor, objective or production
+selection is introduced by this gate; its quality is not yet established.
