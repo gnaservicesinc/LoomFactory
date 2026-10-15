@@ -203,3 +203,35 @@ The next gate uses those original category parents, never the mistaken fresh
 run or single-material fits. It retains LR 0.0002, four-image accumulation and
 the original cutoff, allocating 16 minutes to depth and normals and eight to
 roughness so the combined set can be reviewed before remaining category work.
+
+That verified Compact gate completed at 14:23 UTC with all three actual parents
+intact. Both diffuse and neutral combined views still fail the quality gate:
+brick_wall_10 has shallow relief, depth correlation -0.228 and standard deviation
+0.0206 versus the target's 0.1535. Normals and roughness improved, but the joint
+material remains unusably flat. On known brick_wall_005, depth correlation is
+0.465 but relief is still weak, and roughness has a +0.090 level bias. The saved
+best exports were used for every review. No remaining category job was started.
+
+A separate read-only comparison evaluates the three selected legacy references
+together. The liked old depth map has detailed but sometimes incorrect relief;
+it does not establish that the legacy normal and roughness maps are good. On
+Bricks072, absent from every legacy parent request, the old depth preserves
+useful structure, while normals are nearly flat and roughness has a +0.381
+bias. The unchanged source and candidate maps, both lighting directions,
+diffuse/neutral renders and native metrics are preserved under
+`verified-compact-gate/diagnostics/selected-reference-072` in the recovery queue.
+
+The next bounded comparison continues the three original legacy category
+checkpoints with the existing Pyramid v1 width-55, four-block constructor and
+their saved objectives: absolute-v1 depth, angular normals and stable logit
+cross-entropy-v2 roughness. It changes no constructor. Native 1024 crops use all
+current original resolution levels; learning rates are 0.0001 for depth/normals
+and 0.0002 for roughness, with no weight decay and four-image accumulation.
+Seed 9589 resets optimizer/sampler state. Validation seed 9783 reserves
+Bricks072 and brick_wall_10 across all three maps. Bricks072 is new to all three
+legacy parents; brick_wall_10 was seen by those parents and is only a diagnostic.
+The exact frozen runner passed real parent-path/checksum preflights for all
+three legacy checkpoints before launch. Budgets are 12/12/6 minutes, retaining
+the original 17:21:18 UTC cutoff. These are unapproved recovery experiments.
+The failed Compact recipes for 39 unfinished jobs remain preserved and cannot
+be rolled out merely because a different constructor's gate completes.
