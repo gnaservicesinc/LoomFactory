@@ -24,6 +24,16 @@ def load_image(path, numeric=False):
     return image
 
 
+def review_grid_cells(width, height, pixels_per_node, max_edge_vertices):
+    """Bound preview geometry independently of native map resolution."""
+    if min(width, height) < 2 or pixels_per_node < 1 or max_edge_vertices < 2:
+        raise ValueError('Review mesh dimensions, spacing and vertex cap must be positive')
+    columns = math.ceil((width - 1) / pixels_per_node)
+    rows = math.ceil((height - 1) / pixels_per_node)
+    scale = min(1, (max_edge_vertices - 1) / max(columns, rows))
+    return max(1, math.floor(columns * scale)), max(1, math.floor(rows * scale))
+
+
 def export_textured_obj(plane, path, diffuse):
     """Bake actual displacement geometry; OBJ/MTL carries the diffuse overlay.
 
@@ -132,9 +142,9 @@ def render_set(record, prefix, output, lighting, neutral=False, options=None):
     height_image = load_image(record[prefix + 'depth'], True)
     columns = rows = 192
     if options.get('pixels_per_node'):
-        ratio = options['pixels_per_node']
-        columns = math.ceil((height_image.size[0] - 1) / ratio)
-        rows = math.ceil((height_image.size[1] - 1) / ratio)
+        columns, rows = review_grid_cells(height_image.size[0], height_image.size[1],
+                                         options['pixels_per_node'],
+                                         options.get('max_mesh_edge_vertices', 513))
     bpy.ops.mesh.primitive_grid_add(x_subdivisions=columns, y_subdivisions=rows, size=2)
     plane = bpy.context.object
     plane.data.materials.append(material)
@@ -155,6 +165,8 @@ def render_set(record, prefix, output, lighting, neutral=False, options=None):
     exported = None
     if options.get('export_obj'):
         exported = export_textured_obj(plane, options['export_obj'], record['input'])
+    if options.get('export_only'):
+        return exported
 
     bpy.ops.object.camera_add(location=(1.4, -2.2, 2.6))
     camera = bpy.context.object

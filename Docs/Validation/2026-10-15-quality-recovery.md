@@ -403,3 +403,12 @@ opens this artistic comparison and links the preserved historical review.
 Local-file browser automation was blocked by URL policy; the rendered images,
 OBJ re-import, packed scene and JavaScript syntax were verified directly.
 No live browser-control acceptance or renewed training is claimed.
+
+The user subsequently specified using the existing native 1K maps without
+resizing or blurring the height field. All four displayed sets already use
+1024-by-1024 inputs and predictions. The artistic driver now requires matching
+native 1K dimensions and rejects larger maps rather than downscaling them.
+Preview geometry is bounded independently to prevent accidental large meshes,
+but the displayed detailed assets remain unchanged. Additional lower-density
+mesh copies were produced during the discussion; they remain separate and are
+not substituted into the main review or its downloads.

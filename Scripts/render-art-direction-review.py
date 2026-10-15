@@ -31,8 +31,15 @@ inputs = {config['environment']: sha(config['environment'])}
 records = []
 for material in config['materials']:
     record = json.loads(Path(material['record']).read_text())
+    native_dimensions = None
     for key in ['input', 'depth', 'normal', 'roughness']:
         inputs[record[key]] = sha(record[key])
+        dimensions = tuple(renderer.load_image(record[key], key != 'input').size)
+        if max(dimensions) != 1024:
+            raise ValueError('Artistic review requires existing native 1K maps; choose the 1K material instead of resizing a larger map.')
+        if native_dimensions is not None and dimensions != native_dimensions:
+            raise ValueError('The 1K color, height, normal and roughness maps must have matching native dimensions.')
+        native_dimensions = dimensions
     image = renderer.load_image(record['depth'], True)
     pixels = array.array('f', [0]) * len(image.pixels)
     image.pixels.foreach_get(pixels)
@@ -62,7 +69,7 @@ for material, record, midpoint in records:
                 result = directory / name
                 if result.exists():
                     raise FileExistsError('Preserve existing review: ' + str(result))
-                options = {**preset, 'height_midpoint': midpoint, 'pixels_per_node': config['pixels_per_node'], 'environment': config['environment'], 'environment_rotation': 135 if light == 'rotated' else 0, 'environment_strength': 0.35 if light == 'grazing' else 3}
+                options = {**preset, 'height_midpoint': midpoint, 'pixels_per_node': config['pixels_per_node'], 'max_mesh_edge_vertices': config.get('max_mesh_edge_vertices', 513), 'environment': config['environment'], 'environment_rotation': 135 if light == 'rotated' else 0, 'environment_strength': 0.35 if light == 'grazing' else 3}
                 if not neutral and preset['height_gain'] not in exported_gains and preset['height_gain'] in [1, 4]:
                     options['export_obj'] = str(model_dir / f'height-{preset["height_gain"]}x.obj')
                     exported_gains.add(preset['height_gain'])
