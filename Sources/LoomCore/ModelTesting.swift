@@ -94,7 +94,7 @@ struct ModelTestSelection: Sendable {
     }
 }
 
-/// A conservative admission forecast, not a promise about allocator behavior.
+/// An advisory conservative forecast, not a promise about allocator behavior.
 /// Fresh width-32 forward/evaluation probes used 5.06 GB at 1K and 20.17 GB at
 /// 2K. 256 bytes per width-pixel leaves headroom above both measured slopes.
 enum CompactModelMemoryAdmission {
@@ -126,6 +126,7 @@ enum ModelTestWorker {
     /// work. Shipping callers always construct the registered native network.
     static func run(model: ModelTestSelection, inputURL: URL, output: URL,
                     cancellation: NativeCancellation, progress: @escaping @Sendable (TrainingEvent) -> Void,
+                    compactMemoryBudget suppliedCompactMemoryBudget: UInt64? = nil,
                     predictor suppliedPredictor: Predictor? = nil) throws -> ModelTestResult {
         defer { NativeImages.clearDecodedPixelCache() }
         try cancellation.check()
@@ -152,14 +153,19 @@ enum ModelTestWorker {
             let metal = MTLCreateSystemDefaultDevice()
             let required = CompactModelMemoryAdmission.forecast(width: width, height: height,
                 featureWidth: model.architecture.width, parameterCount: model.architecture.parameterCount)
-            let budget = CompactModelMemoryAdmission.budget(physical: ProcessInfo.processInfo.physicalMemory,
-                recommendedMetal: metal?.recommendedMaxWorkingSetSize, allocatedMetal: UInt64(metal?.currentAllocatedSize ?? 0))
-            guard required <= budget else {
-                let gib = Double(1 << 30)
-                throw LoomError(String(format: "Whole-field compact inference has a conservative memory forecast of %.1f GiB; the current budget is %.1f GiB. Use a compatible smaller native image or free memory before testing.", Double(required) / gib, Double(budget) / gib))
+            guard required != .max else {
+                throw LoomError("The compact memory forecast overflowed for these native image dimensions.")
             }
-            memoryAdmission = ["kind": "conservative-forecast-v1", "forecast_bytes": required,
-                "budget_bytes": budget, "bytes_per_width_pixel": 256, "bytes_per_parameter": 12]
+            let budget = suppliedCompactMemoryBudget ?? CompactModelMemoryAdmission.budget(physical: ProcessInfo.processInfo.physicalMemory,
+                recommendedMetal: metal?.recommendedMaxWorkingSetSize, allocatedMetal: UInt64(metal?.currentAllocatedSize ?? 0))
+            let exceedsBudget = required > budget
+            if exceedsBudget {
+                let gib = Double(1 << 30)
+                progress(.init(type: "status", message: String(format: "Attempting the complete native image field. Its conservative memory forecast is %.1f GiB, above the current %.1f GiB forecast budget.", Double(required) / gib, Double(budget) / gib)))
+            }
+            memoryAdmission = ["kind": "conservative-forecast-advisory-v1", "forecast_bytes": required,
+                "budget_bytes": budget, "attempted_over_budget": exceedsBudget,
+                "bytes_per_width_pixel": 256, "bytes_per_parameter": 12]
             admittedDimensions = (width, height)
         }
         let image = try autoreleasepool { try NativeImages.readRGB(from: original, cancellation: cancellation) }

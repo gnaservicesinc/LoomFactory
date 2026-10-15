@@ -143,7 +143,7 @@ final class CompactModelContractTests: XCTestCase {
             + [Float](repeating: 0.25, count: plane) + [Float](repeating: 1.25, count: plane)
         var calls = 0
         let result = try ModelTestWorker.run(model: model, inputURL: input, output: folder.appendingPathComponent("test"),
-            cancellation: NativeCancellation(), progress: { _ in }) { pixels, h, w in
+            cancellation: NativeCancellation(), progress: { _ in }, compactMemoryBudget: .max) { pixels, h, w in
                 calls += 1
                 XCTAssertEqual(w, width); XCTAssertEqual(h, height)
                 XCTAssertEqual(pixels.count, plane * 3)
@@ -165,8 +165,57 @@ final class CompactModelContractTests: XCTestCase {
         XCTAssertEqual(record["stitching"] as? String, "whole-field-v1")
         XCTAssertEqual(record["normal_output_transform"] as? String, "none")
         XCTAssertEqual(record["head_activation"] as? String, "linear")
-        XCTAssertEqual((record["memory_admission"] as? [String: Any])?["kind"] as? String, "conservative-forecast-v1")
+        let admission = try XCTUnwrap(record["memory_admission"] as? [String: Any])
+        XCTAssertEqual(admission["kind"] as? String, "conservative-forecast-advisory-v1")
+        XCTAssertEqual(admission["attempted_over_budget"] as? Bool, false)
         XCTAssertEqual(try Data(contentsOf: input), inputBytes)
+    }
+
+    func testCompactForecastAboveBudgetStillAttemptsExactWholeField() throws {
+        let folder = try temporaryDirectory(); defer {
+            try? FileManager.default.removeItem(at: folder); NativeImages.clearDecodedPixelCache()
+        }
+        // Exercise the same policy as an over-budget 4K forecast on a small
+        // native image; the injected predictor avoids GPU allocation entirely.
+        let width = 64, height = 48, plane = width * height
+        let input = folder.appendingPathComponent("input.png")
+        try ModelTestImage.writePNG([Float](repeating: 0.3, count: plane * 3), channels: 3,
+            width: width, height: height, to: input)
+        let inputBytes = try Data(contentsOf: input)
+        let weights = folder.appendingPathComponent("weights.safetensors")
+        let weightBytes = Data([1, 2, 3]); try weightBytes.write(to: weights)
+        let architecture = try NativeArchitecture(mapKind: "depth", width: 32, blocks: 1,
+            identifier: NativeArchitecture.compactIdentifier)
+        let model = ModelTestSelection(runID: "compact-advisory", source: .checkpoint, datasetID: "bricks",
+            map: .depth, architecture: architecture, imageSize: 32, weightsURL: weights,
+            weightsSHA256: try TrainingRunFiles.sha256(weights))
+        let messages = Messages()
+        let expected = [Float](repeating: 0.25, count: plane)
+        var calls = 0
+        let result = try ModelTestWorker.run(model: model, inputURL: input, output: folder.appendingPathComponent("test"),
+            cancellation: NativeCancellation(), progress: { messages.append($0.message) }, compactMemoryBudget: 1) { pixels, h, w in
+                calls += 1
+                XCTAssertEqual(w, width); XCTAssertEqual(h, height)
+                XCTAssertEqual(pixels.count, plane * 3)
+                return expected
+            }
+        XCTAssertEqual(calls, 1, "A conservative forecast cannot prevent a valid whole-field attempt")
+        XCTAssertEqual(result.width, width); XCTAssertEqual(result.height, height)
+        XCTAssertEqual(result.tileCount, 1)
+        let expectedFile = folder.appendingPathComponent("expected.exr")
+        try NativeFloatEXR.write(expected, channels: 1, width: width, height: height, to: expectedFile)
+        XCTAssertEqual(try Data(contentsOf: result.outputURL), try Data(contentsOf: expectedFile))
+        let record = try NativeFactoryTraining.json(result.directory.appendingPathComponent("test.json"))
+        let admission = try XCTUnwrap(record["memory_admission"] as? [String: Any])
+        XCTAssertEqual(admission["kind"] as? String, "conservative-forecast-advisory-v1")
+        XCTAssertEqual(admission["budget_bytes"] as? UInt64, 1)
+        XCTAssertEqual(admission["forecast_bytes"] as? UInt64,
+            CompactModelMemoryAdmission.forecast(width: width, height: height,
+                featureWidth: architecture.width, parameterCount: architecture.parameterCount))
+        XCTAssertEqual(admission["attempted_over_budget"] as? Bool, true)
+        XCTAssertTrue(messages.snapshot().contains { $0.contains("Attempting the complete native image field") && $0.contains("forecast budget") })
+        XCTAssertEqual(try Data(contentsOf: input), inputBytes)
+        XCTAssertEqual(try Data(contentsOf: weights), weightBytes)
     }
 
     func testCompactTestRejectsUnsupportedNativeGridBeforePrediction() throws {
@@ -192,5 +241,12 @@ final class CompactModelContractTests: XCTestCase {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("compact-core-contract-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         return folder.resolvingSymlinksInPath()
+    }
+
+    private final class Messages: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [String] = []
+        func append(_ value: String) { lock.withLock { values.append(value) } }
+        func snapshot() -> [String] { lock.withLock { values } }
     }
 }
