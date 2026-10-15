@@ -59,6 +59,35 @@ normal convention and height scale. Diffuse and neutral views expose all three
 maps together. Rendering uses four CPU threads; the trainer owns the GPU.
 The fixed displacement scale is an artistic comparison, not measured relief.
 
+`LoomTrainingQueue --evaluate REVIEW.json` tests three saved versions together
+without training or selecting them. It acquires the same process lease, checks
+the current diffuse and matched artist targets, then saves Float32 predictions,
+numeric metrics and the optional combined renders beside the configuration:
+
+```json
+{
+  "schema": "loom-material-set-evaluation-v1",
+  "sourceFolder": "/path/to/originals",
+  "category": "Bricks",
+  "datasetID": "current-category-id",
+  "input": "/path/to/original-diffuse.png",
+  "weights": {
+    "depth": { "runID": "saved-depth-run", "source": "checkpoint" },
+    "normal": { "runID": "saved-normal-run", "source": "checkpoint" },
+    "roughness": { "runID": "saved-roughness-run", "source": "model" }
+  },
+  "renderer": "/absolute/path/to/Scripts/render-material-comparison.py",
+  "note": "State whether this material was seen by any of these saved versions."
+}
+```
+
+Source-resolution limits select existing originals; they do not change the
+native crop grid or GPU work per update. One source level can leave only fixed
+whole-image crops when the smallest originals already equal the crop size.
+Use all available levels (`sourceResolutionLevels: 0`) when the intended recipe
+needs fresh native crop positions from larger originals. Keep material-level
+holdouts identical across levels and all three products.
+
 `--select-checkpoint SOURCE DATASET MAP RUN_ID` exports and explicitly selects
 that exact saved checkpoint; `--select-model` selects an existing export.
 Use these only for an intentional reference selection. All earlier weights and

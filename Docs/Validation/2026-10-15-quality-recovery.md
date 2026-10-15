@@ -80,3 +80,34 @@ Progress, stop control, per-job settings, results, unchanged map references,
 Float32 numeric comparisons and combined material views are saved outside the
 repositories. SIGTERM or STOP requests Save & Stop. The training deadline is
 fixed; the final in-flight checkpoint/export/render can finish afterward.
+
+## First completed set and bounded retry
+
+At 11:23 UTC the first complete Bricks set failed its combined material review.
+The Stone Wall holdout was too smooth and shallow, with false roughness
+variation. Depth correlation was -0.028 and roughness standard deviation was
+0.067 versus the artist target's 0.011. The queue acknowledged Save & Stop;
+all five completed or interrupted runs and their exported candidates remain.
+The restored detailed brick reference remains explicitly selected.
+
+A separate read-only evaluation of the known brick_wall_005 training material
+and the brick_wall_10 whole-material holdout confirmed missing surface detail
+on both. On brick_wall_10, depth standard deviation was 0.016 versus 0.154 in
+the artist target; diffuse color partly hid the missing relief. The review CLI
+ran all three saved checkpoint inferences, native metrics and eight fixed-light
+renders per material successfully without training or changing selection.
+
+The original successful brick request used all four available source levels,
+44 pairs across 11 materials. The initial overnight recipe instead selected
+only the smallest native originals: 13 training pairs and two holdouts. Most
+training inputs exactly equaled the 1024 crop grid and could supply no changing
+crop positions. That recipe restriction is confirmed; it is not proof that
+restoring crop variety alone will solve the learned-quality failure.
+
+The bounded retry uses all available native source levels, the same 1024 grid,
+material holdouts and versioned constructors. It increases the initial learning
+rate to 0.0005 with two warmup epochs to test faster adaptation while retaining
+the stable scalar-logit and raw-vector heads. Prior runs are parent versions,
+not overwritten. Separate retry settings, lineage and quality receipts remain
+in user storage. The original 17:21:18 UTC deadline is unchanged. These remain
+unapproved candidates until their three-map material renders pass review.

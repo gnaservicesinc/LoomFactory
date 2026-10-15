@@ -23,6 +23,21 @@ struct QueueConfiguration: Codable, Sendable {
     let renderer: String?
 }
 
+struct MaterialReview: Codable, Sendable {
+    struct Weight: Codable, Sendable {
+        let runID: String
+        let source: TrainingWeightSource
+    }
+    let schema: String
+    let sourceFolder: String
+    let category: String
+    let datasetID: String
+    let input: String
+    let weights: [String: Weight]
+    let renderer: String?
+    let note: String
+}
+
 final class QueueStatus: @unchecked Sendable {
     let folder: URL
     private let lock = NSLock()
@@ -105,6 +120,8 @@ func writeJSON(_ value: Any, _ url: URL) throws {
                 try await inventory(source: args[1], output: URL(fileURLWithPath: args[2]))
             } else if args.count == 2, args[0] == "--run" {
                 try await run(URL(fileURLWithPath: args[1]))
+            } else if args.count == 2, args[0] == "--evaluate" {
+                try await evaluate(URL(fileURLWithPath: args[1]))
             } else if args.count == 5, ["--select-model", "--select-checkpoint"].contains(args[0]),
                       let map = MapRole(rawValue: args[3]), MapRole.targets.contains(map) {
                 let project = try LoomProject(sourceFolder: URL(fileURLWithPath: args[1]))
@@ -116,7 +133,7 @@ func writeJSON(_ value: Any, _ url: URL) throws {
                     print(args[4])
                 }
             } else {
-                throw LoomError("Use --inventory SOURCE OUTPUT.json, --run CONFIGURATION.json, or --select-model/--select-checkpoint SOURCE DATASET MAP RUN_ID")
+                throw LoomError("Use --inventory SOURCE OUTPUT.json, --run CONFIGURATION.json, --evaluate REVIEW.json, or --select-model/--select-checkpoint SOURCE DATASET MAP RUN_ID")
             }
         } catch {
             let args = Array(CommandLine.arguments.dropFirst())
@@ -129,6 +146,64 @@ func writeJSON(_ value: Any, _ url: URL) throws {
             }
             fputs("\(error.localizedDescription)\n", stderr); exit(1)
         }
+    }
+
+    static func evaluate(_ configurationURL: URL) async throws {
+        let config = try JSONDecoder().decode(MaterialReview.self, from: Data(contentsOf: configurationURL))
+        guard config.schema == "loom-material-set-evaluation-v1",
+              MapRole.targets.allSatisfy({ config.weights[$0.rawValue] != nil }) else {
+            throw LoomError("A material review requires saved depth, normal and roughness weights.")
+        }
+        let project = try LoomProject(sourceFolder: URL(fileURLWithPath: config.sourceFolder))
+        let lease = try TrainingQueueLease(projectFolder: project.projectFolder,
+            controlFolder: configurationURL.deletingLastPathComponent())
+        defer { withExtendedLifetime(lease) {} }
+        let snapshot = try await project.snapshot()
+        guard let diffuse = snapshot.images.first(where: {
+            $0.url.path == config.input && !$0.ignored && $0.role == .diffuse && $0.category == config.category
+        }) else { throw LoomError("The review input must be a current diffuse image in this category.") }
+        var set: [String: Any] = ["schema": "loom-material-set-comparison-v1", "category": config.category,
+            "input": config.input, "note": config.note]
+        for role in MapRole.targets {
+            guard let target = snapshot.images.first(where: {
+                !$0.ignored && $0.role == role && $0.pairingKey == diffuse.pairingKey
+                    && $0.width == diffuse.width && $0.height == diffuse.height
+                    && (role != .normal || $0.normalConvention?.lowercased() != "directx")
+            }), let weight = config.weights[role.rawValue] else {
+                throw LoomError("Missing matched artist target or saved weight for \(role.rawValue).")
+            }
+            set["original_" + role.rawValue] = target.url.path
+            let test = try await project.testModel(datasetID: config.datasetID, map: role, runID: weight.runID,
+                source: weight.source, inputURL: diffuse.url, progress: { print($0.message) })
+            set[role.rawValue] = test.outputURL.path
+            set[role.rawValue + "_run_id"] = weight.runID
+        }
+        let output = configurationURL.deletingPathExtension().appendingPathExtension("material-set.json")
+        try writeJSON(set, output)
+        if let renderer = config.renderer {
+            let results = try renderReview(output, renderer: renderer)
+            try writeJSON(results, configurationURL.deletingPathExtension().appendingPathExtension("results.json"))
+            guard results.values.allSatisfy({ $0 == 0 }) else { throw LoomError("Material review rendering failed; inspect its saved results.") }
+        }
+    }
+
+    static func renderReview(_ path: URL, renderer: String) throws -> [String: Int32] {
+        var results: [String: Int32] = [:]
+        let scripts = URL(fileURLWithPath: renderer).deletingLastPathComponent()
+        for (key, executable, arguments) in [
+            ("material_metrics_exit", "/usr/bin/env", ["python3", scripts.appendingPathComponent("evaluate-material-set.py").path, path.path]),
+            ("material_render_exit", "/Applications/Blender.app/Contents/MacOS/Blender",
+                ["--background", "--factory-startup", "--disable-autoexec", "--threads", "4", "--python", renderer, "--", path.path]),
+            ("material_preview_exit", "/usr/bin/env", ["python3", scripts.appendingPathComponent("assemble-material-review.py").path, path.path])
+        ] {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: executable)
+            process.arguments = arguments
+            try process.run(); process.waitUntilExit()
+            results[key] = process.terminationStatus
+            if process.terminationStatus != 0 { break }
+        }
+        return results
     }
 
     static func inventory(source: String, output: URL) async throws {
@@ -268,25 +343,7 @@ func writeJSON(_ value: Any, _ url: URL) throws {
                                 : "Matched candidates; this input is not certified as a whole-material holdout. Review all three maps together before selecting a production version."
                             try writeJSON(set, path)
                             if let renderer = config.renderer {
-                                let metrics = Process()
-                                metrics.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                                metrics.arguments = ["python3", URL(fileURLWithPath: renderer).deletingLastPathComponent()
-                                    .appendingPathComponent("evaluate-material-set.py").path, path.path]
-                                try metrics.run(); metrics.waitUntilExit()
-                                result["material_metrics_exit"] = metrics.terminationStatus
-                                let process = Process()
-                                process.executableURL = URL(fileURLWithPath: "/Applications/Blender.app/Contents/MacOS/Blender")
-                                process.arguments = ["--background", "--factory-startup", "--disable-autoexec", "--threads", "4", "--python", renderer, "--", path.path]
-                                try process.run(); process.waitUntilExit()
-                                result["material_render_exit"] = process.terminationStatus
-                                if process.terminationStatus == 0 {
-                                    let preview = Process()
-                                    preview.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                                    preview.arguments = ["python3", URL(fileURLWithPath: renderer).deletingLastPathComponent()
-                                        .appendingPathComponent("assemble-material-review.py").path, path.path]
-                                    try preview.run(); preview.waitUntilExit()
-                                    result["material_preview_exit"] = preview.terminationStatus
-                                }
+                                result.merge(try renderReview(path, renderer: renderer)) { _, new in new }
                             }
                         }
                     } catch { result["evaluation_error"] = String(describing: error) }
