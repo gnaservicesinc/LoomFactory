@@ -98,6 +98,14 @@ public enum NativeCoreML {
             var params = CoreMLWire(); params.message(kind, CoreMLWire())
             layer(name, [input], output, 130, params)
         }
+        func hiddenActivation(_ name: String, _ input: String, _ output: String) {
+            guard architecture.isResidualV2 else { activation(name, input, output, 10); return }
+            // ActivationParams.leakyReLU = 15, ActivationLeakyReLU.alpha = 1.
+            // The separate model identity preserves existing exported graphs.
+            var slope = CoreMLWire(); slope.float(1, Float(architecture.residualNegativeSlope))
+            var params = CoreMLWire(); params.message(15, slope)
+            layer(name, [input], output, 130, params)
+        }
         func scalar(_ name: String, _ input: String, _ output: String, field: Int, value: Float) {
             var params = CoreMLWire(); params.float(1, value)
             layer(name, [input], output, field, params)
@@ -119,33 +127,33 @@ public enum NativeCoreML {
         }
 
         convolution("input", "rgb", "input_conv")
-        activation("input_relu", "input_conv", "input_relu", 10)
+        hiddenActivation("input_relu", "input_conv", "input_relu")
         var value = "input_relu"
         if architecture.isPyramid {
             convolution("encoder.half", value, "encoder.half.conv")
-            activation("encoder.half.relu", "encoder.half.conv", "encoder.half.relu", 10)
+            hiddenActivation("encoder.half.relu", "encoder.half.conv", "encoder.half.relu")
             convolution("encoder.quarter", "encoder.half.relu", "encoder.quarter.conv")
-            activation("encoder.quarter.relu", "encoder.quarter.conv", "encoder.quarter.relu", 10)
+            hiddenActivation("encoder.quarter.relu", "encoder.quarter.conv", "encoder.quarter.relu")
             value = "encoder.quarter.relu"
         }
         for index in 0..<blocks {
             let prefix = "body.\(index)"
             convolution(prefix + ".conv1", value, prefix + ".conv1")
-            activation(prefix + ".relu1", prefix + ".conv1", prefix + ".relu1", 10)
+            hiddenActivation(prefix + ".relu1", prefix + ".conv1", prefix + ".relu1")
             convolution(prefix + ".conv2", prefix + ".relu1", prefix + ".conv2")
             layer(prefix + ".residual", [value, prefix + ".conv2"], prefix + ".residual", 230, CoreMLWire())
-            activation(prefix + ".relu2", prefix + ".residual", prefix + ".relu2", 10)
+            hiddenActivation(prefix + ".relu2", prefix + ".residual", prefix + ".relu2")
             value = prefix + ".relu2"
         }
         if architecture.isPyramid {
             value = nearestDouble("decoder.half", value, matching: "encoder.half.relu")
             convolution("decoder.half", value, "decoder.half.conv")
             layer("decoder.half.skip", ["decoder.half.conv", "encoder.half.relu"], "decoder.half.skip", 230, CoreMLWire())
-            activation("decoder.half.relu", "decoder.half.skip", "decoder.half.relu", 10)
+            hiddenActivation("decoder.half.relu", "decoder.half.skip", "decoder.half.relu")
             value = nearestDouble("decoder.full", "decoder.half.relu", matching: "input_relu")
             convolution("decoder.full", value, "decoder.full.conv")
             layer("decoder.full.skip", ["decoder.full.conv", "input_relu"], "decoder.full.skip", 230, CoreMLWire())
-            activation("decoder.full.relu", "decoder.full.skip", "decoder.full.relu", 10)
+            hiddenActivation("decoder.full.relu", "decoder.full.skip", "decoder.full.relu")
             value = "decoder.full.relu"
         }
         convolution("output", value, "logits")

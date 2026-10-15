@@ -63,16 +63,20 @@ final class FactoryModel {
     var selectedTestVersionID = "" {
         didSet {
             if selectedTestVersionID != oldValue {
-                modelTestResult = nil; testWeightSource = nil
+                modelTestResult = nil; previousTestResult = nil; testWeightSource = nil; testCheckpointID = nil
                 refreshTestOriginalMap()
             }
         }
     }
     var testWeightSource: TrainingWeightSource? {
-        didSet { if testWeightSource != oldValue { modelTestResult = nil } }
+        didSet { if testWeightSource != oldValue { preserveTestResultForComparison(); modelTestResult = nil; testCheckpointID = nil } }
     }
+    private var modelTestDatasetID: String?
+    private var modelTestMap: MapRole?
+    private(set) var testCheckpointID: String?
     private(set) var testInputURL: URL?
     private(set) var modelTestResult: ModelTestResult?
+    private(set) var previousTestResult: ModelTestResult?
     private(set) var testOriginalMap = ModelTestOriginalMap.resolve(inputURL: nil, map: nil, images: [])
     var imageSearch = ""
     var fileFilter: MaterialBrowserFilter = .all
@@ -237,24 +241,34 @@ final class FactoryModel {
         !busy && !loadingComparisonPairs && loadedComparisonKey == comparisonSelectionKey &&
         firstComparisonVersion?.artifact != nil && secondComparisonVersion?.artifact != nil && selectedComparisonPair != nil
     }
+    var testDatasetID: String {
+        modelTestDatasetID ?? (!selectedDatasetID.isEmpty ? selectedDatasetID :
+            snapshot?.modelVersions.first?.datasetID ?? snapshot?.datasets.first?.id ?? "")
+    }
+    var testMap: MapRole { modelTestMap ?? selectedMap }
     var testableModelVersions: [ModelVersion] {
-        snapshot?.modelVersions.filter { $0.artifact != nil || $0.checkpoint != nil } ?? []
+        snapshot?.modelVersions.filter { $0.datasetID == testDatasetID && $0.map == testMap &&
+            ($0.artifact != nil || !$0.checkpointVersions.isEmpty) } ?? []
     }
     var selectedTestVersion: ModelVersion? {
         if !selectedTestVersionID.isEmpty { return testableModelVersions.first { $0.id == selectedTestVersionID } }
-        return testableModelVersions.first { $0.datasetID == selectedDatasetID && $0.map == selectedMap && $0.isActive } ??
-            testableModelVersions.first { $0.datasetID == selectedDatasetID && $0.map == selectedMap } ??
-            testableModelVersions.first(where: \.isActive) ?? testableModelVersions.first
+        return testableModelVersions.first(where: \.isActive) ?? testableModelVersions.first
+    }
+    var testCheckpointVersions: [TrainingCheckpoint] { selectedTestVersion?.checkpointVersions ?? [] }
+    var selectedTestCheckpoint: TrainingCheckpoint? {
+        if let testCheckpointID { return testCheckpointVersions.first { $0.revisionID == testCheckpointID } }
+        return selectedTestVersion?.checkpoint ?? testCheckpointVersions.first
     }
     var availableTestWeightSources: [TrainingWeightSource] {
         guard let version = selectedTestVersion else { return [] }
-        return (version.artifact == nil ? [] : [.model]) + (version.checkpoint == nil ? [] : [.checkpoint])
+        return (version.artifact == nil ? [] : [.model]) + (version.checkpointVersions.isEmpty ? [] : [.checkpoint])
     }
     var effectiveTestWeightSource: TrainingWeightSource? {
         testWeightSource ?? availableTestWeightSources.first
     }
     var testDiffuseImages: [SourceImage] {
-        snapshot?.images.filter { $0.role == .diffuse } ?? []
+        guard let category = snapshot?.datasets.first(where: { $0.id == testDatasetID })?.name else { return [] }
+        return snapshot?.images.filter { $0.role == .diffuse && $0.category == category && !$0.ignored } ?? []
     }
     var modelTestIssue: String? {
         if !selectedTestVersionID.isEmpty, selectedTestVersion == nil {
@@ -263,6 +277,9 @@ final class FactoryModel {
         guard selectedTestVersion != nil else { return "Train a model or open a source folder with a saved model or checkpoint." }
         if let source = effectiveTestWeightSource, !availableTestWeightSources.contains(source) {
             return "These saved weights are no longer available. Choose exported model weights or a checkpoint from this run."
+        }
+        if effectiveTestWeightSource == .checkpoint, selectedTestCheckpoint == nil {
+            return "The selected checkpoint is no longer available. Choose another saved checkpoint."
         }
         guard testInputURL != nil else { return "Choose a diffuse image to see the model's output." }
         return nil
@@ -288,12 +305,10 @@ final class FactoryModel {
             if effectiveStartMode == .exportedModel, let saved = selectedTrainingVersion?.settings {
                 value.modelArchitecture = saved.modelArchitecture
                 value.modelWidth = saved.modelWidth; value.modelBlocks = saved.modelBlocks
-                value.imageSize = saved.imageSize; value.exaggerateFeatures = saved.exaggerateFeatures
                 value.scalarLoss = saved.scalarLoss
             } else if effectiveStartMode == .checkpoint, let checkpoint = selectedCheckpoint {
                 value.modelArchitecture = checkpoint.modelArchitecture
                 value.modelWidth = checkpoint.modelWidth; value.modelBlocks = checkpoint.modelBlocks
-                value.imageSize = checkpoint.imageSize; value.exaggerateFeatures = checkpoint.exaggerateFeatures
                 value.scalarLoss = checkpoint.scalarLoss
             }
         }
@@ -591,6 +606,7 @@ final class FactoryModel {
         trainingScalarLossOverride = nil
         guard continuingTraining, let saved = selectedTrainingVersion?.savedSettings else { return }
         var restored = saved
+        restored.seed = saved.requestedSeed ?? saved.seed
         restored.continueLatestWeights = true
         settings.training = restored
     }
@@ -611,11 +627,12 @@ final class FactoryModel {
         }
     }
 
-    func useCheckpointAsModel(_ version: ModelVersion) {
-        guard version.checkpoint != nil else { return }
+    func useCheckpointAsModel(_ version: ModelVersion, checkpointID: String? = nil) {
+        guard !version.checkpointVersions.isEmpty else { return }
         let current = generation
         perform("Exporting selected checkpoint") { [weak self] project in
-            _ = try await project.selectCheckpointModelVersion(runID: version.id, datasetID: version.datasetID, map: version.map)
+            _ = try await project.selectCheckpointModelVersion(runID: version.id, datasetID: version.datasetID, map: version.map,
+                checkpointID: checkpointID)
             guard let self, self.generation == current else { return }
             self.invalidateExportedPackage()
         }
@@ -782,11 +799,15 @@ final class FactoryModel {
 
     func showModelTesting(_ version: ModelVersion? = nil) {
         if let version {
+            modelTestDatasetID = version.datasetID; modelTestMap = version.map
             selectedTestVersionID = version.id
         } else if let version = selectedTestVersion {
             selectedTestVersionID = version.id
         }
-        if testInputURL == nil, let image = selectedImage, image.role == .diffuse { setModelTestInput(image.url) }
+        if testInputURL == nil {
+            let image = selectedImage.flatMap { image in testDiffuseImages.first { $0.id == image.id } } ?? testDiffuseImages.first
+            if let image { setModelTestInput(image.url) }
+        }
         workspaceSection = .testing
     }
 
@@ -806,8 +827,35 @@ final class FactoryModel {
 
     func setModelTestInput(_ url: URL) {
         testInputURL = url
-        modelTestResult = nil
+        modelTestResult = nil; previousTestResult = nil
         refreshTestOriginalMap()
+    }
+
+    func setModelTestDataset(_ id: String) {
+        guard testDatasetID != id else { return }
+        modelTestDatasetID = id
+        clearModelTestRunSelection()
+        if let input = testInputURL, snapshot?.images.contains(where: { $0.url == input }) == true {
+            testInputURL = testDiffuseImages.first?.url
+        }
+        refreshTestOriginalMap()
+    }
+
+    func setModelTestMap(_ map: MapRole) {
+        guard MapRole.targets.contains(map), testMap != map else { return }
+        modelTestMap = map
+        clearModelTestRunSelection()
+        refreshTestOriginalMap()
+    }
+
+    func setModelTestCheckpoint(_ id: String?) {
+        guard testCheckpointID != id else { return }
+        preserveTestResultForComparison()
+        testCheckpointID = id; modelTestResult = nil
+    }
+
+    private func preserveTestResultForComparison() {
+        if let result = modelTestResult { previousTestResult = result }
     }
 
     private func refreshTestOriginalMap() {
@@ -829,18 +877,31 @@ final class FactoryModel {
     func testModel() {
         guard canTestModel, let version = selectedTestVersion, let inputURL = testInputURL,
               let source = effectiveTestWeightSource else { return }
+        let checkpointID = source == .checkpoint ? testCheckpointID : nil
         selectedTestVersionID = version.id
         testWeightSource = source
+        testCheckpointID = checkpointID
         let current = generation
         let onProgress = progressHandler()
+        preserveTestResultForComparison()
         modelTestResult = nil
         perform("Testing \(version.datasetName) · \(version.map.displayName)", clearEvents: true) { [weak self] project in
             let result = try await project.testModel(datasetID: version.datasetID, map: version.map, runID: version.id,
-                                                     source: source, inputURL: inputURL, progress: onProgress)
+                                                     source: source, inputURL: inputURL, checkpointID: checkpointID, progress: onProgress)
             guard let self, self.generation == current, self.selectedTestVersion?.id == version.id,
-                  self.testInputURL == inputURL, self.effectiveTestWeightSource == source else { return }
-            self.modelTestResult = result
+                  self.testInputURL == inputURL, self.effectiveTestWeightSource == source,
+                  (source != .checkpoint || self.testCheckpointID == checkpointID) else { return }
+            self.recordModelTestResult(result)
         }
+    }
+
+    func recordModelTestResult(_ result: ModelTestResult) {
+        if let previous = previousTestResult,
+           previous.runID != result.runID || previous.inputURL != result.inputURL || previous.inputSHA256 != result.inputSHA256 || previous.map != result.map ||
+           (previous.source == result.source && previous.checkpointID == result.checkpointID) {
+            previousTestResult = nil
+        }
+        modelTestResult = result
     }
 
     func saveModelTestOutput(format: ModelTestExportFormat = .float32EXR) {
@@ -860,9 +921,15 @@ final class FactoryModel {
     }
 
     private func resetModelTestSelection() {
+        modelTestDatasetID = nil; modelTestMap = nil
+        clearModelTestRunSelection()
+    }
+
+    private func clearModelTestRunSelection() {
         selectedTestVersionID = ""
         testWeightSource = nil
-        modelTestResult = nil
+        testCheckpointID = nil
+        modelTestResult = nil; previousTestResult = nil
         refreshTestOriginalMap()
     }
 

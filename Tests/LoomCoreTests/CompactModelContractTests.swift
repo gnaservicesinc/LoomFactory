@@ -36,9 +36,9 @@ final class CompactModelContractTests: XCTestCase {
         }
         var originals: [URL: Data] = [:]
         for (name, role, channels) in [("brick_diff.png", MapRole.diffuse, 3), ("brick_disp.png", MapRole.depth, 1)] {
-            let values = (0..<(32 * 32 * channels)).map { Float(($0 * 7 + 31) % 251) / 250 }
+            let values = (0..<(64 * 64 * channels)).map { Float(($0 * 7 + 31) % 251) / 250 }
             let file = folder.appendingPathComponent(name)
-            try ModelTestImage.writePNG(values, channels: channels, width: 32, height: 32, to: file)
+            try ModelTestImage.writePNG(values, channels: channels, width: 64, height: 64, to: file)
             var metadata = ImageMetadata(pairingKey: "compact-workflow", role: role, category: "Bricks")
             metadata.roleWasManuallySelected = true; metadata.pairingWasManuallySelected = true
             try ImageMetadataStore.write(metadata, to: file)
@@ -65,7 +65,7 @@ final class CompactModelContractTests: XCTestCase {
         XCTAssertEqual(request["model_architecture"] as? String, NativeArchitecture.compactIdentifier)
         XCTAssertEqual(request["scalar_loss"] as? String, NativeScalarLoss.linearDetailV1.rawValue)
         XCTAssertEqual(request["width"] as? Int, 8); XCTAssertEqual(request["blocks"] as? Int, 1)
-        XCTAssertEqual(request["image_size"] as? Int, 32)
+        XCTAssertEqual(request["image_size"] as? Int, 64)
         XCTAssertEqual(try Data(contentsOf: checkpointFile), before)
         let versions = try await project.modelVersions(datasetID: datasetID, map: .depth)
         XCTAssertEqual(versions.count, 2)

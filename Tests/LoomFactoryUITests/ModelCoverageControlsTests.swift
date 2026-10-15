@@ -128,7 +128,7 @@ struct ModelCoverageControlsTests {
         #expect(depth.availableCount == 0)
         #expect(depth.checkpointCount == 2)
         #expect(state.modelCounts == "0 completed models · 0 approved")
-        #expect(state.checkpointCounts == "2 saved checkpoints")
+        #expect(state.checkpointCounts == "2 runs with saved checkpoints")
         #expect(state.title == "Training unfinished")
         #expect(ModelCoverageFilter.missing.includes(depth))
         #expect(!ModelCoverageFilter.needsApproval.includes(depth))

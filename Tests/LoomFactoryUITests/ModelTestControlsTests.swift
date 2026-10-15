@@ -89,7 +89,7 @@ struct ModelTestControlsTests {
     }
 
     @Test @MainActor
-    func sourceTestingOffersOtherCategoriesAndDisplaysOriginalPairedMap() async throws {
+    func sourceTestingFiltersCategoryAndIgnoreStateAndDisplaysOriginalPairedMap() async throws {
         let fixture = try await ModelTestControlsFixture()
         defer { fixture.remove() }
         let target = fixture.source.appendingPathComponent("brick_depth.exr")
@@ -105,7 +105,8 @@ struct ModelTestControlsTests {
         let version = try #require(model.testableModelVersions.first)
         model.showModelTesting(version)
         model.setModelTestInput(fixture.sourceInput)
-        #expect(model.testDiffuseImages.contains { $0.url == other })
+        #expect(!model.testDiffuseImages.contains { $0.url == other })
+        #expect(model.testDiffuseImages.allSatisfy { $0.category == "Bricks" && !$0.ignored })
         #expect(model.canTestModel)
         let paired = ModelTestOriginalMap.resolve(inputURL: model.testInputURL, map: version.map,
                                                  images: model.snapshot?.images ?? [])
@@ -115,6 +116,61 @@ struct ModelTestControlsTests {
         try await render(ModelTestResultView(result: fixture.result, imageZoom: .constant(.fit), saveOutput: {},
             showOutput: {}, showFolder: {}, originalMap: paired), size: NSSize(width: 1140, height: 780), name: "model-test-original-target-result.png")
         #expect(try Data(contentsOf: target) == originalTarget)
+    }
+
+    @Test @MainActor
+    func categoryMapAndCheckpointControlsStayScopedAndRetainPreviousCheckpointForAB() async throws {
+        let fixture = try await ModelTestControlsFixture()
+        defer { fixture.remove() }
+        let run = fixture.source.appendingPathComponent(".loom-factory/runs/one-saved-run")
+        let latest = run.appendingPathComponent("checkpoint.json")
+        let object = try JSONSerialization.jsonObject(with: Data(contentsOf: latest))
+        var descriptor = try #require(object as? [String: Any])
+        descriptor["checkpoint_id"] = "epoch-10"; descriptor["epochs_completed"] = 10; descriptor["updates"] = 100
+        try JSONSerialization.data(withJSONObject: descriptor).write(to: run.appendingPathComponent("checkpoint-epoch-10.json"))
+        descriptor["checkpoint_id"] = "epoch-20"; descriptor["epochs_completed"] = 20; descriptor["updates"] = 200
+        try JSONSerialization.data(withJSONObject: descriptor).write(to: latest)
+        try JSONSerialization.data(withJSONObject: descriptor).write(to: run.appendingPathComponent("checkpoint-epoch-20.json"))
+        let metal = fixture.source.appendingPathComponent("metal_diff.png")
+        try FileManager.default.copyItem(at: fixture.sourceInput, to: metal)
+        try ImageMetadataStore.write(.init(pairingKey: "metal", role: .diffuse, category: "Metal"), to: metal)
+        let model = FactoryModel(rememberSourceFolder: false)
+        model.openFolder(fixture.source)
+        try await wait(model)
+        let bricksID = ImageMetadataStore.categoryID("Bricks")
+        model.setModelTestDataset(bricksID)
+        #expect(model.testableModelVersions.count == 1)
+        #expect(model.testDiffuseImages.map(\.url) == [fixture.sourceInput])
+        model.setModelTestMap(.roughness)
+        #expect(model.testableModelVersions.isEmpty)
+        model.setModelTestMap(.depth)
+        model.showModelTesting(try #require(model.testableModelVersions.first))
+        model.testWeightSource = .checkpoint
+        model.setModelTestInput(fixture.externalInput)
+        model.setModelTestCheckpoint("epoch-10")
+        #expect(model.testCheckpointVersions.count == 2)
+        #expect(model.selectedTestCheckpoint?.epochsCompleted == 10)
+        #expect(model.canTestModel)
+        func result(_ id: String) -> ModelTestResult {
+            .init(directory: fixture.result.directory, inputURL: fixture.externalInput, outputURL: fixture.output,
+                runID: "one-saved-run", source: .checkpoint, map: .depth, width: 384, height: 256,
+                tileSize: 256, tileCount: 2, note: "UI fixture", previewURL: fixture.preview, checkpointID: id)
+        }
+        model.recordModelTestResult(result("epoch-10"))
+        model.setModelTestCheckpoint("epoch-20")
+        #expect(model.modelTestResult == nil)
+        #expect(model.previousTestResult?.checkpointID == "epoch-10")
+        model.recordModelTestResult(result("epoch-20"))
+        #expect(model.previousTestResult?.checkpointID == "epoch-10")
+        #expect(model.modelTestResult?.checkpointID == "epoch-20")
+        try await render(ModelTestView(model: model).preferredColorScheme(.dark),
+            size: NSSize(width: 1140, height: 1700), name: "model-test-checkpoint-selection-ab.png")
+        model.setModelTestDataset(ImageMetadataStore.categoryID("Metal"))
+        #expect(model.testableModelVersions.isEmpty)
+        #expect(model.testDiffuseImages.map(\.url) == [metal])
+        #expect(model.testCheckpointID == nil)
+        #expect(model.modelTestResult == nil)
+        #expect(model.previousTestResult == nil)
     }
 
     @Test @MainActor

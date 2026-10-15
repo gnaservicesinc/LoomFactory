@@ -2,7 +2,7 @@ import Foundation
 import LoomNative
 
 public struct TrainingCheckpoint: Identifiable, Sendable, Equatable {
-    public var id: String { directory.path }
+    public var id: String { directory.path + (revisionID.map { "#" + $0 } ?? "") }
     public var runID: String { directory.lastPathComponent }
     public let directory: URL
     public let datasetID: String
@@ -21,6 +21,8 @@ public struct TrainingCheckpoint: Identifiable, Sendable, Equatable {
     public var priorEpochsCompleted: Int = 0
     public var priorUpdatesCompleted: Int = 0
     public var trainingElapsedSeconds: Double? = nil
+    /// Nil identifies a legacy run's current checkpoint; saved revisions use immutable IDs.
+    public var revisionID: String? = nil
     public var totalEpochsCompleted: Int { total(epochsCompleted, priorEpochsCompleted) }
     public var totalUpdatesCompleted: Int { total(updatesCompleted, priorUpdatesCompleted) }
     public var parameterCount: Int { TrainingSettings(modelWidth: modelWidth, modelBlocks: modelBlocks,
@@ -32,13 +34,37 @@ public struct TrainingCheckpoint: Identifiable, Sendable, Equatable {
 }
 
 extension LoomProject {
+    public func checkpointVersions(runID: String) throws -> [TrainingCheckpoint] {
+        let directory = try TrainingRunFiles.runDirectory(runID, projectFolder: projectFolder)
+        return try loadCheckpointVersions(directory: directory)
+    }
+
+    func loadCheckpointVersions(directory: URL) throws -> [TrainingCheckpoint] {
+        let files = try CheckpointArchive.descriptors(in: directory)
+        var seen: Set<String> = []
+        return files.compactMap { path in
+            guard let checkpoint = loadCheckpoint(at: path, directory: directory) else { return nil }
+            let identity = checkpoint.revisionID ?? "latest"
+            return seen.insert(identity).inserted ? checkpoint : nil
+        }.sorted {
+            if $0.totalUpdatesCompleted != $1.totalUpdatesCompleted { return $0.totalUpdatesCompleted > $1.totalUpdatesCompleted }
+            return $0.modifiedAt > $1.modifiedAt
+        }
+    }
+
     func loadCheckpoints() throws -> [TrainingCheckpoint] {
         let runs = projectFolder.appendingPathComponent("runs", isDirectory: true)
         guard FileManager.default.fileExists(atPath: runs.path) else { return [] }
         return try FileManager.default.contentsOfDirectory(at: runs, includingPropertiesForKeys: nil).compactMap { directory in
             guard (try? TrainingRunFiles.ownedRun(directory, projectFolder: projectFolder)) != nil else { return nil }
-            let path = directory.appendingPathComponent("checkpoint.json")
-            guard let data = try? Data(contentsOf: path),
+            return loadCheckpoint(at: directory.appendingPathComponent("checkpoint.json"), directory: directory)
+                ?? (try? loadCheckpointVersions(directory: directory).first)
+        }.sorted { $0.modifiedAt > $1.modifiedAt }
+    }
+
+    private func loadCheckpoint(at path: URL, directory: URL) -> TrainingCheckpoint? {
+            guard let file = try? TrainingRunFiles.containedFile(path.lastPathComponent, directory: directory),
+                  let data = try? Data(contentsOf: file),
                   let descriptor = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   descriptor["schema"] as? String == "loom-factory-checkpoint-v1",
                   descriptor["project_id"] as? String == document.id,
@@ -58,7 +84,12 @@ extension LoomProject {
                   let native = try? TrainingRunFiles.nativeArchitecture(from: descriptor, map: map),
                   native.identifier == architectureID, native.width == width, native.blocks == blocks,
                   !native.isCompact || (scalarLoss == .linearDetailV1 && size % 8 == 0) else { return nil }
-            let modified = (try? path.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            if path.lastPathComponent != "checkpoint.json" {
+                guard let id = descriptor["checkpoint_id"] as? String,
+                      (try? CheckpointArchive.filename(id)) == path.lastPathComponent else { return nil }
+            }
+            let modified = (descriptor["saved_at"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) }
+                ?? (try? path.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
             return TrainingCheckpoint(directory: directory, datasetID: datasetID, map: map, modelWidth: width,
                 modelBlocks: blocks, modelArchitecture: architectureID, imageSize: size, exaggerateFeatures: savedSettings["exaggerate_features"] as? Bool ?? false,
                 epochsCompleted: descriptor["epochs_completed"] as? Int ?? 0, status: descriptor["status"] as? String ?? "saved", modifiedAt: modified,
@@ -68,8 +99,7 @@ extension LoomProject {
                 priorUpdatesCompleted: descriptor["prior_updates"] as? Int ?? 0,
                 trainingElapsedSeconds: (descriptor["elapsed_seconds"] as? Double).map {
                     $0 + (descriptor["prior_duration_seconds"] as? Double ?? 0)
-                })
-        }.sorted { $0.modifiedAt > $1.modifiedAt }
+                }, revisionID: descriptor["checkpoint_id"] as? String)
     }
 }
 
@@ -138,8 +168,8 @@ final class TrainingRunControl: @unchecked Sendable {
 
 public struct TrainingSavedStop: Error, Sendable {}
 
-/// Immutable tensor files are published by one atomic descriptor replacement.
-/// A failed write leaves the last checkpoint descriptor and tensors intact.
+/// Every successful save keeps its immutable descriptor and tensor revisions.
+/// The atomic checkpoint.json alias continues to identify the latest save.
 enum TrainingCheckpointFiles {
     static func write(weights: [String: NativeTensor], optimizer: [String: NativeTensor],
                       bestWeights: [String: NativeTensor]? = nil,
@@ -151,7 +181,6 @@ enum TrainingCheckpointFiles {
         let optimizerURL = directory.appendingPathComponent(optimizerName)
         let bestName = "best-\(revision).safetensors"
         let bestURL = directory.appendingPathComponent(bestName)
-        let old = TrainingRunFiles.optionalJSON(directory.appendingPathComponent("checkpoint.json"))
         var committed = false
         defer {
             if !committed {
@@ -163,6 +192,7 @@ enum TrainingCheckpointFiles {
         try NativeWeights.write(weights, to: weightsURL, metadata: ["schema": "loom-factory-checkpoint-v1"])
         try NativeWeights.write(optimizer, to: optimizerURL, metadata: ["schema": "loom-factory-optimizer-v1"])
         var value = descriptor
+        value["checkpoint_id"] = revision
         value["weights_path"] = weightsName; value["optimizer_path"] = optimizerName
         value["weights_sha256"] = try TrainingRunFiles.sha256(weightsURL)
         value["optimizer_sha256"] = try TrainingRunFiles.sha256(optimizerURL)
@@ -171,15 +201,11 @@ enum TrainingCheckpointFiles {
             value["best_weights_path"] = bestName
             value["best_weights_sha256"] = try TrainingRunFiles.sha256(bestURL)
         }
-        try NativeFactoryTraining.writeJSON(value, to: directory.appendingPathComponent("checkpoint.json"))
+        guard JSONSerialization.isValidJSONObject(value) else { throw LoomError("The checkpoint descriptor contains invalid values.") }
+        try CheckpointArchive.preserveLatest(in: directory)
+        try CheckpointArchive.publish(value, revisionID: revision, in: directory)
         committed = true
-        // Only our immutable revisions may be reclaimed, after publication.
-        for key in ["weights_path", "optimizer_path", "best_weights_path"] {
-            guard let path = old?[key] as? String, !path.contains("/"),
-                  (path.hasPrefix("checkpoint-") || path.hasPrefix("optimizer-") || path.hasPrefix("best-")),
-                  let previous = try? TrainingRunFiles.containedFile(path, directory: directory) else { continue }
-            try? FileManager.default.removeItem(at: previous)
-        }
+        try NativeFactoryTraining.writeJSON(value, to: directory.appendingPathComponent("checkpoint.json"))
     }
 }
 
@@ -203,7 +229,8 @@ struct TrainingCheckpointCursor: Codable, Sendable {
     var stoppedEarly: Bool? = nil
 
     static func compatibleSettings(_ saved: [String: Any], current: [String: Any], keys: [String]? = nil) -> Bool {
-        let selected = keys ?? current.keys.filter { $0 != "checkpoint_every_epochs" }
+        let executionOnly: Set<String> = ["checkpoint_every_epochs", "requested_seed", "cache_images_in_memory", "image_cache_limit_mb"]
+        let selected = keys ?? current.keys.filter { !executionOnly.contains($0) }
         var saved = saved
         if saved["scalar_loss"] == nil, current["scalar_loss"] != nil {
             saved["scalar_loss"] = NativeScalarLoss.absoluteV1.rawValue

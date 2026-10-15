@@ -4,12 +4,14 @@ import LoomNative
 public enum TrainingNetwork: String, Codable, CaseIterable, Sendable, Identifiable {
     case pyramid = "loom-factory-material-pyramid-v1"
     case residual = "loom-factory-material-residual-v1"
+    case residualV2 = "loom-factory-material-residual-v2"
     case compactNAF = "loom-factory-material-compact-naf-v1"
     public var id: String { rawValue }
     public var displayName: String {
         switch self {
         case .pyramid: "Pyramid (experimental)"
         case .residual: "Original residual"
+        case .residualV2: "Residual v2"
         case .compactNAF: "Compact NAF (comparison)"
         }
     }
@@ -17,7 +19,8 @@ public enum TrainingNetwork: String, Codable, CaseIterable, Sendable, Identifiab
     public var detail: String {
         switch self {
         case .pyramid: "Downsamples learned features. Saved brick models show sampling-grid artifacts; use only for controlled comparisons."
-        case .residual: "Runs every layer at native resolution without downsampling or upsampling feature grids."
+        case .residual: "Runs every layer at native resolution. Its ReLU branches can become inactive in long training runs."
+        case .residualV2: "Native-resolution residual layers with a nonzero negative activation gradient. Starts new weights; saved original models retain their original behavior."
         case .compactNAF: "Earlier fast design with reflection padding, full-resolution skips and a linear output. Compare whole-material detail before choosing it."
         }
     }
@@ -73,9 +76,16 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     public var flipCrops: Bool
     public var rotateCrops: Bool
     public var exaggerateFeatures: Bool
-    /// -1 chooses a system random seed once when a fresh run starts. Saved run
-    /// settings contain the resolved nonnegative seed for reproducible replay.
+    /// -1 chooses a new system seed at every start or continuation and resets optimizer and sampler state.
     public var seed: Int
+    /// The user preference, retained separately from the resolved seed in run receipts.
+    public var requestedSeed: Int?
+    public var cacheImagesInMemory: Bool
+    /// A bounded decoded-pixel cache. Images load on demand; larger datasets evict older entries.
+    public var imageCacheLimitMB: Int
+    public static var recommendedImageCacheLimitMB: Int {
+        min(16 * 1024, max(512, Int(ProcessInfo.processInfo.physicalMemory / 4 / (1024 * 1024))))
+    }
     public var modelArchitecture: String
     /// Immutable training objective; inference architecture and pixels stay unchanged.
     public var scalarLoss: NativeScalarLoss
@@ -121,12 +131,15 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
                 validationFraction: Double = 0.1, validationSeed: Int = 42, earlyStoppingPatience: Int = 0,
                 exportBestWeights: Bool = true, checkpointEveryEpochs: Int = 1,
                 modelArchitecture: String = NativeArchitecture.identifier,
-                scalarLoss: NativeScalarLoss = .logitCrossEntropyV2) {
+                scalarLoss: NativeScalarLoss = .logitCrossEntropyV2,
+                cacheImagesInMemory: Bool = true, imageCacheLimitMB: Int = TrainingSettings.recommendedImageCacheLimitMB) {
         self.imageSize = imageSize; self.sourceResolutionLevels = sourceResolutionLevels
         self.epochs = epochs; self.batchSize = batchSize
         self.learningRate = learningRate; self.shuffleEachEpoch = shuffleEachEpoch
         self.flipCrops = flipCrops; self.rotateCrops = rotateCrops
         self.exaggerateFeatures = exaggerateFeatures; self.seed = seed; self.modelWidth = modelWidth
+        self.requestedSeed = nil
+        self.cacheImagesInMemory = cacheImagesInMemory; self.imageCacheLimitMB = imageCacheLimitMB
         self.modelArchitecture = modelArchitecture
         self.scalarLoss = modelArchitecture == NativeArchitecture.compactIdentifier && scalarLoss == .logitCrossEntropyV2 ? .linearDetailV1 : scalarLoss
         self.continueLatestWeights = continueLatestWeights; self.modelBlocks = modelBlocks
@@ -155,6 +168,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     }
 
     mutating func resolveRandomSeedForRun<R: RandomNumberGenerator>(using generator: inout R) {
+        if requestedSeed == nil { requestedSeed = seed }
         guard seed == -1 else { return }
         seed = Int.random(in: 0...Int(Int32.max), using: &generator)
     }
@@ -179,7 +193,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
             return
         }
         if map != .normal { scalarLoss = .logitCrossEntropyV2 }
-        guard modelArchitecture != NativeArchitecture.identifier else { return }
+        guard modelArchitecture != NativeArchitecture.identifier, modelArchitecture != TrainingNetwork.residualV2.rawValue else { return }
         let budget = parameterCount(map: map)
         modelArchitecture = NativeArchitecture.identifier
         guard budget > 0 else { modelWidth = 164; return }
@@ -196,6 +210,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
         if !(0...3).contains(sourceResolutionLevels) { return "Source resolution levels must be one to three, or all available." }
         if !(1...100_000).contains(epochs) { return "Epochs must be between 1 and 100,000." }
         if !(1...64).contains(batchSize) { return "Batch size must be between 1 and 64." }
+        if cacheImagesInMemory && (imageCacheLimitMB < 1 || imageCacheLimitMB > Int.max / (1024 * 1024)) { return "Image cache limit must be a positive number of MiB." }
         if !learningRate.isFinite || !(0 < learningRate && learningRate <= 1) { return "Learning rate must be greater than zero and at most one." }
         if !(8...256).contains(modelWidth) || !(1...12).contains(modelBlocks) { return "Model width must be 8–256 and residual blocks must be 1–12." }
         if TrainingNetwork(rawValue: modelArchitecture) == nil { return "This model uses an unsupported network architecture. Choose a supported network." }
@@ -231,6 +246,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case imageSize, sourceResolutionLevels, epochs, batchSize, learningRate, shuffleEachEpoch, flipCrops, rotateCrops, exaggerateFeatures, seed, modelWidth, continueLatestWeights
+        case requestedSeed, cacheImagesInMemory, imageCacheLimitMB
         case modelArchitecture, scalarLoss, modelBlocks, optimizer, weightDecay, beta1, beta2, momentum, gradientAccumulationSteps, gradientClipNorm
         case gradientClipPolicy, gradientClipWarmupStartNorm, gradientClipWarmupUpdates
         case learningRateSchedule, warmupEpochs, minimumLearningRateRatio, cropRefresh, augmentationRefresh, device
@@ -253,6 +269,9 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
         // Missing seeds belonged to the original deterministic seed-zero
         // contract; only newly constructed settings default to system random.
         seed = try c.decodeIfPresent(Int.self, forKey: .seed) ?? 0
+        requestedSeed = try c.decodeIfPresent(Int.self, forKey: .requestedSeed)
+        cacheImagesInMemory = try c.decodeIfPresent(Bool.self, forKey: .cacheImagesInMemory) ?? d.cacheImagesInMemory
+        imageCacheLimitMB = try c.decodeIfPresent(Int.self, forKey: .imageCacheLimitMB) ?? d.imageCacheLimitMB
         // Absence identifies the original full-resolution architecture. Never
         // reinterpret an existing run's width as a pyramid channel count.
         modelArchitecture = try c.decodeIfPresent(String.self, forKey: .modelArchitecture) ?? NativeArchitecture.identifier

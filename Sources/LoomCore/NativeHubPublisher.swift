@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import LoomNative
 
 /// Uses the Hub's preupload, Git LFS and NDJSON commit interfaces directly.
 /// Protocol references: huggingface_hub/_commit_api.py and huggingface_hub/lfs.py.
@@ -145,15 +146,17 @@ public enum NativeHubPublisher {
                 case .file(let source):
                     let input = try FileHandle(forReadingFrom: source); defer { try? input.close() }
                     var remainder = Data()
-                    while let bytes = try input.read(upToCount: 3 * 1_048_576), !bytes.isEmpty {
+                    while try autoreleasepool(invoking: { () throws -> Bool in
                         try Task.checkCancellation()
+                        guard let bytes = try input.read(upToCount: 3 * 1_048_576), !bytes.isEmpty else { return false }
                         remainder.append(bytes)
                         let count = remainder.count - remainder.count % 3
                         if count > 0 {
                             try output.write(contentsOf: Data(remainder.prefix(count).base64EncodedString().utf8))
                             remainder.removeFirst(count)
                         }
-                    }
+                        return true
+                    }) {}
                     if !remainder.isEmpty { try output.write(contentsOf: Data(remainder.base64EncodedString().utf8)) }
                 case .bytes(let bytes): try output.write(contentsOf: Data(bytes.base64EncodedString().utf8))
                 }
@@ -183,9 +186,7 @@ private struct HubFile: Sendable {
             size = (attributes[.size] as! NSNumber).uint64Value; modified = attributes[.modificationDate] as? Date
             let input = try FileHandle(forReadingFrom: file); defer { try? input.close() }
             sample = try input.read(upToCount: 512) ?? Data(); try input.seek(toOffset: 0)
-            var digest = SHA256()
-            while let bytes = try input.read(upToCount: 1_048_576), !bytes.isEmpty { try Task.checkCancellation(); digest.update(data: bytes) }
-            sha256 = digest.finalize().map { String(format: "%02x", $0) }.joined()
+            sha256 = try NativeFileHash.sha256(file) { try Task.checkCancellation() }
         }
     }
     func verifyUnchanged() throws {
@@ -320,11 +321,13 @@ private struct HubClient: Sendable {
         let output = try FileHandle(forWritingTo: destination); defer { try? output.close() }
         var remaining = length
         while remaining > 0 {
-            try Task.checkCancellation()
-            guard let bytes = try input.read(upToCount: Int(min(remaining, 1_048_576))), !bytes.isEmpty else {
-                throw LoomError("The package changed while its upload was being prepared.")
+            try autoreleasepool {
+                try Task.checkCancellation()
+                guard let bytes = try input.read(upToCount: Int(min(remaining, 1_048_576))), !bytes.isEmpty else {
+                    throw LoomError("The package changed while its upload was being prepared.")
+                }
+                try output.write(contentsOf: bytes); remaining -= UInt64(bytes.count)
             }
-            try output.write(contentsOf: bytes); remaining -= UInt64(bytes.count)
         }
     }
 }

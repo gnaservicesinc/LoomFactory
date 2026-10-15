@@ -100,11 +100,7 @@ private func sysctlString(_ key: String) -> String {
     return String(decoding: bytes.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
 }
 private func hash(_ url: URL) throws -> String {
-    let file = try FileHandle(forReadingFrom: url)
-    defer { try? file.close() }
-    var digest = SHA256()
-    while let chunk = try file.read(upToCount: 4 * 1024 * 1024), !chunk.isEmpty { digest.update(data: chunk) }
-    return digest.finalize().map { String(format: "%02x", $0) }.joined()
+    try NativeFileHash.sha256(url)
 }
 private func hash(_ weights: [String: NativeTensor]) -> String {
     var digest = SHA256()

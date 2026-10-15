@@ -49,10 +49,10 @@ public enum NativeImages {
     /// map targets without repeatedly decoding originals between epochs.
     public static let decodedPixelCacheByteLimit = Int(min(UInt64(16 * 1024 * 1024 * 1024),
         max(UInt64(512 * 1024 * 1024), ProcessInfo.processInfo.physicalMemory / 4)))
-    private static let rawPixelCache = NativeRawPixelCache(limit: decodedPixelCacheByteLimit)
+    private static let defaultImageCache = NativeImageCache(policy: .bounded(byteLimit: decodedPixelCacheByteLimit))
 
     /// Releases the bounded, in-memory cache of decoded original numeric codes.
-    public static func clearDecodedPixelCache() { rawPixelCache.clear() }
+    public static func clearDecodedPixelCache() { defaultImageCache.clear() }
 
     public static func readRGB(from url: URL, cancellation: NativeCancellation? = nil) throws -> NativeImage {
         let image = try decode(url, cancellation: cancellation)
@@ -113,14 +113,15 @@ public enum NativeImages {
     /// The cache stores original numeric codes, rather than full-size HWC floats.
     public static func pair(inputURL: URL, targetURL: URL, transform: NativeCropTransform,
                             mapKind: String, normalConvention: String = "OpenGL", exaggerate: Bool = false,
-                            cancellation: NativeCancellation? = nil) throws -> NativeImagePair {
-        let inputStorage = try storedPixels(inputURL, cancellation: cancellation)
-        let targetStorage = try storedPixels(targetURL, cancellation: cancellation)
+                            cancellation: NativeCancellation? = nil, imageCache: NativeImageCache? = nil) throws -> NativeImagePair {
+        let cache = imageCache ?? defaultImageCache
+        let inputStorage = try storedPixels(inputURL, cancellation: cancellation, imageCache: cache)
+        let targetStorage = try storedPixels(targetURL, cancellation: cancellation, imageCache: cache)
         guard inputStorage.width == targetStorage.width, inputStorage.height == targetStorage.height else {
             throw NativeIOError.invalid("Paired maps need the same native dimensions.")
         }
-        try validateStoredPixels(inputStorage, url: inputURL, role: "rgb", cancellation: cancellation)
-        try validateStoredPixels(targetStorage, url: targetURL, role: mapKind, cancellation: cancellation)
+        try validateStoredPixels(inputStorage, url: inputURL, role: "rgb", cancellation: cancellation, imageCache: cache)
+        try validateStoredPixels(targetStorage, url: targetURL, role: mapKind, cancellation: cancellation, imageCache: cache)
         let input = try rgb(numericPixels(inputStorage, region: transform, url: inputURL, cancellation: cancellation),
                             url: inputURL, cancellation: cancellation)
         let teaching = try target(numericPixels(targetStorage, region: transform, url: targetURL, cancellation: cancellation),
@@ -199,8 +200,9 @@ public enum NativeImages {
         try numericPixels(storedPixels(url, cancellation: cancellation), region: nil, url: url, cancellation: cancellation)
     }
 
-    private static func storedPixels(_ url: URL, cancellation: NativeCancellation?) throws -> NativeRawPixels {
+    private static func storedPixels(_ url: URL, cancellation: NativeCancellation?, imageCache: NativeImageCache? = nil) throws -> NativeRawPixels {
         try cancellation?.check()
+        let rawPixelCache = (imageCache ?? defaultImageCache).rawPixels
         let key = try NativeRawPixelKey(url)
         if let stored = rawPixelCache.read(key) { return stored }
         let supported = ["png", "jpg", "jpeg", "tif", "tiff", "exr", "heic", "heif", "bmp", "webp"]
@@ -309,7 +311,8 @@ public enum NativeImages {
     }
 
     private static func validateStoredPixels(_ image: NativeRawPixels, url: URL, role: String,
-                                             cancellation: NativeCancellation?) throws {
+                                             cancellation: NativeCancellation?, imageCache: NativeImageCache) throws {
+        let rawPixelCache = imageCache.rawPixels
         guard ["rgb", "depth", "roughness", "normal"].contains(role) else { throw NativeIOError.invalid("Unknown image role: \(role).") }
         if role == "normal", image.channels < 3 { throw NativeIOError.invalid("Normal targets need three color channels.") }
         if rawPixelCache.isValidated(image.key, role: role) { return }
@@ -376,8 +379,9 @@ final class NativeRawPixelCache: @unchecked Sendable {
     private let validationLimit: Int
     private var bytes = 0
     init(limit: Int, validationLimit: Int = 4096) {
-        self.limit = limit; self.validationLimit = max(1, validationLimit)
+        self.limit = max(0, limit); self.validationLimit = max(1, validationLimit)
     }
+    var retainedByteCount: Int { lock.withLock { bytes } }
     func clear() { lock.withLock {
         storage.removeAll(); order.removeAll(); validation.removeAll(); validationOrder.removeAll(); bytes = 0
     } }

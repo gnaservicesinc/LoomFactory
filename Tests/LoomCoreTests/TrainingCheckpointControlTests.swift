@@ -49,7 +49,7 @@ final class TrainingCheckpointControlTests: XCTestCase {
         do { _ = try await control.request(stop: true); XCTFail("Finished run cannot save") } catch {}
     }
 
-    func testCheckpointPublicationPreservesLastGoodOnFailureAndPrunesSuccessfulRevisions() throws {
+    func testCheckpointPublicationPreservesLastGoodOnFailureAndEverySuccessfulRevision() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("checkpoint-publication-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -66,13 +66,16 @@ final class TrainingCheckpointControlTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: file), before)
         let oldWeights = directory.appendingPathComponent(try XCTUnwrap(old["weights_path"] as? String))
         XCTAssertEqual(try NativeWeights.read(from: oldWeights), weights)
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).count, 4)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).count, 5)
         try TrainingCheckpointFiles.write(weights: weights, optimizer: optimizer,
             descriptor: ["updates": 2], directory: directory)
         let saved = try NativeFactoryTraining.json(file)
         XCTAssertEqual(saved["updates"] as? Int, 2)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: oldWeights.path))
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).count, 3)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: oldWeights.path))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil).count, 8)
+        let archives = try CheckpointArchive.descriptors(in: directory).filter { $0.lastPathComponent != "checkpoint.json" }
+        XCTAssertEqual(archives.count, 2)
+        XCTAssertEqual(try archives.map { try NativeFactoryTraining.json($0)["updates"] as? Int }.compactMap { $0 }.sorted(), [1, 2])
         let currentWeights = directory.appendingPathComponent(try XCTUnwrap(saved["weights_path"] as? String))
         XCTAssertEqual(saved["weights_sha256"] as? String, try TrainingRunFiles.sha256(currentWeights))
     }
@@ -85,6 +88,11 @@ final class TrainingCheckpointControlTests: XCTestCase {
             current: ["epochs": 600, "checkpoint_every_epochs": 1, "batch_size": 2, "seed": 3]))
         XCTAssertFalse(TrainingCheckpointCursor.compatibleSettings(saved,
             current: ["epochs": 500, "checkpoint_every_epochs": 100, "batch_size": 1, "seed": 3]))
+        var withExecutionSettings = saved
+        withExecutionSettings["requested_seed"] = -1
+        withExecutionSettings["cache_images_in_memory"] = 1
+        withExecutionSettings["image_cache_limit_mb"] = 4096
+        XCTAssertTrue(TrainingCheckpointCursor.compatibleSettings(saved, current: withExecutionSettings))
     }
 
     func testLegacyCheckpointLossDefaultsPreventMixingObjectiveHistories() {

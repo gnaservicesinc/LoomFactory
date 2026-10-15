@@ -18,7 +18,7 @@ struct FactoryPreparedBatch: Sendable {
     let preparationSeconds: Double
 
     static func prepare(_ batch: FactoryImageBatch, map: MapRole, settings: TrainingSettings,
-                        cancellation: NativeCancellation) throws -> FactoryPreparedBatch {
+                        cancellation: NativeCancellation, imageCache: NativeImageCache? = nil) throws -> FactoryPreparedBatch {
         let start = ProcessInfo.processInfo.systemUptime
         var input: [Float] = [], target: [Float] = []
         input.reserveCapacity(batch.pairs.count * 3 * settings.imageSize * settings.imageSize)
@@ -27,7 +27,7 @@ struct FactoryPreparedBatch: Sendable {
             try cancellation.check()
             let pixels = try NativeImages.pair(inputURL: pair.input.url, targetURL: pair.target.url, transform: crop,
                 mapKind: map.rawValue, normalConvention: pair.target.normalConvention ?? "OpenGL",
-                exaggerate: settings.exaggerateFeatures, cancellation: cancellation)
+                exaggerate: settings.exaggerateFeatures, cancellation: cancellation, imageCache: imageCache)
             input.append(contentsOf: pixels.input.values); target.append(contentsOf: pixels.target.values)
         }
         return FactoryPreparedBatch(input: input, target: target,

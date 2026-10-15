@@ -34,6 +34,9 @@ struct ModelTestView: View {
                 }
             }
             if let result = model.modelTestResult {
+                if let previous = model.previousTestResult {
+                    ModelTestCheckpointComparison(first: previous, second: result)
+                }
                 ModelTestResultView(result: result, imageZoom: $imageZoom,
                                     saveOutput: { model.saveModelTestOutput(format: .float32EXR) },
                                     savePNGPreview: { model.saveModelTestOutput(format: .png16) },
@@ -79,6 +82,20 @@ struct ModelTestView: View {
 
     private var modelSelection: some View {
         VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 20) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Category").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                    Picker("Category", selection: Binding(get: { model.testDatasetID }, set: { model.setModelTestDataset($0) })) {
+                        ForEach(model.snapshot?.datasets ?? []) { dataset in Text(dataset.name).tag(dataset.id) }
+                    }.labelsHidden().accessibilityIdentifier("modelTest.category")
+                }.frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Map").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                    Picker("Map", selection: Binding(get: { model.testMap }, set: { model.setModelTestMap($0) })) {
+                        ForEach(MapRole.targets, id: \.self) { Text($0.displayName).tag($0) }
+                    }.labelsHidden().accessibilityIdentifier("modelTest.map")
+                }.frame(width: 210, alignment: .leading)
+            }
             HStack(alignment: .top, spacing: 20) {
             VStack(alignment: .leading, spacing: 7) {
                 Text("Saved run").font(.caption.weight(.medium)).foregroundStyle(.secondary)
@@ -105,12 +122,35 @@ struct ModelTestView: View {
                 }.labelsHidden().accessibilityIdentifier("modelTest.weights")
             }.frame(width: 210, alignment: .leading)
             }
+            if model.effectiveTestWeightSource == .checkpoint {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Checkpoint").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                    Picker("Checkpoint", selection: Binding(get: { model.testCheckpointID ?? "" }, set: { model.setModelTestCheckpoint($0.isEmpty ? nil : $0) })) {
+                        Text("Latest saved checkpoint").tag("")
+                        ForEach(model.testCheckpointVersions.filter { $0.revisionID != nil }) { checkpoint in
+                            Text("Epoch \(checkpoint.totalEpochsCompleted) · update \(checkpoint.totalUpdatesCompleted) · \(checkpoint.modifiedAt.formatted(date: .abbreviated, time: .shortened))")
+                                .tag(checkpoint.revisionID ?? "")
+                        }
+                    }.labelsHidden().accessibilityIdentifier("modelTest.checkpoint")
+                    HStack(spacing: 12) {
+                        Text("\(model.testCheckpointVersions.count.formatted()) saved checkpoints in this run")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        if let version = model.selectedTestVersion {
+                            Button("Use selected checkpoint as model", systemImage: "checkmark.circle") {
+                                model.useCheckpointAsModel(version, checkpointID: model.testCheckpointID)
+                            }.disabled(model.busy).controlSize(.small)
+                                .accessibilityIdentifier("modelTest.useCheckpoint")
+                        }
+                    }
+                }
+            }
             if let version = model.selectedTestVersion {
                 HStack(spacing: 16) {
                     if version.artifact != nil {
                         Text("Exported model: \(version.exportedEpochsCompleted.formatted()) completed epochs")
                     }
-                    if let checkpoint = version.checkpoint {
+                    if let checkpoint = model.selectedTestCheckpoint {
                         Text("Checkpoint: \(checkpoint.totalEpochsCompleted.formatted()) completed epochs")
                     }
                 }.font(.caption).foregroundStyle(.secondary)
@@ -137,6 +177,31 @@ struct ModelTestView: View {
             Text("You can test any material, including an image outside this project. Original files remain untouched; no paired target is needed.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+struct ModelTestCheckpointComparison: View {
+    let first: ModelTestResult
+    let second: ModelTestResult
+
+    var body: some View {
+        FactoryPanel("Checkpoint A/B", subtitle: "The previous and current saved weights on the same unchanged input, shown at the same scale.") {
+            HStack(alignment: .top, spacing: 18) {
+                output(first, label: "A · Previous")
+                output(second, label: "B · Current")
+            }
+        }.accessibilityIdentifier("modelTest.checkpointComparison")
+    }
+
+    private func output(_ result: ModelTestResult, label: String) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(label).font(.subheadline.weight(.medium))
+            Text(result.source == .model ? "Exported model" : "Checkpoint \(result.checkpointID?.prefix(12) ?? "latest")")
+                .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            FactoryImage(url: result.previewURL, revision: result.directory.path, maximumPixels: max(result.width, result.height),
+                interpolation: .none, applyOrientationTransform: false)
+                .frame(height: 400).clipShape(RoundedRectangle(cornerRadius: 7))
+        }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -230,6 +295,9 @@ struct ModelTestResultView: View {
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Text("Run \(result.runID.prefix(8)) · \(result.source == .model ? "Exported model" : "Saved checkpoint") · \(result.tileCount.formatted()) native \(result.tileSize) px tiles")
                 .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            if let checkpointID = result.checkpointID {
+                Text("Checkpoint \(checkpointID)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            }
             Text(result.note).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }.accessibilityIdentifier("modelTest.result")
     }

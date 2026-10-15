@@ -21,6 +21,8 @@ enum NativeFactoryTraining {
         var tracker = TrainingProgressTracker(totalEpochs: settings.epochs, trainingImages: plan.training.count,
             validationImages: plan.validation.count, stepsPerEpoch: stepsPerEpoch,
             checkpointEveryEpochs: settings.checkpointEveryEpochs, startSeconds: clock())
+        let imageCache = NativeImageCache(policy: settings.cacheImagesInMemory
+            ? .bounded(byteLimit: settings.imageCacheLimitMB * 1024 * 1024) : .stream)
         let preparationDepth = min(2, max(1, preparationCapacity))
         let preparation = NativePreparationPipeline<FactoryPreparedBatch>(cancellation: cancellation, capacity: preparationDepth)
         let runMetadata = try TrainingRunFiles.metadata(at: output)
@@ -29,7 +31,7 @@ enum NativeFactoryTraining {
             versionJSON["lineage"] = ["parent_run_id": lineage.parentRunID, "source": lineage.source.rawValue,
                 "weights_sha256": lineage.weightsSHA256]
         }
-        defer { preparation.close(); NativeImages.clearDecodedPixelCache() }
+        defer { preparation.close(); imageCache.clear(); NativeImages.clearDecodedPixelCache() }
         let logURL = output.appendingPathComponent("training.log")
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
         let log = try FileHandle(forWritingTo: logURL); defer { try? log.close() }
@@ -80,17 +82,17 @@ enum NativeFactoryTraining {
                        "planned_training_pair_uses": plan.trainingSampleVisits, "planned_optimizer_updates": plan.totalOptimizerUpdates,
                        "samples": all.map { ["id": $0.id, "input": $0.input.url.path, "target": $0.target.url.path,
                            "split": validationIDs.contains($0.id) ? "validation" : "training"] }]) { _, new in new }
+        request["effective_image_cache_bytes"] = imageCache.effectiveByteLimit
+        request["image_loading"] = "lazy-bounded-prefetch"
+        request["resume_state_policy"] = settings.requestedSeed == -1 ? "fresh-optimizer-and-sampler" : "restore-compatible-state"
         if let resume { request["resume_weights"] = resume.path }
         try writeJSON(request, to: output.appendingPathComponent("request.json"))
         emit(.init(type: "status", message: "Checking source images…"))
-        var proofs: [String: SourceProof] = [:]
+        let proofs = try NativeSourceProofStore(urls: all.flatMap { [$0.input.url, $0.target.url] }, cancellation: cancellation)
         for (index, pair) in all.enumerated() {
             tracker.begin(stage: .checkingSources, image: pair.input.trainingDisplayName, now: clock())
             emit(.init(type: "status", message: "Checking image \(index + 1) of \(all.count): \(pair.input.trainingDisplayName)"))
             try cancellation.check(); try checkTags(pair, dataset: dataset.name, map: map, root: root)
-            for image in [pair.input, pair.target] where proofs[image.url.path] == nil {
-                proofs[image.url.path] = try SourceProof(image.url, cancellation: cancellation)
-            }
         }
         tracker.begin(stage: .preparingModel, now: clock())
         emit(.init(type: "status", message: "Preparing model…"))
@@ -109,9 +111,13 @@ enum NativeFactoryTraining {
         var sourceDescriptor: [String: Any]?
         var sourceKind: TrainingWeightSource?
         var sourceRunID: String?
-        let fingerprint = SHA256.hash(data: Data(all.map { pair in
-            "\(pair.id)|\(pair.input.width)x\(pair.input.height)|\(proofs[pair.input.url.path]!.hash)|\(proofs[pair.target.url.path]!.hash)|\(validationIDs.contains(pair.id))"
-        }.sorted().joined(separator: "\n").utf8)).map { String(format: "%02x", $0) }.joined()
+        var fingerprint: String?
+        func sourceFingerprint() throws -> String {
+            if let fingerprint { return fingerprint }
+            let value = try proofs.fingerprint(pairs: all, validationIDs: validationIDs, cancellation: cancellation)
+            fingerprint = value
+            return value
+        }
         if let resume {
             let resolved = try TrainingRunFiles.resume(weights: resume, projectFolder: root.appendingPathComponent(".loom-factory"),
                 projectID: projectID, datasetID: dataset.id, map: map, settings: settings,
@@ -123,8 +129,8 @@ enum NativeFactoryTraining {
                 let folder = resume.deletingLastPathComponent()
                 let descriptor = try TrainingRunFiles.descriptor(at: folder, source: .checkpoint)
                 let saved = descriptor["settings"] as? [String: Any] ?? [:]
-                let optimizerKeys = ["optimizer", "weight_decay", "beta1", "beta2", "momentum", "scalar_loss"]
-                if let path = descriptor["optimizer_path"] as? String,
+                let optimizerKeys = ["optimizer", "weight_decay", "beta1", "beta2", "momentum", "scalar_loss", "seed", "exaggerate_features", "image_size"]
+                if settings.requestedSeed != -1, let path = descriptor["optimizer_path"] as? String,
                    TrainingCheckpointCursor.compatibleSettings(saved, current: settingsJSON(settings), keys: optimizerKeys) {
                     let file = try TrainingRunFiles.containedFile(path, directory: folder)
                     guard descriptor["optimizer_sha256"] as? String == (try sha(file)),
@@ -137,7 +143,7 @@ enum NativeFactoryTraining {
                        TrainingCheckpointCursor.compatibleSettings(saved, current: settingsJSON(settings)) {
                         let cursor = try JSONDecoder().decode(TrainingCheckpointCursor.self,
                             from: JSONSerialization.data(withJSONObject: object))
-                        guard cursor.sourceFingerprint == fingerprint else {
+                        guard try cursor.sourceFingerprint == sourceFingerprint() else {
                             throw LoomError("The source pairs or pixels changed since this checkpoint. Continue exported model weights for a new training plan, or restore the checkpoint's original source files.")
                         }
                         guard cursor.epoch >= 0, cursor.epoch <= settings.epochs,
@@ -170,7 +176,8 @@ enum NativeFactoryTraining {
             emit(.init(type: "status", message: restoredCursor != nil
                 ? "Resuming checkpoint with optimizer state at epoch \(restoredCursor!.epoch + 1), image \(restoredCursor!.nextWindow + 1)"
                 : optimizerState != nil ? "Continuing saved weights and optimizer state with a new epoch schedule"
-                : "Continuing saved weights with a fresh optimizer (legacy checkpoint or changed optimizer settings)"))
+                : settings.requestedSeed == -1 ? "Continuing saved weights with a fresh optimizer, shuffle and augmentation state (random seed -1)"
+                : "Continuing saved weights with a fresh optimizer (changed seed, targets or optimizer settings)"))
         }
         let session = try NativeTrainingSession(architecture: architecture, options: options, seed: UInt64(settings.seed),
             weights: initial, optimizerState: optimizerState, initialUpdateCount: restoredUpdateCount,
@@ -222,15 +229,23 @@ enum NativeFactoryTraining {
                 gradientNorm: previous["mean_gradient_norm"] as? Double,
                 gradientClipThreshold: previous["gradient_clip_threshold"] as? Double), inheritedOffsets: false)
         }
+        emit(.init(type: "status", message: "Seed \(settings.seed) · \(settings.requestedSeed == -1 ? "new system seed, fresh optimizer and sampler" : "fixed seed, compatible state may resume") · \(imageCache.effectiveByteLimit == 0 ? "streaming images" : "decoded image cache up to \(imageCache.effectiveByteLimit / (1024 * 1024)) MiB")"))
         emit(.init(type: "started", message: "Training \(dataset.name) · \(inherited.epochs + settings.epochs) total epochs · \(inherited.updates + totalUpdates) total updates", update: update, totalUpdates: totalUpdates,
                    parameterCount: settings.parameterCount(map: map), effectiveBatchSize: settings.effectiveBatchSize))
         func verify(_ pair: TrainingPair) throws {
             try cancellation.check(); try checkTags(pair, dataset: dataset.name, map: map, root: root)
-            for image in [pair.input, pair.target] { try proofs[image.url.path]!.check(image.url) }
+            for image in [pair.input, pair.target] { try proofs.check(image.url) }
         }
         func checkpoint(_ status: String, epochComplete: Bool = true) throws {
             guard update > 0 else { return }
             let checkpointStart = clock()
+            // Preserve early weights without waiting for untouched source files.
+            // Exact image-position resume is available once all source proofs
+            // are ready; otherwise these weights continue with a new schedule.
+            if fingerprint == nil {
+                fingerprint = proofs.fingerprintIfComplete(pairs: all, validationIDs: validationIDs)
+            }
+            if let fingerprint { cursor?.sourceFingerprint = fingerprint }
             tracker.begin(stage: .checkpointing,
                           index: epochComplete && !history.isEmpty ? plan.training.count : nil, now: checkpointStart)
             emit(.init(type: "status", message: "Saving checkpoint at total update \(inherited.updates + update)…", update: update, totalUpdates: totalUpdates))
@@ -239,14 +254,15 @@ enum NativeFactoryTraining {
                 "architecture": architecture.identifier, "architecture_config": architectureJSON(architecture),
                 "settings": settingsJSON(settings), "epochs_completed": history.count, "updates": update, "history": history,
                 "optimizer_updates": session.updateCount, "backend": "swift-mpsgraph-metal",
-                "continuation": "weights, optimizer state and completed-update epoch position",
+                "continuation": fingerprint == nil ? "weights and optimizer; new epoch schedule until source proofs are complete"
+                    : "weights, optimizer state and completed-update epoch position",
                 "saved_at": ISO8601DateFormatter().string(from: Date())]
             descriptor.merge(inherited.json) { _, new in new }
             let measured = tracker.snapshot(now: clock())
             descriptor["completed_images"] = measured.completedImages - inherited.images
             descriptor["elapsed_seconds"] = measured.elapsedSeconds - inherited.elapsedSeconds
             descriptor["epoch_elapsed_seconds"] = measured.epochElapsedSeconds
-            if let cursor {
+            if let cursor, fingerprint != nil {
                 descriptor["resume_cursor"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(cursor))
             }
             descriptor.merge(versionJSON) { _, new in new }
@@ -322,14 +338,18 @@ enum NativeFactoryTraining {
                     cursor = TrainingCheckpointCursor(epoch: epoch, nextWindow: nextWindow, order: order.map(\.id), crops: epochCrops,
                         epochLoss: epochLoss, imageCount: count, epochUpdates: epochUpdates, clippedUpdates: clippedUpdates,
                         gradientNormSum: normSum, peakGradientNorm: peakNorm, augmentation: augmentation, randomState: rng.state,
-                        sourceFingerprint: fingerprint, bestLoss: bestLoss, bestEpoch: bestEpoch, staleEpochs: stale)
+                        sourceFingerprint: fingerprint ?? "", bestLoss: bestLoss, bestEpoch: bestEpoch, staleEpochs: stale)
                 }
                 updateCursor(nextWindow: firstWindow)
                 try serviceCheckpointRequest()
                 func submit(_ batch: FactoryImageBatch) throws {
                     for pair in batch.pairs { try verify(pair) }
                     try preparation.submit {
-                        try FactoryPreparedBatch.prepare(batch, map: map, settings: settings, cancellation: cancellation)
+                        for pair in batch.pairs {
+                            try proofs.ensure(pair.input.url, cancellation: cancellation)
+                            try proofs.ensure(pair.target.url, cancellation: cancellation)
+                        }
+                        return try FactoryPreparedBatch.prepare(batch, map: map, settings: settings, cancellation: cancellation, imageCache: imageCache)
                     }
                 }
                 var nextPreparationIndex = 0
@@ -352,8 +372,17 @@ enum NativeFactoryTraining {
                         emit(.init(type: "image_preparing", message: "Preparing image \(offset + 1) of \(order.count): \(batch.imageNames)",
                                    epoch: epoch + 1, update: update, totalUpdates: totalUpdates))
                         let waitingStart = clock()
-                        let prepared = try prepareAhead ? preparation.take() : FactoryPreparedBatch.prepare(batch,
-                            map: map, settings: settings, cancellation: cancellation)
+                        let prepared: FactoryPreparedBatch
+                        if prepareAhead {
+                            prepared = try preparation.take()
+                        } else {
+                            for pair in batch.pairs {
+                                try proofs.ensure(pair.input.url, cancellation: cancellation)
+                                try proofs.ensure(pair.target.url, cancellation: cancellation)
+                            }
+                            prepared = try FactoryPreparedBatch.prepare(batch, map: map, settings: settings,
+                                cancellation: cancellation, imageCache: imageCache)
+                        }
                         waitingSeconds += clock() - waitingStart
                         preparationSeconds += prepared.preparationSeconds
                         for pair in batch.pairs { try verify(pair) }
@@ -420,9 +449,11 @@ enum NativeFactoryTraining {
                         try verify(pair)
                         let crop = NativeCropTransform(x: (pair.input.width - settings.imageSize) / 2,
                             y: (pair.input.height - settings.imageSize) / 2, size: settings.imageSize)
+                        try proofs.ensure(pair.input.url, cancellation: cancellation)
+                        try proofs.ensure(pair.target.url, cancellation: cancellation)
                         let prepared = try NativeImages.pair(inputURL: pair.input.url, targetURL: pair.target.url, transform: crop,
                             mapKind: map.rawValue, normalConvention: pair.target.normalConvention ?? "OpenGL",
-                            exaggerate: settings.exaggerateFeatures, cancellation: cancellation)
+                            exaggerate: settings.exaggerateFeatures, cancellation: cancellation, imageCache: imageCache)
                         sum += Double(try session.evaluate(input: prepared.input.values, target: prepared.target.values,
                             batchSize: 1, height: settings.imageSize, width: settings.imageSize))
                     }
@@ -444,7 +475,7 @@ enum NativeFactoryTraining {
                 let stop = settings.earlyStoppingPatience > 0 && stale >= settings.earlyStoppingPatience
                 cursor = TrainingCheckpointCursor(epoch: epoch + 1, nextWindow: 0, order: [], crops: [], epochLoss: 0,
                     imageCount: 0, epochUpdates: 0, clippedUpdates: 0, gradientNormSum: 0, peakGradientNorm: 0,
-                    augmentation: augmentation, randomState: rng.state, sourceFingerprint: fingerprint,
+                    augmentation: augmentation, randomState: rng.state, sourceFingerprint: fingerprint ?? "",
                     bestLoss: bestLoss, bestEpoch: bestEpoch, staleEpochs: stale, stoppedEarly: stop)
                 emit(.init(type: "epoch_completed", message: "Epoch \(inherited.epochs + epoch + 1) complete", epoch: epoch + 1,
                     loss: epochLoss / Double(count), validationLoss: validation, update: update, totalUpdates: totalUpdates))
@@ -458,11 +489,10 @@ enum NativeFactoryTraining {
             tracker.begin(stage: .verifyingSources, now: clock())
             emit(.init(type: "status", message: "Verifying original images before export…"))
             for pair in all { try serviceCheckpointRequest(); try verify(pair) }
-            for (path, proof) in proofs {
+            try proofs.verifyAll(cancellation: cancellation) { url in
                 try serviceCheckpointRequest()
-                tracker.begin(stage: .verifyingSources, image: URL(fileURLWithPath: path).lastPathComponent, now: clock())
-                emit(.init(type: "status", message: "Verifying original: \(URL(fileURLWithPath: path).lastPathComponent)"))
-                try proof.verifyHash(URL(fileURLWithPath: path), cancellation: cancellation)
+                tracker.begin(stage: .verifyingSources, image: url.lastPathComponent, now: clock())
+                emit(.init(type: "status", message: "Verifying original: \(url.lastPathComponent)"))
             }
             try serviceCheckpointRequest()
             tracker.begin(stage: .exporting, now: clock())
@@ -480,7 +510,7 @@ enum NativeFactoryTraining {
             tracker.begin(stage: .verifyingSources, now: clock())
             emit(.init(type: "status", message: "Verifying originals after export…"))
             for pair in all { try serviceCheckpointRequest(); try verify(pair) }
-            for (path, proof) in proofs { try serviceCheckpointRequest(); try proof.verifyHash(URL(fileURLWithPath: path), cancellation: cancellation) }
+            try proofs.verifyAll(cancellation: cancellation) { _ in try serviceCheckpointRequest() }
             automaticCheckpoint("completed")
             try serviceCheckpointRequest()
             try cancellation.check()
@@ -510,7 +540,7 @@ enum NativeFactoryTraining {
                 "coreml_path": "model.mlmodel", "weights_path": "model.safetensors", "training": training,
                 "weights_sha256": try sha(output.appendingPathComponent("model.safetensors")),
                 "coreml_sha256": try sha(output.appendingPathComponent("model.mlmodel")),
-                "parameter_count": settings.parameterCount(map: map), "sources": proofs.map { path, proof in proof.json(path: String(path.dropFirst(root.path.count + 1))) },
+                "parameter_count": settings.parameterCount(map: map), "sources": proofs.snapshots().map { path, proof in proof.json(path: String(path.dropFirst(root.path.count + 1))) },
                 "quality_note": "Training completion does not qualify prediction quality on unseen materials."]
             descriptor.merge(versionJSON) { _, new in new }
             try writeProgress("completed")
@@ -566,7 +596,8 @@ enum NativeFactoryTraining {
          "width": s.modelWidth, "blocks": s.modelBlocks, "epochs": s.epochs,
          "batch_size": s.batchSize, "learning_rate": s.learningRate, "shuffle_each_epoch": s.shuffleEachEpoch,
          "flip_crops": s.flipCrops, "rotate_crops": s.rotateCrops, "exaggerate_features": s.exaggerateFeatures,
-         "seed": s.seed, "device": s.device.rawValue, "optimizer": s.optimizer.rawValue, "weight_decay": s.weightDecay,
+         "seed": s.seed, "requested_seed": s.requestedSeed ?? s.seed,
+         "cache_images_in_memory": s.cacheImagesInMemory, "image_cache_limit_mb": s.imageCacheLimitMB, "device": s.device.rawValue, "optimizer": s.optimizer.rawValue, "weight_decay": s.weightDecay,
          "beta1": s.beta1, "beta2": s.beta2, "momentum": s.momentum, "gradient_clip_norm": s.gradientClipNorm,
          "gradient_clip_policy": s.gradientClipPolicy.rawValue,
          "gradient_clip_warmup_start_norm": s.gradientClipWarmupStartNorm,
@@ -588,33 +619,8 @@ enum NativeFactoryTraining {
         guard let value = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] else { throw LoomError("Invalid project descriptor.") }; return value
     }
     static func sha(_ url: URL, cancellation: NativeCancellation? = nil) throws -> String {
-        let handle = try FileHandle(forReadingFrom: url); defer { try? handle.close() }
-        var hash = SHA256()
-        while let block = try handle.read(upToCount: 1024 * 1024), !block.isEmpty { try cancellation?.check(); hash.update(data: block) }
-        return hash.finalize().map { String(format: "%02x", $0) }.joined()
+        try NativeFileHash.sha256(url) { try cancellation?.check() }
     }
-}
-
-private struct SourceProof {
-    let size: Int64, seconds: Int, nanos: Int, device: Int32, inode: UInt64, hash: String
-    init(_ url: URL, cancellation: NativeCancellation) throws {
-        var value = stat(); guard stat(url.path, &value) == 0 else { throw LoomError("A source image is missing: \(url.lastPathComponent)") }
-        size = value.st_size; seconds = value.st_mtimespec.tv_sec; nanos = value.st_mtimespec.tv_nsec
-        device = value.st_dev; inode = value.st_ino; hash = try NativeFactoryTraining.sha(url, cancellation: cancellation)
-        try check(url)
-    }
-    func check(_ url: URL) throws {
-        var value = stat()
-        guard stat(url.path, &value) == 0, value.st_size == size, value.st_mtimespec.tv_sec == seconds,
-              value.st_mtimespec.tv_nsec == nanos, value.st_dev == device, value.st_ino == inode else {
-            throw LoomError("Source pixels changed during training: \(url.lastPathComponent). Refresh the source folder.")
-        }
-    }
-    func verifyHash(_ url: URL, cancellation: NativeCancellation) throws {
-        try check(url)
-        guard try NativeFactoryTraining.sha(url, cancellation: cancellation) == hash else { throw LoomError("Source pixels changed during training: \(url.lastPathComponent).") }
-    }
-    func json(path: String) -> [String: Any] { ["path": path, "size": size, "mtime_seconds": seconds, "mtime_nanoseconds": nanos, "device": device, "inode": inode, "sha256": hash] }
 }
 
 private struct FactoryRandom: RandomNumberGenerator {

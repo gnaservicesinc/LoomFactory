@@ -125,7 +125,7 @@ private enum ComparisonWorker {
                 guard size % 8 == 0 else {
                     throw LoomError("Compact native models require image dimensions that are multiples of eight.")
                 }
-            } else if ![NativeArchitecture.identifier, NativeArchitecture.pyramidIdentifier].contains(artifact.architecture) {
+            } else if ![NativeArchitecture.identifier, NativeArchitecture.residualV2Identifier, NativeArchitecture.pyramidIdentifier].contains(artifact.architecture) {
                 throw LoomError("The saved model has an unsupported native architecture identity.")
             }
             let training = descriptor["training"] as? [String: Any]

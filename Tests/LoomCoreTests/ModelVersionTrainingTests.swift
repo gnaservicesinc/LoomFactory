@@ -51,7 +51,7 @@ final class ModelVersionTrainingTests: XCTestCase {
         let request = try NativeFactoryTraining.json(continued.directory.appendingPathComponent("request.json"))
         XCTAssertEqual(request["run_label"] as? String, "Continue first with clipping warmup")
         XCTAssertEqual(request["resume_weights"] as? String, first.directory.appendingPathComponent("model.safetensors").path)
-        XCTAssertEqual(request["image_size"] as? Int, 32)
+        XCTAssertEqual(request["image_size"] as? Int, 64)
         XCTAssertEqual(request["width"] as? Int, 8)
         XCTAssertEqual(request["blocks"] as? Int, 1)
         XCTAssertEqual(try XCTUnwrap(request["learning_rate"] as? Double), 0.0003, accuracy: 1e-12)
@@ -115,13 +115,13 @@ final class ModelVersionTrainingTests: XCTestCase {
     }
 
     private func image(at file: URL, role: MapRole) throws -> URL {
-        var bytes = [UInt8](repeating: 0, count: 32 * 32 * 3)
+        var bytes = [UInt8](repeating: 0, count: 64 * 64 * 3)
         for index in bytes.indices {
             let position = role == .depth ? index / 3 : index
             bytes[index] = UInt8((position * 7 + 31) % 255)
         }
         let provider = try XCTUnwrap(CGDataProvider(data: Data(bytes) as CFData))
-        let image = try XCTUnwrap(CGImage(width: 32, height: 32, bitsPerComponent: 8, bitsPerPixel: 24, bytesPerRow: 96,
+        let image = try XCTUnwrap(CGImage(width: 64, height: 64, bitsPerComponent: 8, bitsPerPixel: 24, bytesPerRow: 192,
             space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: [], provider: provider, decode: nil,
             shouldInterpolate: false, intent: .defaultIntent))
         let destination = try XCTUnwrap(CGImageDestinationCreateWithURL(file as CFURL, UTType.png.identifier as CFString, 1, nil))

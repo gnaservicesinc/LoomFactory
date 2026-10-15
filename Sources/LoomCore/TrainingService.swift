@@ -26,6 +26,7 @@ extension LoomProject {
             settings: settings, scalarLossOverride: scalarLossOverride)
         var runSettings = prepared.settings
         if let issue = runSettings.validationIssue { throw LoomError(issue) }
+        runSettings.requestedSeed = runSettings.seed
         runSettings.resolveRandomSeedForRun()
         let settings = runSettings
         let current = try snapshot()

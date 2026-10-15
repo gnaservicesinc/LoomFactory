@@ -154,6 +154,9 @@ struct TrainingPanelTests {
         let edited = FactoryModel(rememberSourceFolder: false)
         try await load(edited, source: fixture.source)
         configureFullTrainingOptions(edited)
+        edited.settings.training.cacheImagesInMemory = false
+        edited.settings.training.imageCacheLimitMB = 0
+        edited.settings.training.seed = -1
         let expected = edited.settings.training
         #expect(await edited.prepareForTermination())
         let restored = FactoryModel(rememberSourceFolder: false)
@@ -166,6 +169,9 @@ struct TrainingPanelTests {
         #expect(restored.settings.training.learningRateSchedule == .cosine)
         #expect(restored.settings.training.exportBestWeights)
         #expect(restored.settings.training.sourceResolutionLevels == 2)
+        #expect(!restored.settings.training.cacheImagesInMemory)
+        #expect(restored.settings.training.imageCacheLimitMB == 0)
+        #expect(restored.settings.training.seed == -1)
     }
 
     @Test @MainActor

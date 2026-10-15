@@ -60,6 +60,7 @@ public struct ModelVersion: Identifiable, Sendable, Equatable {
     public let inheritedEpochs: Int
     public let settings: TrainingSettings?
     public let checkpoint: TrainingCheckpoint?
+    public let checkpointVersions: [TrainingCheckpoint]
     public let artifact: ModelArtifact?
     public let history: [TrainingMetric]
     public let lineage: TrainingLineage?
@@ -73,11 +74,13 @@ public struct ModelVersion: Identifiable, Sendable, Equatable {
                 status: String, createdAt: Date = .now, label: String = "", settings: TrainingSettings? = nil,
                 checkpoint: TrainingCheckpoint? = nil, artifact: ModelArtifact? = nil,
                 history: [TrainingMetric] = [], lineage: TrainingLineage? = nil, isActive: Bool = false,
-                isApproved: Bool = false, approvalIsStale: Bool = false, notes: String = "", inheritedEpochs: Int = 0) {
+                isApproved: Bool = false, approvalIsStale: Bool = false, notes: String = "", inheritedEpochs: Int = 0,
+                checkpointVersions: [TrainingCheckpoint] = []) {
         self.id = id; self.directory = directory; self.datasetID = datasetID; self.datasetName = datasetName
         self.map = map; self.status = status; self.createdAt = createdAt; self.label = label; self.notes = notes
         self.inheritedEpochs = inheritedEpochs
         self.settings = settings; self.checkpoint = checkpoint; self.artifact = artifact
+        self.checkpointVersions = checkpointVersions.isEmpty ? checkpoint.map { [$0] } ?? [] : checkpointVersions
         self.history = history; self.lineage = lineage; self.isActive = isActive
         self.isApproved = isApproved; self.approvalIsStale = approvalIsStale
     }
@@ -220,7 +223,8 @@ extension LoomProject {
                 createdAt: created, label: display?.name ?? metadata?.label ?? request?["run_label"] as? String ?? "", settings: settings,
                 checkpoint: checkpoint, artifact: artifact, history: history, lineage: metadata?.lineage,
                 isActive: artifact != nil && active == folder.lastPathComponent,
-                isApproved: approval.approved, approvalIsStale: approval.stale, notes: display?.notes ?? "", inheritedEpochs: priorEpochs)
+                isApproved: approval.approved, approvalIsStale: approval.stale, notes: display?.notes ?? "", inheritedEpochs: priorEpochs,
+                checkpointVersions: (try? loadCheckpointVersions(directory: folder)) ?? [])
         }.sorted { $0.createdAt > $1.createdAt }
     }
 
@@ -269,11 +273,9 @@ extension LoomProject {
             }
         }
         var resolved = settings
-        if resolved.seed == -1 { resolved.seed = saved.seed }
         resolved.modelArchitecture = saved.modelArchitecture
         resolved.scalarLoss = scalarLossOverride ?? saved.scalarLoss
         resolved.modelWidth = saved.modelWidth; resolved.modelBlocks = saved.modelBlocks
-        resolved.imageSize = saved.imageSize; resolved.exaggerateFeatures = saved.exaggerateFeatures
         let path = source == .checkpoint ? (descriptor["weights_path"] as? String ?? "checkpoint.safetensors") : descriptor["weights_path"] as? String
         guard let path else { throw LoomError("This saved model version has no trainable weights.") }
         let weights = try TrainingRunFiles.containedFile(path, directory: folder)
@@ -345,33 +347,34 @@ enum TrainingRunFiles {
         return canonical
     }
 
-    static func descriptor(at directory: URL, source: TrainingWeightSource) throws -> [String: Any] {
-        let file = try containedFile(source == .checkpoint ? "checkpoint.json" : "model.json", directory: directory)
+    static func descriptor(at directory: URL, source: TrainingWeightSource, checkpointID: String? = nil) throws -> [String: Any] {
+        guard source == .checkpoint || checkpointID == nil else { throw LoomError("Choose checkpoint weights to select a checkpoint revision.") }
+        let name = try checkpointID.map(CheckpointArchive.filename) ?? (source == .checkpoint ? "checkpoint.json" : "model.json")
+        let file = try containedFile(name, directory: directory)
         guard let value = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any],
               value["schema"] as? String == (source == .checkpoint ? "loom-factory-checkpoint-v1" : "loom-factory-model-v1"),
-              source == .checkpoint || value["status"] as? String == "completed" else {
+              source == .checkpoint || value["status"] as? String == "completed",
+              checkpointID == nil || value["checkpoint_id"] as? String == checkpointID else {
             throw LoomError("This saved model version is incomplete or uses an unsupported format.")
         }
         return value
     }
 
     static func resume(weights: URL, projectFolder: URL, projectID: String, datasetID: String, map: MapRole,
-                       settings: TrainingSettings, expectedSHA256: String? = nil) throws -> TrainingResume {
+                       settings: TrainingSettings, expectedSHA256: String? = nil, checkpointID: String? = nil) throws -> TrainingResume {
         let directory = try ownedRun(weights.deletingLastPathComponent(), projectFolder: projectFolder)
         let checkpointDescriptor = optionalJSON(directory.appendingPathComponent("checkpoint.json"))
         let checkpointPath = checkpointDescriptor?["weights_path"] as? String ?? "checkpoint.safetensors"
-        let source: TrainingWeightSource = weights.standardizedFileURL.resolvingSymlinksInPath()
+        let source: TrainingWeightSource = checkpointID != nil || weights.standardizedFileURL.resolvingSymlinksInPath()
             == directory.appendingPathComponent(checkpointPath).standardizedFileURL.resolvingSymlinksInPath() ? .checkpoint : .model
-        let descriptor = try descriptor(at: directory, source: source)
+        let descriptor = try descriptor(at: directory, source: source, checkpointID: checkpointID)
         let architecture = try nativeArchitecture(from: descriptor, map: map)
         let nativeSettings = (source == .checkpoint ? descriptor["settings"] : descriptor["training"]) as? [String: Any] ?? [:]
         guard descriptor["project_id"] as? String == projectID, descriptor["dataset_id"] as? String == datasetID,
               descriptor["kind"] as? String == "map", descriptor["map"] as? String == map.rawValue,
               architecture.identifier == settings.modelArchitecture,
               architecture.width == settings.modelWidth, architecture.blocks == settings.modelBlocks,
-              (nativeSettings["model_architecture"] as? String).map({ $0 == architecture.identifier }) ?? true,
-              (nativeSettings["image_size"] as? Int ?? descriptor["image_size"] as? Int) == settings.imageSize,
-              (nativeSettings["exaggerate_features"] as? Bool ?? false) == settings.exaggerateFeatures else {
+              (nativeSettings["model_architecture"] as? String).map({ $0 == architecture.identifier }) ?? true else {
             throw LoomError("The saved weights do not match this project, dataset, map or native model settings.")
         }
         let declaredPath = descriptor["weights_path"] as? String ?? (source == .checkpoint ? "checkpoint.safetensors" : "")
@@ -439,7 +442,7 @@ enum TrainingRunFiles {
             guard let value = values[key] else { return true }
             return value as? Int == blocks
         }) else { return nil }
-        let aliases = ["width": "modelWidth", "blocks": "modelBlocks", "lr_schedule": "learningRateSchedule", "minimum_lr_ratio": "minimumLearningRateRatio"]
+        let aliases = ["width": "modelWidth", "blocks": "modelBlocks", "lr_schedule": "learningRateSchedule", "minimum_lr_ratio": "minimumLearningRateRatio", "image_cache_limit_mb": "imageCacheLimitMB"]
         var converted: [String: Any] = [:]
         for (key, value) in values {
             let parts = key.split(separator: "_")
@@ -489,13 +492,16 @@ enum TrainingRunFiles {
                 }
             }
         }
+        if architecture.isResidualV2 {
+            guard configuration["hidden_activation"] as? String == "leaky-relu",
+                  configuration["negative_slope"] as? Double == 0.1 else {
+                throw LoomError("The saved residual-v2 model's hidden activation is inconsistent.")
+            }
+        }
         return architecture
     }
 
     static func sha256(_ file: URL) throws -> String {
-        let handle = try FileHandle(forReadingFrom: file); defer { try? handle.close() }
-        var hasher = SHA256()
-        while let block = try handle.read(upToCount: 1024 * 1024), !block.isEmpty { hasher.update(data: block) }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+        try NativeFileHash.sha256(file)
     }
 }

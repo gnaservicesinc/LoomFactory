@@ -14,6 +14,10 @@ public enum NativeTrainingError: Error, LocalizedError {
 /// learned convolution kernels use OIHW, including pyramid-v1's lower scales.
 public struct NativeArchitecture: Sendable, Equatable {
     public static let identifier = "loom-factory-material-residual-v1"
+    /// A distinct inference identity: negative hidden features retain a 0.1
+    /// slope instead of permanently losing their teaching signal at ReLU.
+    /// Existing residual-v1 and Pyramid checkpoints keep their original graph.
+    public static let residualV2Identifier = "loom-factory-material-residual-v2"
     public static let pyramidIdentifier = "loom-factory-material-pyramid-v1"
     public static let compactIdentifier = "loom-factory-material-compact-naf-v1"
     public let identifier: String
@@ -22,7 +26,7 @@ public struct NativeArchitecture: Sendable, Equatable {
     public let blocks: Int
     public var outputChannels: Int { mapKind == "normal" ? 3 : 1 }
     public init(mapKind: String, width: Int, blocks: Int, identifier: String = Self.identifier) throws {
-        guard [Self.identifier, Self.pyramidIdentifier, Self.compactIdentifier].contains(identifier),
+        guard [Self.identifier, Self.residualV2Identifier, Self.pyramidIdentifier, Self.compactIdentifier].contains(identifier),
               ["depth", "roughness", "normal"].contains(mapKind), (1...512).contains(width), (1...64).contains(blocks),
               identifier != Self.compactIdentifier || blocks == 1 else {
             throw NativeTrainingError.invalid("Unsupported native architecture identity, map kind, or dimensions.")
@@ -31,6 +35,9 @@ public struct NativeArchitecture: Sendable, Equatable {
     }
     public var isPyramid: Bool { identifier == Self.pyramidIdentifier }
     public var isCompact: Bool { identifier == Self.compactIdentifier }
+    public var isResidualV2: Bool { identifier == Self.residualV2Identifier }
+    public var isFullResolutionResidual: Bool { identifier == Self.identifier || isResidualV2 }
+    public var residualNegativeSlope: Double { isResidualV2 ? 0.1 : 0 }
     public var parameterShapes: [String: [Int]] {
         if isCompact { return NativeCompactNetwork.parameterShapes(width: width, outputChannels: outputChannels) }
         var shapes: [String: [Int]] = ["input.weight": [width, 3, 3, 3], "input.bias": [width],
@@ -91,6 +98,10 @@ public struct NativeArchitecture: Sendable, Equatable {
          "output_channels": outputChannels, "input": "RGB sRGB float32 NCHW [0,1]",
          "output": "float32 NCHW [0,1]", "padding": "zero",
          "normal_convention": mapKind == "normal" ? "OpenGL" as Any : NSNull()]
+        if isResidualV2 {
+            result["hidden_activation"] = "leaky-relu"
+            result["negative_slope"] = residualNegativeSlope
+        }
         if isPyramid {
             result["scale_channels"] = [width, width * 2, width * 4]
             result["residual_scale"] = 4
@@ -178,6 +189,11 @@ extension MPSGraph {
             return compactMaterialNetwork(input: input, architecture: architecture, parameters: parameters,
                 adapter: adapter, channelsLast: channelsLast)
         }
+        func activation(_ value: MPSGraphTensor) -> MPSGraphTensor {
+            architecture.isResidualV2
+                ? leakyReLU(with: value, alpha: architecture.residualNegativeSlope, name: nil)
+                : reLU(with: value, name: nil)
+        }
         func conv(_ source: MPSGraphTensor, _ name: String) -> MPSGraphTensor {
             let stride = architecture.convolutionStride(name)
             var value = convolution(source, weight: parameters[name + ".weight"]!, kernel: 3,
@@ -194,24 +210,24 @@ extension MPSGraph {
         }
         // Internal layout can change execution without changing checkpoint or
         // boundary tensor identities. Normal/loss still operate on NCHW below.
-        let activation = channelsLast ? transpose(input, permutation: [0, 2, 3, 1], name: nil) : input
-        var value = reLU(with: conv(activation, "input"), name: nil)
+        let source = channelsLast ? transpose(input, permutation: [0, 2, 3, 1], name: nil) : input
+        var value = activation(conv(source, "input"))
         let full = value
         let half: MPSGraphTensor?
         if architecture.isPyramid {
-            let encodedHalf = reLU(with: conv(value, "encoder.half"), name: nil)
+            let encodedHalf = activation(conv(value, "encoder.half"))
             half = encodedHalf
-            value = reLU(with: conv(encodedHalf, "encoder.quarter"), name: nil)
+            value = activation(conv(encodedHalf, "encoder.quarter"))
         } else { half = nil }
         for block in 0..<architecture.blocks {
-            let first = reLU(with: conv(value, "body.\(block).conv1"), name: nil)
-            value = reLU(with: addition(value, conv(first, "body.\(block).conv2"), name: nil), name: nil)
+            let first = activation(conv(value, "body.\(block).conv1"))
+            value = activation(addition(value, conv(first, "body.\(block).conv2"), name: nil))
         }
         if let half {
             value = nearestDouble(value, matching: half, channelsLast: channelsLast)
-            value = reLU(with: addition(conv(value, "decoder.half"), half, name: nil), name: nil)
+            value = activation(addition(conv(value, "decoder.half"), half, name: nil))
             value = nearestDouble(value, matching: full, channelsLast: channelsLast)
-            value = reLU(with: addition(conv(value, "decoder.full"), full, name: nil), name: nil)
+            value = activation(addition(conv(value, "decoder.full"), full, name: nil))
         }
         value = conv(value, "output")
         if channelsLast { value = transpose(value, permutation: [0, 3, 1, 2], name: nil) }

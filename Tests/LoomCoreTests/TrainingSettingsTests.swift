@@ -181,6 +181,42 @@ final class TrainingSettingsTests: XCTestCase {
         XCTAssertEqual(singleton.trainingPairCount, 2); XCTAssertEqual(singleton.validationPairCount, 0)
     }
 
+    func testStreamingIgnoresTheHiddenCacheBudgetAndBoundedModeValidatesIt() throws {
+        var settings = TrainingSettings(cacheImagesInMemory: false, imageCacheLimitMB: 0)
+        XCTAssertNil(settings.validationIssue)
+        let restored = try JSONDecoder().decode(TrainingSettings.self, from: JSONEncoder().encode(settings))
+        XCTAssertFalse(restored.cacheImagesInMemory)
+        XCTAssertEqual(restored.imageCacheLimitMB, 0)
+        settings.cacheImagesInMemory = true
+        XCTAssertNotNil(settings.validationIssue)
+        settings.imageCacheLimitMB = 2048
+        XCTAssertNil(settings.validationIssue)
+        settings.imageCacheLimitMB = Int.max
+        XCTAssertNotNil(settings.validationIssue)
+    }
+
+    func testNativeCheckpointSettingsRestoreTheExactCacheBudgetAndSeedPreference() throws {
+        var original = TrainingSettings(seed: -1, cacheImagesInMemory: true, imageCacheLimitMB: 2048)
+        original.resolveRandomSeedForRun()
+        let architecture = try NativeArchitecture(mapKind: "depth", width: original.modelWidth,
+            blocks: original.modelBlocks, identifier: original.modelArchitecture)
+        let descriptor: [String: Any] = ["architecture": architecture.identifier,
+            "architecture_config": architecture.descriptor]
+        let saved = try XCTUnwrap(TrainingRunFiles.settings(from: NativeFactoryTraining.settingsJSON(original), descriptor: descriptor))
+        XCTAssertEqual(saved.imageCacheLimitMB, 2048)
+        XCTAssertTrue(saved.cacheImagesInMemory)
+        XCTAssertEqual(saved.seed, original.seed)
+        XCTAssertEqual(saved.requestedSeed, -1)
+    }
+
+    func testCorrectedResidualKeepsItsExplicitFreshArchitectureAndCapacity() {
+        var settings = TrainingSettings(modelArchitecture: NativeArchitecture.residualV2Identifier)
+        XCTAssertNil(settings.validationIssue)
+        settings.useFullResolutionForFreshRun(map: .depth)
+        XCTAssertEqual(settings.modelArchitecture, NativeArchitecture.residualV2Identifier)
+        XCTAssertEqual(settings.parameterCount(map: .depth), TrainingSettings().parameterCount(map: .depth))
+    }
+
     private func image(_ folder: URL, _ role: MapRole, _ size: Int) -> SourceImage {
         let id = "\(role.rawValue)-\(size)"
         return SourceImage(id: folder.path + id, url: folder.appendingPathComponent(id + ".png"), displayName: id,

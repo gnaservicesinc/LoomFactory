@@ -70,6 +70,10 @@ struct ModelVersionControlsTests {
         #expect(model.effectiveTrainingSettings.scalarLoss == .nativeDetailV3)
         #expect(model.effectiveTrainingSettings.modelWidth == oldest.settings?.modelWidth)
         #expect(model.canTrain)
+        model.settings.training.imageSize = 512
+        #expect(model.effectiveTrainingSettings.imageSize == 512)
+        model.settings.training.exaggerateFeatures = true
+        #expect(model.effectiveTrainingSettings.exaggerateFeatures)
         model.continueModelVersion(oldest, source: .checkpoint)
         #expect(model.trainingScalarLossOverride == nil)
         #expect(model.effectiveTrainingSettings.scalarLoss == oldest.settings?.scalarLoss)

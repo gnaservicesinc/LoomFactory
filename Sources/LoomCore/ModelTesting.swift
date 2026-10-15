@@ -19,14 +19,18 @@ public struct ModelTestResult: Sendable {
     public let tileSize: Int
     public let tileCount: Int
     public let note: String
+    public let checkpointID: String?
+    public let inputSHA256: String?
 
     public init(directory: URL, inputURL: URL, outputURL: URL, runID: String, source: TrainingWeightSource,
                 map: MapRole, width: Int, height: Int, tileSize: Int, tileCount: Int, note: String,
-                previewURL: URL? = nil) {
+                previewURL: URL? = nil, checkpointID: String? = nil, inputSHA256: String? = nil) {
         self.directory = directory; self.inputURL = inputURL; self.outputURL = outputURL
         self.previewURL = previewURL ?? outputURL
         self.runID = runID; self.source = source; self.map = map
         self.width = width; self.height = height; self.tileSize = tileSize; self.tileCount = tileCount; self.note = note
+        self.checkpointID = checkpointID
+        self.inputSHA256 = inputSHA256
     }
 }
 
@@ -34,10 +38,11 @@ extension LoomProject {
     /// Tests either saved deployment weights or a checkpoint without training,
     /// changing the active export version, or importing/relabeling the image.
     public func testModel(datasetID: String, map: MapRole, runID: String, source: TrainingWeightSource,
-                          inputURL: URL, progress: @escaping @Sendable (TrainingEvent) -> Void) async throws -> ModelTestResult {
+                          inputURL: URL, checkpointID: String? = nil,
+                          progress: @escaping @Sendable (TrainingEvent) -> Void) async throws -> ModelTestResult {
         guard !operationActive else { throw LoomError("Stop the current operation before testing a model.") }
         let model = try ModelTestSelection.load(runID: runID, source: source, datasetID: datasetID,
-            map: map, projectFolder: projectFolder, projectID: document.id)
+            map: map, projectFolder: projectFolder, projectID: document.id, checkpointID: checkpointID)
         let output = projectFolder.appendingPathComponent("model-tests/" + UUID().uuidString.lowercased(), isDirectory: true)
         let cancellation = NativeCancellation()
         operationActive = true; activeTraining = cancellation
@@ -61,12 +66,13 @@ struct ModelTestSelection: Sendable {
     let imageSize: Int
     let weightsURL: URL
     let weightsSHA256: String
+    var checkpointID: String? = nil
 
     static func load(runID: String, source: TrainingWeightSource, datasetID: String, map: MapRole,
-                     projectFolder: URL, projectID: String) throws -> Self {
+                     projectFolder: URL, projectID: String, checkpointID: String? = nil) throws -> Self {
         guard MapRole.targets.contains(map) else { throw LoomError("Choose a depth, roughness or normal model to test.") }
         let directory = try TrainingRunFiles.runDirectory(runID, projectFolder: projectFolder)
-        let descriptor = try TrainingRunFiles.descriptor(at: directory, source: source)
+        let descriptor = try TrainingRunFiles.descriptor(at: directory, source: source, checkpointID: checkpointID)
         guard descriptor["project_id"] as? String == projectID,
               descriptor["dataset_id"] as? String == datasetID,
               descriptor["kind"] as? String == "map", descriptor["map"] as? String == map.rawValue else {
@@ -80,11 +86,11 @@ struct ModelTestSelection: Sendable {
         let path = descriptor["weights_path"] as? String ?? (source == .checkpoint ? "checkpoint.safetensors" : "")
         let weightsURL = try TrainingRunFiles.containedFile(path, directory: directory)
         let resume = try TrainingRunFiles.resume(weights: weightsURL, projectFolder: projectFolder,
-            projectID: projectID, datasetID: datasetID, map: map, settings: settings)
+            projectID: projectID, datasetID: datasetID, map: map, settings: settings, checkpointID: checkpointID)
         guard resume.source == source else { throw LoomError("The selected saved weights do not match their source.") }
         return Self(runID: runID, source: source, datasetID: datasetID, map: map,
             architecture: architecture, imageSize: settings.imageSize,
-            weightsURL: resume.weights, weightsSHA256: resume.sha256)
+            weightsURL: resume.weights, weightsSHA256: resume.sha256, checkpointID: descriptor["checkpoint_id"] as? String)
     }
 }
 
@@ -235,6 +241,7 @@ enum ModelTestWorker {
             + (model.architecture.isCompact ? "The PNG preview clamps to [0,1] before 16-bit quantization, without per-output normalization."
                 : "The PNG preview uses fixed [0,1] values quantized to 16 bits, without per-output normalization.")
         try NativeFactoryTraining.writeJSON(["schema": "loom-factory-model-test-v1", "run_id": model.runID,
+            "checkpoint_id": model.checkpointID as Any? ?? NSNull(),
             "weight_source": model.source.rawValue, "dataset_id": model.datasetID, "map": model.map.rawValue,
             "architecture": model.architecture.identifier, "input_path": original.path, "input_sha256": inputHash,
             "weights_sha256": model.weightsSHA256, "output_path": name,
@@ -256,7 +263,8 @@ enum ModelTestWorker {
         try FileManager.default.moveItem(at: staging, to: output)
         let result = ModelTestResult(directory: output, inputURL: original, outputURL: output.appendingPathComponent(name),
             runID: model.runID, source: model.source, map: model.map, width: image.width, height: image.height,
-            tileSize: tileSize, tileCount: tileCount, note: note, previewURL: output.appendingPathComponent(previewName))
+            tileSize: tileSize, tileCount: tileCount, note: note, previewURL: output.appendingPathComponent(previewName),
+            checkpointID: model.checkpointID, inputSHA256: inputHash)
         progress(.init(type: "completed", message: "Saved full-resolution \(model.map.rawValue) output", progress: 1))
         return result
     }

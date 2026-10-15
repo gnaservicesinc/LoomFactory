@@ -6,12 +6,14 @@ extension LoomProject {
     /// The source run, its final export and its continuation state stay intact.
     @discardableResult
     public func selectCheckpointModelVersion(runID: String, datasetID: String, map: MapRole,
+                                            checkpointID: String? = nil,
                                             progress: @escaping @Sendable (TrainingEvent) -> Void = { _ in }) async throws -> ModelArtifact {
         guard !operationActive else { throw LoomError("Finish or stop the current project operation before choosing a checkpoint.") }
         let source = try ModelTestSelection.load(runID: runID, source: .checkpoint, datasetID: datasetID,
-            map: map, projectFolder: projectFolder, projectID: document.id)
+            map: map, projectFolder: projectFolder, projectID: document.id, checkpointID: checkpointID)
         guard let version = try modelVersions(datasetID: datasetID, map: map).first(where: { $0.id == runID }),
-              version.checkpoint != nil, version.settings != nil else {
+              version.checkpointVersions.contains(where: { checkpointID == nil || $0.revisionID == checkpointID }),
+              version.settings != nil else {
             throw LoomError("Choose a saved checkpoint belonging to this source project.")
         }
         let cancellation = NativeCancellation(), folder = projectFolder, projectID = document.id
@@ -34,11 +36,12 @@ enum CheckpointModelExport {
                     cancellation: NativeCancellation, progress: @escaping @Sendable (TrainingEvent) -> Void) throws -> ModelArtifact {
         try cancellation.check()
         let original = try TrainingRunFiles.runDirectory(source.runID, projectFolder: projectFolder)
-        let descriptor = try TrainingRunFiles.descriptor(at: original, source: .checkpoint)
+        let descriptor = try TrainingRunFiles.descriptor(at: original, source: .checkpoint, checkpointID: source.checkpointID)
         guard descriptor["weights_sha256"] as? String == source.weightsSHA256 else {
             throw LoomError("The selected checkpoint changed before export. Choose the saved checkpoint again.")
         }
-        guard let settings = version.settings, let checkpoint = version.checkpoint,
+        guard let settings = TrainingRunFiles.settings(from: descriptor["settings"] as? [String: Any] ?? [:], descriptor: descriptor),
+              let checkpoint = version.checkpointVersions.first(where: { source.checkpointID == nil || $0.revisionID == source.checkpointID }),
               checkpoint.updatesCompleted > 0 || checkpoint.epochsCompleted > 0 else {
             throw LoomError("This checkpoint has no completed training updates to use as a model.")
         }
@@ -63,7 +66,9 @@ enum CheckpointModelExport {
         try cancellation.check()
         let lineage = TrainingLineage(parentRunID: source.runID, source: .checkpoint, weightsSHA256: source.weightsSHA256)
         let createdAt = Date()
-        let label = (version.label.isEmpty ? version.datasetName + " · " + version.map.displayName : version.label) + " · checkpoint"
+        let checkpointLabel = source.checkpointID == nil ? "checkpoint" :
+            "checkpoint epoch \(checkpoint.totalEpochsCompleted) · update \(checkpoint.totalUpdatesCompleted)"
+        let label = (version.label.isEmpty ? version.datasetName + " · " + version.map.displayName : version.label) + " · " + checkpointLabel
         try TrainingRunFiles.writeMetadata(.init(projectID: projectID, runID: id, datasetID: source.datasetID,
             map: source.map, label: label, createdAt: createdAt, settings: settings, lineage: lineage,
             status: "checkpoint_export"), at: staging)
@@ -93,6 +98,7 @@ enum CheckpointModelExport {
             "run_id": id, "run_label": label, "created_at": ISO8601DateFormatter().string(from: createdAt),
             "checkpoint_status": descriptor["status"] ?? "saved",
             "checkpoint_updates": checkpoint.totalUpdatesCompleted,
+            "checkpoint_id": source.checkpointID as Any? ?? NSNull(),
             "quality_note": "Exact checkpoint export for human review; export completion does not qualify prediction quality."]
         try NativeFactoryTraining.writeJSON(model, to: staging.appendingPathComponent("model.json"))
         // An export sees no new training images. Membership follows the immutable parent lineage.

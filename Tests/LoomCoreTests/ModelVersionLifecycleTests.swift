@@ -89,7 +89,7 @@ final class ModelVersionLifecycleTests: XCTestCase {
             datasetID: fixture.datasetID, map: .depth, settings: changed)
         XCTAssertEqual(continued.resume?.weights, old.directory.appendingPathComponent("checkpoint.safetensors"))
         XCTAssertEqual(continued.resume?.source, .checkpoint)
-        XCTAssertEqual(continued.settings.imageSize, 32)
+        XCTAssertEqual(continued.settings.imageSize, 128, "A requested native crop grid does not change the weight shapes")
         XCTAssertEqual(continued.settings.modelWidth, 8)
         XCTAssertEqual(continued.settings.modelBlocks, 1)
         XCTAssertEqual(continued.settings.modelArchitecture, NativeArchitecture.identifier)
@@ -109,7 +109,7 @@ final class ModelVersionLifecycleTests: XCTestCase {
         XCTAssertEqual(continued.settings.learningRate, changed.learningRate)
         XCTAssertEqual(continued.settings.optimizer, .adam)
         XCTAssertEqual(changed.seed, -1)
-        XCTAssertEqual(continued.settings.seed, 0, "Default continuation inherits the historical source seed")
+        XCTAssertEqual(continued.settings.seed, -1, "Continuation preserves an explicit system-random preference")
 
         let best = try await fixture.project.prepareTrainingStart(.model(runID: "old"),
             datasetID: fixture.datasetID, map: .depth, settings: changed)
@@ -117,12 +117,16 @@ final class ModelVersionLifecycleTests: XCTestCase {
         XCTAssertEqual(best.resume?.source, .model)
         XCTAssertEqual(best.settings.modelArchitecture, NativeArchitecture.identifier)
         XCTAssertEqual(best.settings.scalarLoss, .absoluteV1)
-        XCTAssertEqual(best.settings.seed, 0)
+        XCTAssertEqual(best.settings.seed, -1)
         XCTAssertNotEqual(best.resume?.sha256, continued.resume?.sha256)
         changed.seed = 91
         let override = try await fixture.project.prepareTrainingStart(.checkpoint(runID: "old"),
             datasetID: fixture.datasetID, map: .depth, settings: changed)
         XCTAssertEqual(override.settings.seed, 91, "Explicit continuation seed overrides remain available")
+        changed.exaggerateFeatures = true
+        let changedTarget = try await fixture.project.prepareTrainingStart(.checkpoint(runID: "old"),
+            datasetID: fixture.datasetID, map: .depth, settings: changed)
+        XCTAssertTrue(changedTarget.settings.exaggerateFeatures, "A deliberate target-preparation edit must reach the worker")
         let fresh = try await fixture.project.prepareTrainingStart(.fresh, datasetID: fixture.datasetID, map: .depth, settings: changed)
         XCTAssertNil(fresh.resume)
         XCTAssertEqual(fresh.settings, changed)
@@ -180,7 +184,7 @@ final class ModelVersionLifecycleTests: XCTestCase {
         let resumed = try await fixture.project.prepareTrainingStart(.model(runID: artifact.id),
             datasetID: fixture.datasetID, map: .depth, settings: TrainingSettings(epochs: 2))
         XCTAssertEqual(resumed.resume?.source, .model)
-        XCTAssertEqual(resumed.settings.imageSize, 64)
+        XCTAssertEqual(resumed.settings.imageSize, 1024, "Continuation keeps the requested crop size")
     }
 
     func testLineageAndRunLabelsAreReadWithoutChangingHistoricalDescriptors() async throws {

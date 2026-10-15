@@ -96,7 +96,7 @@ struct TrainingPanel: View {
                     ForEach([256, 512, 1024, 2048, 4096], id: \.self) { value in
                         Text("\(value.formatted()) × \(value.formatted())").tag(value)
                     }
-                }.labelsHidden().disabled(continuing).accessibilityIdentifier("training.imageSize")
+                }.labelsHidden().accessibilityIdentifier("training.imageSize")
             }
             row("Source resolution levels", detail: "Per material folder, start with the smallest usable original. Level 2 includes sources up to 2× that resolution; level 3 includes up to 4×.") {
                 Picker("Source resolution levels", selection: $model.settings.training.sourceResolutionLevels) {
@@ -106,6 +106,14 @@ struct TrainingPanel: View {
                     Text("All available").tag(0)
                 }.labelsHidden().accessibilityIdentifier("training.sourceResolutionLevels")
             }
+            row("Keep decoded images in RAM", detail: "Loads images as training needs them while workers prepare upcoming images. Older entries are evicted at the limit; larger datasets keep training.") {
+                Toggle("Keep decoded images in RAM", isOn: $model.settings.training.cacheImagesInMemory)
+                    .labelsHidden().toggleStyle(.checkbox).accessibilityIdentifier("training.cacheImagesInMemory")
+            }
+            if model.settings.training.cacheImagesInMemory {
+                numberRow("Image cache limit (MiB)", value: $model.settings.training.imageCacheLimitMB,
+                    detail: "Maximum decoded source pixels retained, capped at half of physical RAM to leave room for training. Off streams images with bounded prefetch.", identifier: "training.imageCacheLimitMB")
+            }
             numberRow("Epochs", value: $model.settings.training.epochs, detail: "One pass through the training images.", identifier: "training.epochs")
             row("Training device", detail: "Native MPSGraph training uses the Apple GPU.") {
                 Picker("Training device", selection: $model.settings.training.device) {
@@ -113,7 +121,7 @@ struct TrainingPanel: View {
                     if model.settings.training.device == .cpu { Text("CPU (unavailable for native training)").tag(TrainingDevice.cpu) }
                 }.labelsHidden().accessibilityIdentifier("training.device")
             }
-            numberRow("Random seed", value: $model.settings.training.seed, detail: "-1 uses a new system seed for a fresh run. Saved runs record their seed; use it to repeat crop, shuffle and initialization choices.", identifier: "training.seed")
+            numberRow("Random seed", value: $model.settings.training.seed, detail: "-1 chooses a new system seed on every start or resume, with a fresh optimizer and image order. Set a fixed seed to retain compatible optimizer and sampler state. Run details record the seed actually used.", identifier: "training.seed")
         }
     }
 
@@ -136,7 +144,7 @@ struct TrainingPanel: View {
                      : "Restores saved weights and compatible optimizer state. Unfinished checkpoints resume their saved image position when settings and sources match. Older checkpoints use a fresh optimizer; changing training settings starts a new epoch schedule.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 HStack {
-                    Text("All saved settings are loaded. Edit the controls below for this continuation.")
+                    Text("Saved settings are loaded. Edit crop size, targets and training controls below; network dimensions must match the selected weights.")
                     Spacer()
                     Button("Restore saved settings") { model.restoreSelectedTrainingSettings() }
                         .accessibilityIdentifier("training.restoreSavedSettings")
@@ -225,7 +233,7 @@ struct TrainingPanel: View {
                 }
                 numberRow("Learning rate", value: $model.settings.training.learningRate, detail: model.settings.training.optimizer == .lion ? "For Lion, consider starting at 0.0001." : "The starting update size.", identifier: "training.learningRate")
                 numberRow("Batch size", value: $model.settings.training.batchSize, detail: "Images processed together; raises memory use.", identifier: "training.batchSize")
-                numberRow("Gradient accumulation", value: $model.settings.training.gradientAccumulationSteps, detail: "Batches per update; increases effective batch size without a larger image batch.", identifier: "training.gradientAccumulation")
+                numberRow("Gradient accumulation", value: $model.settings.training.gradientAccumulationSteps, detail: "Batches per update. Each batch runs a forward and backward pass; 2 batches therefore take about twice the training work per update.", identifier: "training.gradientAccumulation")
                 row("Gradient clipping", detail: "Clips the global L2 norm after all accumulated gradients are averaged, before the optimizer update.") {
                     Picker("Gradient clipping", selection: $model.settings.training.gradientClipPolicy) {
                         ForEach(TrainingGradientClipping.allCases) { Text($0.displayName).tag($0) }
@@ -295,11 +303,11 @@ struct TrainingPanel: View {
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if model.selectedMap == .depth {
-                Toggle("Exaggerate features", isOn: exaggerationBinding).disabled(continuing)
+                Toggle("Exaggerate features", isOn: exaggerationBinding)
                     .help("Apply nonlinear contrast to depth values during training. Original images are unchanged.")
                     .accessibilityIdentifier("training.exaggerateFeatures")
                 if model.effectiveTrainingSettings.exaggerateFeatures {
-                    Text("Nonlinear contrast emphasizes depth features while preserving the map’s range.")
+                    Text("Changes depth targets with nonlinear contrast. Turning this on or off during continuation starts a fresh optimizer and schedule from the selected weights.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -617,12 +625,12 @@ enum TrainingModelPreset: String, CaseIterable, Identifiable {
         case (.pyramid, .large): 38
         case (.pyramid, .extraLarge): 47
         case (.pyramid, .huge): 55
-        case (.residual, .compact): 24
-        case (.residual, .small): 84
-        case (.residual, .medium): 116
-        case (.residual, .large): 164
-        case (.residual, .extraLarge): 204
-        case (.residual, .huge): 236
+        case (.residual, .compact), (.residualV2, .compact): 24
+        case (.residual, .small), (.residualV2, .small): 84
+        case (.residual, .medium), (.residualV2, .medium): 116
+        case (.residual, .large), (.residualV2, .large): 164
+        case (.residual, .extraLarge), (.residualV2, .extraLarge): 204
+        case (.residual, .huge), (.residualV2, .huge): 236
         case (.compactNAF, .compact): 8
         case (.compactNAF, .small): 16
         case (.compactNAF, .medium): 22
@@ -819,7 +827,11 @@ struct RunPanel: View {
             DisclosureGroup("Training measurements", isExpanded: $showMeasurements) {
               VStack(alignment: .leading, spacing: 7) {
                 if let epoch = metrics.epoch { metric("Epoch", epoch.formatted()) }
-                if let loss = metrics.trainingLoss { metric("Training loss", loss.formatted(.number.precision(.significantDigits(5)))) }
+                if let loss = metrics.trainingLoss { metric("Training objective", loss.formatted(.number.precision(.significantDigits(5)))) }
+                if model.effectiveTrainingSettings.scalarLoss == .logitCrossEntropyV2 && model.selectedMap != .normal {
+                    Text("This cross-entropy objective includes target entropy: its minimum is usually above zero for grayscale maps. Compare checkpoints on the same image to judge detail.")
+                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
                 if let loss = metrics.validationLoss { metric("Validation loss", loss.formatted(.number.precision(.significantDigits(5)))) }
                 if let update = metrics.update {
                     metric("Optimizer update", "\(update.formatted())\(metrics.totalUpdates.map { " / " + $0.formatted() } ?? "")")

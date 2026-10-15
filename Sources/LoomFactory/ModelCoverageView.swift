@@ -55,7 +55,7 @@ struct ModelCoveragePresentation {
     }
     var checkpointCounts: String? {
         guard entry.checkpointCount > 0 else { return nil }
-        return "\(entry.checkpointCount) saved \(entry.checkpointCount == 1 ? "checkpoint" : "checkpoints")"
+        return "\(entry.checkpointCount) \(entry.checkpointCount == 1 ? "run" : "runs") with saved checkpoints"
     }
     var detailCounts: String {
         [modelCounts, checkpointCounts].compactMap { $0 }.joined(separator: " · ")
@@ -334,8 +334,8 @@ struct ModelCoverageView: View {
             let checkpoints = unfinishedVersions(entry)
             if !checkpoints.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("Saved checkpoints (\(checkpoints.count))").font(.callout.weight(.semibold))
-                    Text("Test or continue any checkpoint. Use checkpoint as model exports its exact weights as a separate selected version for approval and package use.")
+                    Text("Unfinished runs with checkpoints (\(checkpoints.count))").font(.callout.weight(.semibold))
+                    Text("Open Test checkpoints to choose an epoch, compare its output and select it as a model. Continue uses the latest checkpoint in each run.")
                         .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     ForEach(checkpoints) { version in
                         ModelCoverageCheckpointRow(model: model, version: version)
@@ -380,7 +380,7 @@ struct ModelCoverageCheckpointRow: View {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(ModelVersionPresentation.title(version)).font(.callout.weight(.semibold)).textSelection(.enabled)
-                    Text("\(version.status.capitalized) · \((version.checkpoint?.totalEpochsCompleted ?? 0).formatted()) saved epochs")
+                    Text("\(version.status.capitalized) · \((version.checkpoint?.totalEpochsCompleted ?? 0).formatted()) saved epochs · \(version.checkpointVersions.count.formatted()) checkpoints")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -392,12 +392,12 @@ struct ModelCoverageCheckpointRow: View {
             }
             ModelVersionMetadataEditor(model: model, version: version)
             HStack(spacing: 10) {
-                Button("Use checkpoint as model", systemImage: "checkmark.circle") { model.useCheckpointAsModel(version) }
+                Button("Use latest checkpoint as model", systemImage: "checkmark.circle") { model.useCheckpointAsModel(version) }
                     .disabled(model.busy)
                     .accessibilityIdentifier("coverage.useCheckpoint.\(version.id)")
-                Button("Continue checkpoint", action: continueTraining).disabled(model.busy)
+                Button("Continue latest checkpoint", action: continueTraining).disabled(model.busy)
                     .accessibilityIdentifier("coverage.continueCheckpoint.\(version.id)")
-                Button("Test checkpoint") { model.showModelTesting(version) }
+                Button("Test checkpoints") { model.showModelTesting(version) }
                     .accessibilityIdentifier("coverage.testCheckpoint.\(version.id)")
                 Spacer(minLength: 0)
                 Button("Show folder") { model.reveal(version.directory) }
@@ -491,7 +491,7 @@ struct ModelCoverageCandidateRow: View {
                     .accessibilityIdentifier("coverage.approve.\(candidate.id)")
             }.controlSize(.small)
             if let version, version.checkpoint != nil {
-                Button("Use checkpoint as model", systemImage: "square.stack.3d.up") { model.useCheckpointAsModel(version) }
+                Button("Use latest checkpoint as model", systemImage: "square.stack.3d.up") { model.useCheckpointAsModel(version) }
                     .disabled(model.busy).controlSize(.small)
                     .help("Exports this run's checkpoint separately, preserving its existing model and continuation state.")
                     .accessibilityIdentifier("coverage.useCheckpoint.\(candidate.id)")

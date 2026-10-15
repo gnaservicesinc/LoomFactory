@@ -80,3 +80,31 @@ legacy bounded models keep their existing interpretation. Whole-field spatial
 attention precludes silently substituting tiled inference. Widths are editable,
 blocks per stage are fixed at one, and native dimensions must be multiples of
 eight and at least 32. Only dense convolutions are adapted by LoRA.
+
+
+`loom-factory-material-residual-v2` keeps the full-resolution residual tensor
+shapes and bounded scalar/normal output contract, but uses leaky ReLU with a
+negative slope of 0.1 at every hidden activation. Its descriptor must explicitly
+record `hidden_activation: leaky-relu` and `negative_slope: 0.1`. This provides a
+nonzero gradient through negative hidden features; the original residual and
+pyramid IDs retain their exact ReLU graphs. Selecting v2 starts a new model;
+old checkpoints are never silently reinterpreted. CoreML export and Workshop
+adaptation validate the new identity and activation metadata. Workshop checkpoints
+also bind the architecture and training objective, because identical parameter
+shapes and weight hashes alone cannot distinguish these two graphs.
+
+The random seed preference is distinct from its resolved run receipt. A requested
+`-1` draws a system seed on every start, including continuation, and resets the
+optimizer and sampler state. A fixed seed admits compatible saved state. Changing
+seed, crop size, target preparation or optimizer contract starts new optimizer
+state; changes to image-cache mode and budget do not change training math.
+
+Decoded source pixels are retained only when the user enables a bounded per-run
+RAM cache. Images enter on first use, with bounded worker prefetch in both cached
+and streaming modes. File identities are captured cheaply at admission; full
+source hashes are computed lazily. Early checkpoints preserve weights and
+optimizer without waiting for unvisited images. Exact image-position cursors are
+included once every source proof is complete; earlier saves continue with a new
+epoch schedule. Final export verifies every registered source before and after
+export. Each successful save keeps immutable tensors and a matching checkpoint
+descriptor, alongside the latest-checkpoint alias for older consumers.

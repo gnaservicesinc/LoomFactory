@@ -24,7 +24,7 @@ struct ModelTestSourcePicker: View {
             }
             TextField("Search filename, material folder, or category", text: $search)
                 .textFieldStyle(.roundedBorder).accessibilityIdentifier("modelTest.sourceSearch")
-            Text("\(matches.count.formatted()) images · All categories and source resolutions are available for testing.")
+            Text("\(matches.count.formatted()) images · Diffuse images from the selected category at their original resolutions.")
                 .font(.caption).foregroundStyle(.secondary)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {

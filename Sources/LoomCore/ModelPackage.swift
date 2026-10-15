@@ -189,10 +189,7 @@ private func packageFiles(_ folder: URL) throws -> [[String: String]] {
     return result.sorted { $0["path"]! < $1["path"]! }
 }
 private func fileSHA(_ file: URL) throws -> String {
-    let handle = try FileHandle(forReadingFrom: file); defer { try? handle.close() }
-    var hasher = SHA256()
-    while let block = try handle.read(upToCount: 1024 * 1024), !block.isEmpty { hasher.update(data: block) }
-    return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    try NativeFileHash.sha256(file)
 }
 private func safeComponent(_ value: String) -> String {
     String(value.map { $0.isLetter || $0.isNumber || "._-".contains($0) ? $0 : "-" })
