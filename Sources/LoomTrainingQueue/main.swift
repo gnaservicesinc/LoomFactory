@@ -100,7 +100,7 @@ final class QueueStatus: @unchecked Sendable {
         if let value = event.loss { values["loss"] = value }
         if let value = event.epoch { values["epoch"] = value }
         update(values)
-        if ["epoch", "checkpoint", "checkpoint_saved", "warning", "completed"].contains(event.type) {
+        if ["start_selection", "epoch", "checkpoint", "checkpoint_saved", "warning", "completed"].contains(event.type) {
             print("\(event.type): \(event.message)")
             fflush(stdout)
         }
@@ -288,10 +288,16 @@ func writeJSON(_ value: Any, _ url: URL) throws {
             if Date() >= deadline || FileManager.default.fileExists(atPath: stopURL.path) { break }
             let began = Date()
             let until = min(deadline, began.addingTimeInterval(job.seconds))
+            let start: TrainingStart
+            if let parent = job.parentRunID { start = .checkpoint(runID: parent) }
+            else { start = .fresh }
             status.update(["job": job.id, "category": job.category, "map": job.map.rawValue,
                 "architecture": job.settings.modelArchitecture, "parameters": job.settings.parameterCount(map: job.map),
                 "objective": job.settings.scalarLoss.rawValue, "learning_rate": job.settings.learningRate,
-                "job_index": index + 1, "update": 0, "epoch": 0, "message": "Starting \(job.category) \(job.map.rawValue)"])
+                "job_index": index + 1, "update": 0, "epoch": 0,
+                "parent_run_id": job.parentRunID as Any? ?? NSNull(),
+                "message": "Starting \(job.category) \(job.map.rawValue)"])
+            print("Requested start: \(start)"); fflush(stdout)
             let timer = Task {
                 while !Task.isCancelled {
                     do { try await Task.sleep(for: .seconds(1)) } catch { return }
@@ -304,7 +310,7 @@ func writeJSON(_ value: Any, _ url: URL) throws {
             var result: [String: Any] = ["id": job.id, "category": job.category, "map": job.map.rawValue]
             do {
                 let artifact = try await project.trainMap(datasetID: job.datasetID, map: job.map, settings: job.settings,
-                    start: job.parentRunID.map { .checkpoint(runID: $0) } ?? .fresh,
+                    start: start,
                     runLabel: "Overnight quality · \(job.category) · \(job.map.displayName)",
                     scalarLossOverride: job.map != .normal ? job.settings.scalarLoss : nil,
                     progress: { status.event($0) })
@@ -319,6 +325,20 @@ func writeJSON(_ value: Any, _ url: URL) throws {
             }) {
                 result["run_id"] = checkpoint.runID
                 result["updates"] = checkpoint.totalUpdatesCompleted
+                if let parent = job.parentRunID {
+                    let version = try await project.modelVersions(datasetID: job.datasetID, map: job.map)
+                        .first { $0.id == checkpoint.runID }
+                    guard version?.lineage?.parentRunID == parent, version?.lineage?.source == .checkpoint else {
+                        let message = "The requested continuation did not retain its saved parent. Its checkpoint was preserved; the queue will not continue."
+                        result["status"] = "failed"
+                        result["error"] = message
+                        results.append(result)
+                        try writeJSON(results, folder.appendingPathComponent("results.json"))
+                        status.update(["status": "failed", "jobs_finished": results.count, "last_result": result,
+                            "message": message])
+                        throw LoomError(message)
+                    }
+                }
                 var reviewRunID = checkpoint.runID
                 var reviewSource = TrainingWeightSource.checkpoint
                 if Date() < deadline {

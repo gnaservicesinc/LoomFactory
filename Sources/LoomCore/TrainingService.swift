@@ -26,6 +26,15 @@ extension LoomProject {
         }
         let prepared = try prepareTrainingStart(requestedStart, datasetID: datasetID, map: map,
             settings: settings, scalarLossOverride: scalarLossOverride)
+        switch requestedStart {
+        case .fresh:
+            progress(.init(type: "start_selection", message: "Starting fresh model weights"))
+        case .checkpoint(let parent), .model(let parent):
+            guard prepared.resume?.runID == parent else {
+                throw LoomError("The requested saved model was not loaded. Training was not started.")
+            }
+            progress(.init(type: "start_selection", message: "Continuing saved model \(parent)"))
+        }
         var runSettings = prepared.settings
         if let issue = runSettings.validationIssue { throw LoomError(issue) }
         runSettings.requestedSeed = runSettings.seed

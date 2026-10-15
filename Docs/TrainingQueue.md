@@ -45,6 +45,13 @@ the configuration request the same save. The deadline bounds training; an
 in-flight save/export/render must still finish. The process lock excludes both
 another queue and GUI GPU operations until the owner finishes or exits.
 
+Continuation jobs log their explicit requested parent and verify the saved
+child's actual lineage before continuing the queue. A missing or different
+parent fails the queue with its checkpoint preserved. Validate the exact frozen
+runner against one-update continuation receipts for all three map roles before
+using it for a recovery queue; a source commit and binary checksum alone do not
+prove the running artifact honored its start settings.
+
 `Progress.html`, atomic `status.json`, and `results.json` are saved beside the
 configuration. Checkpoints, Float32 tests, and separate Core ML candidates stay
 in the source project's `.loom-factory`. Exporting a checkpoint candidate does

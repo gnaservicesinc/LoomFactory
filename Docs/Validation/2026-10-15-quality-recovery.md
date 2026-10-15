@@ -176,3 +176,30 @@ single-material diagnostic across the category. It keeps native pixels,
 the same two source levels and whole-material split. The remaining categories
 are still gated on visible joint improvement. Best-validation candidates are
 reviewed by the corrected queue; the original deadline is not extended.
+
+At 13:22 UTC a live start-state audit found that this intended continuation
+actually had no parent lineage or resume path. Save & Stop preserved it. A wider
+audit then found the same mismatch in all configured continuations from the
+first queue and native-crop retry. Earlier descriptions of those attempts as
+continued training were incorrect; their outputs remain evidence only for the
+fresh runs that actually occurred. The fresh Compact gate did start as intended.
+
+The frozen balanced runner reproduced the missing parent on three separate
+one-update map jobs. A clean build retained the exact checkpoint parent and
+checksum, both with the former argument expression and an explicitly typed
+start. The precise artifact/compiler cause is not yet isolated; the evidence
+does not establish that the argument expression itself was the defect.
+Failed runners and every run remain preserved. The queue now records its
+requested start and fails if saved child lineage disagrees, and the core checks
+that an explicitly requested parent survives preparation. A new native training
+regression checks that changing optimizer/sampler settings resets their state
+while preserving checkpoint starting weights, source bytes and selection.
+All 14 focused lifecycle/training tests pass.
+
+The exact newly frozen runner passed one-update preflights for depth, normal
+and roughness: each real request referenced its intended parent checkpoint
+file, with the matching SHA256. These are execution proofs, not quality results.
+The next gate uses those original category parents, never the mistaken fresh
+run or single-material fits. It retains LR 0.0002, four-image accumulation and
+the original cutoff, allocating 16 minutes to depth and normals and eight to
+roughness so the combined set can be reviewed before remaining category work.

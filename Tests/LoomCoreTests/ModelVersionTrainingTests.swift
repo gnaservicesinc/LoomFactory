@@ -6,6 +6,42 @@ import XCTest
 
 @MainActor
 final class ModelVersionTrainingTests: XCTestCase {
+    func testCheckpointContinuationRetainsParentWhenOptimizerAndSamplerReset() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("loom-checkpoint-parent-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let input = try image(at: root.appendingPathComponent("material_diff.png"), role: .diffuse)
+        let target = try image(at: root.appendingPathComponent("material_disp.png"), role: .depth)
+        let original = try [input, target].map { try Data(contentsOf: $0) }
+        let project = try LoomProject(sourceFolder: root)
+        let datasetID = ImageMetadataStore.categoryID("Bricks")
+        let initial = TrainingSettings(imageSize: 32, epochs: 1, seed: 9587, modelWidth: 8, modelBlocks: 1)
+        let parent = try await project.trainMap(datasetID: datasetID, map: .depth, settings: initial, progress: { _ in })
+        let descriptor = try NativeFactoryTraining.json(parent.directory.appendingPathComponent("checkpoint.json"))
+        let parentPath = try XCTUnwrap(descriptor["weights_path"] as? String)
+        let parentHash = try TrainingRunFiles.sha256(parent.directory.appendingPathComponent(parentPath))
+        let parentFiles = try savedFiles(parent.directory)
+        try await project.selectModelVersion(runID: parent.id, datasetID: datasetID, map: .depth)
+        var settings = initial
+        settings.seed = 9588; settings.weightDecay = 0; settings.gradientAccumulationSteps = 4
+        let start = TrainingStart.checkpoint(runID: parent.id)
+        let child = try await project.trainMap(datasetID: datasetID, map: .depth, settings: settings,
+            start: start, progress: { _ in })
+        let request = try NativeFactoryTraining.json(child.directory.appendingPathComponent("request.json"))
+        XCTAssertEqual(request["resume_weights"] as? String, parent.directory.appendingPathComponent(parentPath).path)
+        let lineage = try XCTUnwrap(request["lineage"] as? [String: Any])
+        XCTAssertEqual(lineage["parent_run_id"] as? String, parent.id)
+        XCTAssertEqual(lineage["source"] as? String, "checkpoint")
+        XCTAssertEqual(lineage["weights_sha256"] as? String, parentHash)
+        let checkpoint = try NativeFactoryTraining.json(child.directory.appendingPathComponent("checkpoint.json"))
+        XCTAssertEqual(checkpoint["prior_updates"] as? Int, 1)
+        XCTAssertEqual(checkpoint["optimizer_updates"] as? Int, 1, "A changed optimizer/sampler resets state, not the starting weights")
+        XCTAssertEqual(try savedFiles(parent.directory), parentFiles)
+        XCTAssertEqual(try [input, target].map { try Data(contentsOf: $0) }, original)
+        let selected = try await project.selectedModelArtifact(datasetID: datasetID, map: .depth)
+        XCTAssertEqual(selected?.id, parent.id)
+    }
+
     func testRealTrainingReplacementAndSelectedExportContinuationPreserveAllEarlierWeights() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("loom-native-versions-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
