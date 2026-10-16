@@ -48,9 +48,10 @@ and logs in sibling `PhotoDiffuseResearch-2026-10-16`.
   names are frozen in result/test.json and shown under generated/A/B previews;
   source images carry file labels. Rendering/action evidence is not a live
   installed-app gesture acceptance claim.
-- Factory and Studio optimized Release builds pass. A separate Release-mode
-  lifecycle attempt compiled but correctly skipped because the material project
-  was busy again; the completed GPU lifecycle proof is the Debug test run. Prepared signed apps are
+- Factory and Studio optimized Release builds pass. A final optimized Release
+  lifecycle probe also passed in7.616 seconds, with the actual parent-tensor and
+  optimizer-state guard enabled. An earlier attempt correctly skipped a busy
+  material project. Neither installed app was replaced to run these tests. Prepared signed apps are
   retained in user storage; installed apps were not overwritten or launched by
   this task. Studio includes no newly trained photo payload. Root and Factory
   documentation give the exact manual training, review and build-inclusion steps.
