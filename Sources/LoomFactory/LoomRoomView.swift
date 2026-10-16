@@ -5,6 +5,7 @@ import SwiftUI
 struct LoomRoomView: View {
     @Bindable var model: FactoryModel
     @State private var pairingSheet = false
+    @State private var syntheticPhotoSheet = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -69,6 +70,7 @@ struct LoomRoomView: View {
             Button("OK") { model.errorMessage = nil }
         } message: { Text(model.errorMessage ?? "") }
         .sheet(isPresented: $pairingSheet) { PairImagesSheet(model: model) }
+        .sheet(isPresented: $syntheticPhotoSheet) { SyntheticPhotoDataSheet(model: model) }
         .onChange(of: model.settings) { model.scheduleSettingsSave() }
         .task {
             model.restoreLastFolder()
@@ -268,6 +270,9 @@ struct LoomRoomView: View {
                 Spacer()
                 TextField("Find a material or map", text: $model.imageSearch).textFieldStyle(.roundedBorder).frame(width: 200)
                 Button("Pair Images…") { pairingSheet = true }.disabled(model.busy || snapshot.images.count < 2)
+                Button("Synthetic Photos…", systemImage: "camera.badge.ellipsis") { syntheticPhotoSheet = true }
+                    .disabled(model.busy)
+                    .accessibilityIdentifier("loom.syntheticPhotos")
                 Button("Categorize", systemImage: "tag") { model.categorize() }.disabled(model.busy || snapshot.images.isEmpty)
                     .help("Categorize each material folder once using one diffuse image. Existing tags and reviewed images are preserved.")
             }

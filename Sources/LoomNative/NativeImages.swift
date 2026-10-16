@@ -59,6 +59,20 @@ public enum NativeImages {
         return try rgb(image, url: url, cancellation: cancellation)
     }
 
+    /// Exact native RGB crop with a caller-owned cache. Data preparation can
+    /// stream large resolution levels without retaining the whole corpus or
+    /// allocating a full-resolution Float32 RGB copy before cropping.
+    public static func readRGBCrop(from url: URL, crop: NativeCropTransform,
+                                   imageCache: NativeImageCache,
+                                   cancellation: NativeCancellation? = nil) throws -> NativeImage {
+        guard !crop.horizontalFlip, !crop.verticalFlip, crop.quarterTurns == 0 else {
+            throw NativeIOError.invalid("Exact RGB crop loading does not apply augmentation transforms.")
+        }
+        let pixels = try storedPixels(url, cancellation: cancellation, imageCache: imageCache)
+        let image = try numericPixels(pixels, region: crop, url: url, cancellation: cancellation)
+        return try rgb(image, url: url, cancellation: cancellation)
+    }
+
     private static func rgb(_ image: NativeImage, url: URL, cancellation: NativeCancellation?) throws -> NativeImage {
         var values = [Float](repeating: 0, count: image.width * image.height * 3)
         let linear = url.pathExtension.lowercased() == "exr"

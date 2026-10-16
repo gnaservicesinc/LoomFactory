@@ -84,6 +84,7 @@ final class FactoryModel {
     private(set) var previousTestResult: ModelTestResult?
     private(set) var blenderTestMaps: [BlenderTestMap] = []
     private(set) var lastBlenderExportURL: URL?
+    private(set) var lastSyntheticPhotoDirectory: URL?
     private(set) var testOriginalMap = ModelTestOriginalMap.resolve(inputURL: nil, map: nil, images: [])
     var imageSearch = ""
     var fileFilter: MaterialBrowserFilter = .all
@@ -1029,6 +1030,48 @@ final class FactoryModel {
                     "Folders needing review for Create ML: \(names). Check their category and native 1,024 × 1,024 diffuse image."))
             }
             NSWorkspace.shared.activateFileViewerSelecting([summary.directory])
+        }
+    }
+
+    func savedSyntheticPhotoRecipe() -> SyntheticPhotoRecipe {
+        guard let sourceFolder else { return .init() }
+        let file = sourceFolder.appendingPathComponent(".loom-factory/synthetic-photo-data/last-recipe.json")
+        return (try? JSONDecoder().decode(SyntheticPhotoRecipe.self, from: Data(contentsOf: file))) ?? .init()
+    }
+
+    func generateSyntheticPhotoData(_ recipe: SyntheticPhotoRecipe, parent: URL? = nil) {
+        guard !busy, snapshot != nil else { return }
+        let current = generation
+        let handler = progressHandler()
+        perform("Generating synthetic photo data", clearEvents: true) { [weak self] project in
+            let fresh = try await project.snapshot()
+            try recipe.validate()
+            let defaultParent = project.projectFolder.appendingPathComponent("synthetic-photo-data", isDirectory: true)
+            let chosenParent = (parent ?? defaultParent).resolvingSymlinksInPath().standardizedFileURL
+            let sourcePath = project.sourceFolder.path + "/"
+            guard !chosenParent.path.hasPrefix(sourcePath) || chosenParent.path.hasPrefix(project.projectFolder.path + "/"),
+                  chosenParent != project.sourceFolder else {
+                throw LoomError("Export outside the visible source materials, or use the project's .loom-factory data folder.")
+            }
+            try FileManager.default.createDirectory(at: defaultParent, withIntermediateDirectories: true)
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            try encoder.encode(recipe).write(to: defaultParent.appendingPathComponent("last-recipe.json"), options: .atomic)
+            let output = chosenParent.appendingPathComponent("Synthetic Photos-" + UUID().uuidString.lowercased(), isDirectory: true)
+            guard let self, self.generation == current else { return }
+            self.lastSyntheticPhotoDirectory = output
+            let cancellation = NativeCancellation()
+            let result = try await withTaskCancellationHandler {
+                try await Task.detached(priority: .utility) {
+                    try SyntheticPhotoData.generate(images: fresh.images, recipe: recipe, destination: output,
+                        sourceRoot: fresh.sourceURL,
+                        cancellation: cancellation, progress: { value, message in
+                            handler(.init(type: "status", message: message, progress: value))
+                        })
+                }.value
+            } onCancel: { cancellation.cancel() }
+            guard self.generation == current else { return }
+            self.events.append(.init(type: "summary", message:
+                "Generated \(result.pairCount) synthetic pairs from \(result.materialCount) materials. Originals and tags are unchanged. Saved recipe and dataset: \(result.directory.path)"))
         }
     }
 
