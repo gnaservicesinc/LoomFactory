@@ -34,6 +34,41 @@ def review_grid_cells(width, height, pixels_per_node, max_edge_vertices):
     return max(1, math.floor(columns * scale)), max(1, math.floor(rows * scale))
 
 
+def bind_surface_uv(plane):
+    """Use one explicit UV basis for displacement and every material texture.
+
+    primitive_grid_add already creates a UV layer. Creating another UVMap
+    silently receives a .001 suffix, so relying on active/default names can
+    make image sampling and tangent-space normals use different bases.
+    This operates only on the newly generated review mesh.
+    """
+    while plane.data.uv_layers:
+        plane.data.uv_layers.remove(plane.data.uv_layers[0])
+    uv = plane.data.uv_layers.new(name='MaterialUV')
+    uv.active_render = True
+    plane.data.uv_layers.active = uv
+    for polygon in plane.data.polygons:
+        polygon.use_smooth = True
+        for loop_index in polygon.loop_indices:
+            vertex = plane.data.vertices[plane.data.loops[loop_index].vertex_index]
+            uv.data[loop_index].uv = ((vertex.co.x + 1) / 2, (vertex.co.y + 1) / 2)
+    for material in plane.data.materials:
+        tree = material.node_tree
+        uv_node = tree.nodes.new('ShaderNodeUVMap')
+        uv_node.name = 'Explicit material UV'
+        uv_node.uv_map = uv.name
+        for node in tree.nodes:
+            if node.type == 'TEX_IMAGE':
+                tree.links.new(uv_node.outputs['UV'], node.inputs['Vector'])
+            elif node.type == 'NORMAL_MAP':
+                node.uv_map = uv.name
+    for modifier in plane.modifiers:
+        if modifier.type == 'DISPLACE':
+            modifier.texture_coords = 'UV'
+            modifier.uv_layer = uv.name
+    return uv
+
+
 def export_textured_obj(plane, path, diffuse):
     """Bake actual displacement geometry; OBJ/MTL carries the diffuse overlay.
 
@@ -84,8 +119,9 @@ def render_set(record, prefix, output, lighting, neutral=False, options=None):
     scene.cycles.device = 'CPU'
     scene.cycles.samples = 24
     scene.cycles.use_denoising = False
-    scene.render.threads_mode = 'FIXED'
-    scene.render.threads = 4
+    scene.render.threads_mode = 'AUTO'
+    scene.cycles.pixel_filter_type = 'BLACKMAN_HARRIS'
+    scene.cycles.filter_width = 1
     scene.render.resolution_x = 768
     scene.render.resolution_y = 640
     scene.render.resolution_percentage = 100
@@ -104,7 +140,7 @@ def render_set(record, prefix, output, lighting, neutral=False, options=None):
         # A surface-normal coordinate link is not valid environment lighting.
         environment.texture_mapping.rotation[2] = math.radians(options.get('environment_rotation', 0))
         background = world_nodes.new('ShaderNodeBackground')
-        background.inputs['Strength'].default_value = options.get('environment_strength', 0.6)
+        background.inputs['Strength'].default_value = options.get('environment_strength', 0.05)
         world_out = world_nodes.new('ShaderNodeOutputWorld')
         world_links = scene.world.node_tree.links
         world_links.new(environment.outputs['Color'], background.inputs['Color'])
@@ -148,18 +184,12 @@ def render_set(record, prefix, output, lighting, neutral=False, options=None):
     bpy.ops.mesh.primitive_grid_add(x_subdivisions=columns, y_subdivisions=rows, size=2)
     plane = bpy.context.object
     plane.data.materials.append(material)
-    uv = plane.data.uv_layers.new(name='UVMap')
-    for polygon in plane.data.polygons:
-        polygon.use_smooth = True
-        for loop_index in polygon.loop_indices:
-            vertex = plane.data.vertices[plane.data.loops[loop_index].vertex_index]
-            uv.data[loop_index].uv = ((vertex.co.x + 1) / 2, (vertex.co.y + 1) / 2)
     height = bpy.data.textures.new('Raw native height', type='IMAGE')
     height.image = height_image
     displacement = plane.modifiers.new('Fixed physical relief', 'DISPLACE')
     displacement.texture = height
     displacement.texture_coords = 'UV'
-    displacement.uv_layer = 'UVMap'
+    bind_surface_uv(plane)
     displacement.mid_level = options.get('height_midpoint', 0.5)
     displacement.strength = 0.08 * options.get('height_gain', 1)
     exported = None

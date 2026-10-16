@@ -69,7 +69,7 @@ for material, record, midpoint in records:
                 result = directory / name
                 if result.exists():
                     raise FileExistsError('Preserve existing review: ' + str(result))
-                options = {**preset, 'height_midpoint': midpoint, 'pixels_per_node': config['pixels_per_node'], 'max_mesh_edge_vertices': config.get('max_mesh_edge_vertices', 513), 'environment': config['environment'], 'environment_rotation': 135 if light == 'rotated' else 0, 'environment_strength': 0.35 if light == 'grazing' else 3}
+                options = {**preset, 'height_midpoint': midpoint, 'pixels_per_node': config['pixels_per_node'], 'max_mesh_edge_vertices': config.get('max_mesh_edge_vertices', 513), 'environment': config['environment'], 'environment_rotation': 135 if light == 'rotated' else 0, 'environment_strength': 0.05}
                 if not neutral and preset['height_gain'] not in exported_gains and preset['height_gain'] in [1, 4]:
                     options['export_obj'] = str(model_dir / f'height-{preset["height_gain"]}x.obj')
                     exported_gains.add(preset['height_gain'])

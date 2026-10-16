@@ -25,3 +25,31 @@ class folders. Re-running updates only links owned by this export and removes
 its obsolete links. Unrelated output files are preserved. A fresh run with the
 same files creates no duplicate examples. This utility is an explicit export;
 it does not retrain, install or connect a map-type classifier to the apps.
+
+# Blender material review from a user template
+
+`build-blender-template-review.py` creates self-contained `.blend` comparisons
+from a saved example and an existing artistic-review configuration. It preserves
+the example's simple quad, UV/Mapping chain, shader displacement, normal-map
+basis, subdivision modifier and both render-engine configurations. Four native
+1K maps are packed byte-for-byte; no dense mesh, OBJ or resampled map is created.
+The world uses strength .05, Cycles uses Blackman-Harris filter width1, and CPU
+threads use Auto-Detect. Matching scenes retain the example's denoising; a
+separate labeled Cycles scene disables it. Additional scenes isolate normal,
+height and roughness contributions and provide a constant .85 roughness control.
+
+```sh
+blender --background --factory-startup --python Scripts/build-blender-template-review.py -- \
+  --template /path/to/example.blend --review /path/to/artistic-review \
+  --output /path/to/new-blender-review
+blender --background --factory-startup --python Scripts/verify-blender-template-review.py -- \
+  /path/to/new-blender-review
+```
+
+Use a new output directory; existing scene files are never overwritten. The
+verification reopens every file, checks all scene controls, exact packed map
+hashes, topology/UVs/modifiers, mapping, material texture settings, world strength,
+Eevee settings and Cycles settings. It does not claim live UI acceptance or
+learned material quality. The supplied template must have a single quad, one UV
+layer, direct map connections to its Principled shader, tangent Normal Map node
+and Displacement node. Original source images and example files stay unchanged.
