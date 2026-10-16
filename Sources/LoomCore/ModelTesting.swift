@@ -21,16 +21,19 @@ public struct ModelTestResult: Sendable {
     public let note: String
     public let checkpointID: String?
     public let inputSHA256: String?
+    public let boundaryHandling: String
 
     public init(directory: URL, inputURL: URL, outputURL: URL, runID: String, source: TrainingWeightSource,
                 map: MapRole, width: Int, height: Int, tileSize: Int, tileCount: Int, note: String,
-                previewURL: URL? = nil, checkpointID: String? = nil, inputSHA256: String? = nil) {
+                previewURL: URL? = nil, checkpointID: String? = nil, inputSHA256: String? = nil,
+                boundaryHandling: String = ModelTestBoundaryHandling.legacy.rawValue) {
         self.directory = directory; self.inputURL = inputURL; self.outputURL = outputURL
         self.previewURL = previewURL ?? outputURL
         self.runID = runID; self.source = source; self.map = map
         self.width = width; self.height = height; self.tileSize = tileSize; self.tileCount = tileCount; self.note = note
         self.checkpointID = checkpointID
         self.inputSHA256 = inputSHA256
+        self.boundaryHandling = boundaryHandling
     }
 }
 
@@ -39,6 +42,7 @@ extension LoomProject {
     /// changing the active export version, or importing/relabeling the image.
     public func testModel(datasetID: String, map: MapRole, runID: String, source: TrainingWeightSource,
                           inputURL: URL, checkpointID: String? = nil,
+                          boundaryHandling: ModelTestBoundaryHandling = .context,
                           progress: @escaping @Sendable (TrainingEvent) -> Void) async throws -> ModelTestResult {
         let operationLease = try TrainingQueueLease.requireAvailable(projectFolder: projectFolder)
         defer { withExtendedLifetime(operationLease) {} }
@@ -53,7 +57,7 @@ extension LoomProject {
             try Task.checkCancellation()
             return try await Task.detached(priority: .userInitiated) {
                 try ModelTestWorker.run(model: model, inputURL: inputURL, output: output,
-                    cancellation: cancellation, progress: progress)
+                    cancellation: cancellation, progress: progress, boundaryHandling: boundaryHandling)
             }.value
         } onCancel: { cancellation.cancel() }
     }
@@ -128,6 +132,7 @@ enum ModelTestWorker {
     /// work. Shipping callers always construct the registered native network.
     static func run(model: ModelTestSelection, inputURL: URL, output: URL,
                     cancellation: NativeCancellation, progress: @escaping @Sendable (TrainingEvent) -> Void,
+                    boundaryHandling: ModelTestBoundaryHandling = .context,
                     compactMemoryBudget suppliedCompactMemoryBudget: UInt64? = nil,
                     predictor suppliedPredictor: Predictor? = nil) throws -> ModelTestResult {
         defer { NativeImages.clearDecodedPixelCache() }
@@ -196,11 +201,14 @@ enum ModelTestWorker {
         // Fixed tile dimensions bound GPU scratch use even for an 8K original.
         // Source pixels retain their native coordinates and numeric precision.
         let tileSize: Int, tileCount: Int, overlap: Int
+        let stitching: String
+        var contextRecord: [String: Any]?
         let pixels: [Float]
         if model.architecture.isCompact {
             // Compact channel attention uses the complete field's mean. Tiling
             // changes its math even when overlaps would hide a visible seam.
             tileSize = max(image.width, image.height); tileCount = 1; overlap = 0
+            stitching = "whole-field-v1"
             var input = [Float](repeating: 0, count: image.values.count)
             let plane = image.width * image.height
             for pixel in 0..<plane {
@@ -211,8 +219,22 @@ enum ModelTestWorker {
             pixels = try predictor(input, image.height, image.width)
             guard pixels.count == plane * model.architecture.outputChannels,
                   pixels.allSatisfy(\.isFinite) else { throw LoomError("The saved compact model produced invalid native output pixels.") }
+        } else if boundaryHandling == .context {
+            let (halo, phase) = try ModelTestContextPlan.halo(for: model.architecture)
+            let plan = try ModelTestContextPlan(width: image.width, height: image.height,
+                tileSize: min(1024, model.imageSize), halo: halo, phase: phase)
+            tileSize = max(plan.inputWidth, plan.inputHeight); tileCount = plan.tiles.count; overlap = 2 * halo
+            stitching = ModelTestBoundaryHandling.context.rawValue
+            contextRecord = ["halo": halo, "phase_alignment": phase,
+                "input_width": plan.inputWidth, "input_height": plan.inputHeight,
+                "valid_core_width": plan.coreWidth, "valid_core_height": plan.coreHeight,
+                "outside_image_extension": "reflect-without-endpoint-repeat",
+                "source_files_modified": false, "output_resized": false]
+            pixels = try ModelTestImage.predictContext(image: image, plan: plan, map: model.map,
+                cancellation: cancellation, progress: progress, predictor: predictor)
         } else {
             tileSize = min(1024, model.imageSize)
+            stitching = ModelTestBoundaryHandling.legacy.rawValue
             let plan = try ModelTestTilePlan(width: image.width, height: image.height, tileSize: tileSize)
             tileCount = plan.tiles.count; overlap = plan.overlap
             pixels = try ModelTestImage.predict(image: image, plan: plan, map: model.map,
@@ -243,8 +265,12 @@ enum ModelTestWorker {
         let note = (saturationNote.map { $0 + " " } ?? "")
             + (model.architecture.isCompact
                 ? "Original \(image.width) × \(image.height) resolution; one complete native field, with raw linear output. "
-                : "Original \(image.width) × \(image.height) resolution; \(tileCount) overlapping native tile\(tileCount == 1 ? "" : "s"). Overlap blending can differ from whole-image inference. ")
-            + (model.map == .normal && !model.architecture.isCompact ? "OpenGL normal vectors are normalized after blending. " : "")
+                : boundaryHandling == .context
+                    ? "Original \(image.width) × \(image.height) resolution; \(tileCount) context tiles. Border-affected margins are discarded; temporary context beyond the image is reflected. Original files and pixel scale are unchanged. "
+                    : "Original \(image.width) × \(image.height) resolution; \(tileCount) overlapping native tile\(tileCount == 1 ? "" : "s"). Legacy overlap blending includes tile-border predictions. ")
+            + (model.map == .normal && !model.architecture.isCompact
+                ? (boundaryHandling == .context ? "OpenGL normal vectors are normalized after valid-core assembly. "
+                    : "OpenGL normal vectors are normalized after blending. ") : "")
             + "The canonical EXR stores the Float32 prediction values without clamping or normalization. "
             + (model.architecture.isCompact ? "The PNG preview clamps to [0,1] before 16-bit quantization, without per-output normalization."
                 : "The PNG preview uses fixed [0,1] values quantized to 16 bits, without per-output normalization.")
@@ -260,8 +286,9 @@ enum ModelTestWorker {
             "output_statistics": statistics.record,
             "output_diagnostic": saturationNote as Any? ?? NSNull(),
             "width": image.width, "height": image.height, "tile_size": tileSize, "tile_count": tileCount,
-            "overlap": overlap, "stitching": model.architecture.isCompact ? "whole-field-v1" : "linear-feather-overlap-v1",
-            "normal_output_transform": model.map == .normal && !model.architecture.isCompact ? "unit-normalize-after-blending" : "none",
+            "overlap": overlap, "stitching": stitching, "context": contextRecord as Any? ?? NSNull(),
+            "normal_output_transform": model.map == .normal && !model.architecture.isCompact
+                ? (boundaryHandling == .context ? "unit-normalize-after-valid-core" : "unit-normalize-after-blending") : "none",
             "head_activation": model.architecture.isCompact ? "linear" : "sigmoid",
             "memory_admission": memoryAdmission as Any? ?? NSNull(),
             "normal_convention": model.map == .normal ? "OpenGL" as Any : NSNull(),
@@ -272,7 +299,7 @@ enum ModelTestWorker {
         let result = ModelTestResult(directory: output, inputURL: original, outputURL: output.appendingPathComponent(name),
             runID: model.runID, source: model.source, map: model.map, width: image.width, height: image.height,
             tileSize: tileSize, tileCount: tileCount, note: note, previewURL: output.appendingPathComponent(previewName),
-            checkpointID: model.checkpointID, inputSHA256: inputHash)
+            checkpointID: model.checkpointID, inputSHA256: inputHash, boundaryHandling: stitching)
         progress(.init(type: "completed", message: "Saved full-resolution \(model.map.rawValue) output", progress: 1))
         return result
     }

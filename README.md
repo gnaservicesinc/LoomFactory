@@ -40,6 +40,16 @@ Crop origins can use every native pixel position that fits the selected size. Se
 
 **Models** keeps the chosen saved version and **Approve & Use** visible above independently scrolling groups and details. Approval records a human review and chooses that exact version for export. **Test output** opens any saved model or checkpoint with usable native weights, independently of approval or deployment-package availability. Choose any source diffuse or an external image; paired original maps appear beside the input and result when present. Testing inputs do not inherit training membership or ignore filters.
 
+In **Test Model**, residual and Pyramid inference now uses surrounding native
+context and discards tile margins affected by the graph's zero padding. This
+removes tile-border contamination without retraining or changing saved weights.
+Beyond the actual image boundary, only the temporary model input uses reflected
+context; original files, output dimensions and pixel scale stay unchanged.
+**Edge handling → Legacy overlap blend (comparison)** retains the earlier result
+for A/B review. Compact NAF continues to use one complete field. See the
+[Paper border diagnosis](Docs/Validation/paper-context-inference-2026-10-16.md)
+for saved-weight evidence, cost and quality limits.
+
 **Use checkpoint as model** in Models or saved training versions exports that checkpoint's exact weights into a separate selected model version. The original run, its continuation state and its existing exported model remain intact. Review and approve the new candidate when ready; package export uses the selected version. With validation disabled, ordinary training export uses final weights, so an earlier checkpoint can be a better visual choice.
 
 See [checkpoint and Materials validation](Docs/Validation/checkpoint-materials-usability-2026-10-14.md) for the measured checks and remaining installed/live verification boundary.

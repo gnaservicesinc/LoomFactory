@@ -17,6 +17,12 @@ struct ModelTestView: View {
             FactoryPanel("Test a model", subtitle: "Run a saved model on a diffuse image and inspect its output at the original dimensions.") {
                 modelSelection
                 inputSelection
+                if model.selectedTestVersion?.settings?.modelArchitecture != "loom-factory-material-compact-naf-v1" {
+                    Picker("Edge handling", selection: $model.testBoundaryHandling) {
+                        Text("Use context; discard tile borders").tag(ModelTestBoundaryHandling.context)
+                        Text("Legacy overlap blend (comparison)").tag(ModelTestBoundaryHandling.legacy)
+                    }.disabled(model.busy).accessibilityIdentifier("modelTest.boundaryHandling")
+                }
                 HStack(spacing: 12) {
                     Button("Run Model", systemImage: "play.fill") { model.testModel() }
                         .buttonStyle(.borderedProminent).controlSize(.large)
@@ -236,7 +242,7 @@ struct ModelTestCheckpointComparison: View {
     let second: ModelTestResult
 
     var body: some View {
-        FactoryPanel("Checkpoint A/B", subtitle: "The previous and current saved weights on the same unchanged input, shown at the same scale.") {
+        FactoryPanel("Output A/B", subtitle: "Previous and current results on the same unchanged input, shown at the same scale. Saved-weight and edge-handling identities are listed below.") {
             HStack(alignment: .top, spacing: 18) {
                 output(first, label: "A · Previous")
                 output(second, label: "B · Current")
@@ -249,6 +255,7 @@ struct ModelTestCheckpointComparison: View {
             Text(label).font(.subheadline.weight(.medium))
             Text(result.source == .model ? "Exported model" : "Checkpoint \(result.checkpointID?.prefix(12) ?? "latest")")
                 .font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            Text(result.boundaryHandling).font(.caption).foregroundStyle(.secondary)
             FactoryImage(url: result.previewURL, revision: result.directory.path, maximumPixels: max(result.width, result.height),
                 interpolation: .none, applyOrientationTransform: false)
                 .frame(height: 400).clipShape(RoundedRectangle(cornerRadius: 7))

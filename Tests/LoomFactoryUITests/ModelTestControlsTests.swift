@@ -9,6 +9,31 @@ import UniformTypeIdentifiers
 
 @Suite(.serialized)
 struct ModelTestControlsTests {
+    @Test @MainActor
+    func boundaryPolicyComparisonRetainsTheSameSavedCheckpointAndInput() async throws {
+        let fixture = try await ModelTestControlsFixture()
+        defer { fixture.remove() }
+        let model = FactoryModel(rememberSourceFolder: false)
+        model.openFolder(fixture.source)
+        try await wait(model)
+        model.showModelTesting(try #require(model.testableModelVersions.first))
+        model.setModelTestInput(fixture.externalInput)
+        model.testBoundaryHandling = .legacy
+        model.recordModelTestResult(fixture.result)
+        model.testBoundaryHandling = .context
+        #expect(model.modelTestResult == nil)
+        #expect(model.previousTestResult?.boundaryHandling == ModelTestBoundaryHandling.legacy.rawValue)
+        let r = fixture.result
+        model.recordModelTestResult(ModelTestResult(directory: r.directory, inputURL: r.inputURL, outputURL: r.outputURL,
+            runID: r.runID, source: r.source, map: r.map, width: r.width, height: r.height,
+            tileSize: r.tileSize, tileCount: r.tileCount, note: "Context policy fixture", previewURL: r.previewURL,
+            boundaryHandling: ModelTestBoundaryHandling.context.rawValue))
+        #expect(model.previousTestResult != nil)
+        #expect(model.modelTestResult?.boundaryHandling == ModelTestBoundaryHandling.context.rawValue)
+        #expect(model.blenderTestMaps.count == 1)
+        try await render(ModelTestView(model: model), size: NSSize(width: 1140, height: 1700), name: "model-test-context-policy.png")
+    }
+
     @Test(.enabled(if: ProcessInfo.processInfo.environment["LOOM_TEST_BLENDER_EXPORT"] == "1"))
     @MainActor func backgroundBlenderProcessExportsExactCheckpointWithoutInference() async throws {
         let fixture = try await ModelTestControlsFixture()

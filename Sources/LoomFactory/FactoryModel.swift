@@ -71,6 +71,11 @@ final class FactoryModel {
     var testWeightSource: TrainingWeightSource? {
         didSet { if testWeightSource != oldValue { preserveTestResultForComparison(); modelTestResult = nil; testCheckpointID = nil } }
     }
+    var testBoundaryHandling: ModelTestBoundaryHandling = .context {
+        didSet {
+            if testBoundaryHandling != oldValue { preserveTestResultForComparison(); modelTestResult = nil }
+        }
+    }
     private var modelTestDatasetID: String?
     private var modelTestMap: MapRole?
     private(set) var testCheckpointID: String?
@@ -883,6 +888,7 @@ final class FactoryModel {
         guard canTestModel, let version = selectedTestVersion, let inputURL = testInputURL,
               let source = effectiveTestWeightSource else { return }
         let checkpointID = source == .checkpoint ? testCheckpointID : nil
+        let boundaryHandling = testBoundaryHandling
         selectedTestVersionID = version.id
         testWeightSource = source
         testCheckpointID = checkpointID
@@ -892,10 +898,12 @@ final class FactoryModel {
         modelTestResult = nil
         perform("Testing \(version.datasetName) · \(version.map.displayName)", clearEvents: true) { [weak self] project in
             let result = try await project.testModel(datasetID: version.datasetID, map: version.map, runID: version.id,
-                                                     source: source, inputURL: inputURL, checkpointID: checkpointID, progress: onProgress)
+                                                     source: source, inputURL: inputURL, checkpointID: checkpointID,
+                                                     boundaryHandling: boundaryHandling, progress: onProgress)
             guard let self, self.generation == current, self.selectedTestVersion?.id == version.id,
                   self.testInputURL == inputURL, self.effectiveTestWeightSource == source,
-                  (source != .checkpoint || self.testCheckpointID == checkpointID) else { return }
+                  (source != .checkpoint || self.testCheckpointID == checkpointID),
+                  self.testBoundaryHandling == boundaryHandling else { return }
             self.recordModelTestResult(result)
         }
     }
@@ -903,7 +911,7 @@ final class FactoryModel {
     func recordModelTestResult(_ result: ModelTestResult) {
         if let previous = previousTestResult,
            previous.runID != result.runID || previous.inputURL != result.inputURL || previous.inputSHA256 != result.inputSHA256 || previous.map != result.map ||
-           (previous.source == result.source && previous.checkpointID == result.checkpointID) {
+           (previous.source == result.source && previous.checkpointID == result.checkpointID && previous.boundaryHandling == result.boundaryHandling) {
             previousTestResult = nil
         }
         modelTestResult = result
