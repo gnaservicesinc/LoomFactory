@@ -7,6 +7,19 @@ import XCTest
 @testable import LoomCore
 
 final class ModelComparisonTests: XCTestCase {
+    func testComparisonRefusesAnotherProjectActorsOperationBeforeReadingModels() async throws {
+        let (project, _, _) = try fixture()
+        defer { try? FileManager.default.removeItem(at: project.sourceFolder) }
+        let lease = try XCTUnwrap(TrainingQueueLease.requireAvailable(projectFolder: project.projectFolder))
+        do {
+            _ = try await project.compareModels(firstArtifactID: "first", secondArtifactID: "second",
+                pairID: "pair", progress: { _ in XCTFail("A busy project must not start inference") })
+            XCTFail("Comparison must share the training operation lease")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("Another model operation"), error.localizedDescription) }
+        withExtendedLifetime(lease) {}
+        XCTAssertFalse(FileManager.default.fileExists(atPath: project.projectFolder.appendingPathComponent("comparisons").path))
+    }
+
     func testRealSavedModelsUseTheSameNativeCropAndFixedSixteenBitScaleWithoutChangingSources() async throws {
         let (project, input, target) = try fixture()
         let root = project.sourceFolder
@@ -106,6 +119,27 @@ final class ModelComparisonTests: XCTestCase {
         options = try await project.comparePairOptions(datasetID: datasetID, map: .depth,
             artifactIDs: [first.id, second.id])
         XCTAssertEqual(options.first?.seenBySecond, .unknown)
+    }
+
+    func testMembershipIndexKeepsUnrelatedUnknownSplitsLocalAndKnownTrainingWinsOverIncompleteAncestry() async throws {
+        let (project, input, _) = try fixture()
+        defer { try? FileManager.default.removeItem(at: project.sourceFolder) }
+        let projectID = try await project.snapshot().projectID
+        let first = try model(project: project, projectID: projectID, id: "holdout", size: 32,
+            value: 0.25, input: input, split: "validation", export: false)
+        let second = try model(project: project, projectID: projectID, id: "trained", size: 32,
+            value: 0.75, input: input, split: "training",
+            lineage: TrainingLineage(parentRunID: "missing-parent", source: .model, weightsSHA256: "fixture"), export: false)
+        let unrelated = project.sourceFolder.appendingPathComponent("unrelated/diffuse.png")
+        try NativeFactoryTraining.writeJSON(["samples": [
+            ["input": input.path, "split": "validation"],
+            ["input": unrelated.path, "split": "unknown"]
+        ]], to: first.directory.appendingPathComponent("request.json"))
+        let options = try await project.comparePairOptions(datasetID: ImageMetadataStore.categoryID("Bricks"), map: .depth,
+            artifactIDs: [first.id, second.id])
+        XCTAssertEqual(options.count, 1)
+        XCTAssertEqual(options.first?.seenByFirst, .heldOut)
+        XCTAssertEqual(options.first?.seenBySecond, .training)
     }
 
     private func fixture() throws -> (LoomProject, URL, URL) {

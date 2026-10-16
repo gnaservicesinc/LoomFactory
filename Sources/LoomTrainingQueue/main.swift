@@ -178,8 +178,10 @@ func writeJSON(_ value: Any, _ url: URL) throws {
                 throw LoomError("Missing matched artist target or saved weight for \(role.rawValue).")
             }
             set["original_" + role.rawValue] = target.url.path
-            let test = try await project.testModel(datasetID: config.datasetID, map: role, runID: weight.runID,
-                source: weight.source, inputURL: diffuse.url, progress: { print($0.message) })
+            let test = try await lease.withLease {
+                try await project.testModel(datasetID: config.datasetID, map: role, runID: weight.runID,
+                    source: weight.source, inputURL: diffuse.url, progress: { print($0.message) })
+            }
             set[role.rawValue] = test.outputURL.path
             set[role.rawValue + "_run_id"] = weight.runID
         }
@@ -313,11 +315,13 @@ func writeJSON(_ value: Any, _ url: URL) throws {
             }
             var result: [String: Any] = ["id": job.id, "category": job.category, "map": job.map.rawValue]
             do {
-                let artifact = try await project.trainMap(datasetID: job.datasetID, map: job.map, settings: job.settings,
-                    start: start,
-                    runLabel: "Overnight quality · \(job.category) · \(job.map.displayName)",
-                    scalarLossOverride: job.map != .normal || job.settings.modelArchitecture == NativeArchitecture.compactIdentifier ? job.settings.scalarLoss : nil,
-                    progress: { status.event($0) })
+                let artifact = try await lease.withLease {
+                    try await project.trainMap(datasetID: job.datasetID, map: job.map, settings: job.settings,
+                        start: start,
+                        runLabel: "Overnight quality · \(job.category) · \(job.map.displayName)",
+                        scalarLossOverride: job.map != .normal || job.settings.modelArchitecture == NativeArchitecture.compactIdentifier ? job.settings.scalarLoss : nil,
+                        progress: { status.event($0) })
+                }
                 result["status"] = "completed"; result["run_id"] = artifact.id
             } catch {
                 result["status"] = error is TrainingSavedStop ? "saved_stopped" : "failed"
@@ -348,17 +352,21 @@ func writeJSON(_ value: Any, _ url: URL) throws {
                 var reviewSource = TrainingWeightSource.checkpoint
                 if Date() < deadline {
                     do {
-                        let exported = try await project.exportCheckpointModelVersion(runID: checkpoint.runID,
-                            datasetID: job.datasetID, map: job.map, preferBestValidation: job.settings.exportBestWeights,
-                            progress: { status.event($0) })
+                        let exported = try await lease.withLease {
+                            try await project.exportCheckpointModelVersion(runID: checkpoint.runID,
+                                datasetID: job.datasetID, map: job.map, preferBestValidation: job.settings.exportBestWeights,
+                                progress: { status.event($0) })
+                        }
                         result["exported_run_id"] = exported.id
                         reviewRunID = exported.id; reviewSource = .model
                     } catch { result["export_error"] = String(describing: error) }
                 }
                 if let input = job.evaluationInput, Date() < deadline, result["export_error"] == nil {
                     do {
-                        let test = try await project.testModel(datasetID: job.datasetID, map: job.map, runID: reviewRunID,
-                            source: reviewSource, inputURL: URL(fileURLWithPath: input), progress: { status.event($0) })
+                        let test = try await lease.withLease {
+                            try await project.testModel(datasetID: job.datasetID, map: job.map, runID: reviewRunID,
+                                source: reviewSource, inputURL: URL(fileURLWithPath: input), progress: { status.event($0) })
+                        }
                         result["test_directory"] = test.directory.path
                         result["test_run_id"] = reviewRunID
                         result["test_weight_source"] = reviewSource.rawValue

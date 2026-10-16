@@ -32,6 +32,10 @@ extension LoomProject {
         let ids = Array(Set(runIDs)).sorted()
         guard !ids.isEmpty else { return TrainingRunDeletion(runIDs: [], trashURLs: []) }
         try validateRunDeletionRoot(projectFolder)
+        // A different app or overnight queue may own this project even when
+        // this actor is idle. Destructive operations cannot nest in its lease.
+        let lease = try TrainingQueueLease.requireExclusive(projectFolder: projectFolder)
+        defer { withExtendedLifetime(lease) {} }
         let runs = projectFolder.appendingPathComponent("runs", isDirectory: true)
         try validateRunDeletionRoot(runs)
         // Validate the complete request before moving any folder.

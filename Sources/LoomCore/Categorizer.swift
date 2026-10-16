@@ -14,11 +14,15 @@ public struct CategorizationSummary: Sendable {
 extension LoomProject {
     @discardableResult
     public func categorize(using modelURL: URL, progress: @Sendable (Double, String) -> Void) async throws -> CategorizationSummary {
+        let operationLease = try TrainingQueueLease.requireAvailable(projectFolder: projectFolder)
+        defer { withExtendedLifetime(operationLease) {} }
         guard !operationActive else { throw LoomError("An operation is already running in this source project. Stop it before categorizing images.") }
         operationActive = true
         defer { operationActive = false }
         let images = try scanImages()
-        let compiled = modelURL.pathExtension == "mlmodelc" ? modelURL : try await MLModel.compileModel(at: modelURL)
+        let alreadyCompiled = modelURL.pathExtension.lowercased() == "mlmodelc"
+        let compiled = alreadyCompiled ? modelURL : try await MLModel.compileModel(at: modelURL)
+        defer { if !alreadyCompiled { try? FileManager.default.removeItem(at: compiled) } }
         try Task.checkCancellation()
         var labelNames: [String: String] = [:]
         let descriptor = modelURL.deletingLastPathComponent().appendingPathComponent("model.json")

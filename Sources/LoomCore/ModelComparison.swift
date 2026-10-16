@@ -50,13 +50,16 @@ extension LoomProject {
             projectFolder: projectFolder, projectID: document.id, datasetID: datasetID, map: map)
         guard let dataset = current.datasets.first(where: { $0.id == datasetID }) else { return [] }
         let size = ComparisonWorker.commonCropSize(models)
+        let memberships = models.map { ComparisonWorker.membership(run: $0.artifact.directory, projectFolder: projectFolder) }
         return try TrainingPairSelector.select(images: current.images, dataset: dataset.name, map: map, size: size).map { pair in
-            ComparisonWorker.option(pair, first: models[0], second: models[1], projectFolder: projectFolder)
+            ComparisonWorker.option(pair, first: memberships[0], second: memberships[1])
         }
     }
 
     public func compareModels(firstArtifactID: String, secondArtifactID: String, pairID: String,
                               progress: @escaping @Sendable (TrainingEvent) -> Void) async throws -> ModelComparisonResult {
+        let operationLease = try TrainingQueueLease.requireAvailable(projectFolder: projectFolder)
+        defer { withExtendedLifetime(operationLease) {} }
         guard !operationActive else { throw LoomError("Stop the current operation before comparing models.") }
         let current = try snapshot()
         guard let first = current.artifacts.first(where: { $0.id == firstArtifactID }),
@@ -69,7 +72,8 @@ extension LoomProject {
         let size = ComparisonWorker.commonCropSize(models)
         guard let pair = try TrainingPairSelector.select(images: current.images, dataset: dataset.name, map: map, size: size)
             .first(where: { $0.id == pairID }) else { throw LoomError("The selected diffuse and target pair is no longer available. Refresh the comparison.") }
-        let option = ComparisonWorker.option(pair, first: models[0], second: models[1], projectFolder: projectFolder)
+        let memberships = models.map { ComparisonWorker.membership(run: $0.artifact.directory, projectFolder: projectFolder) }
+        let option = ComparisonWorker.option(pair, first: memberships[0], second: memberships[1])
         let root = sourceFolder
         let output = projectFolder.appendingPathComponent("comparisons/" + UUID().uuidString.lowercased(), isDirectory: true)
         let cancellation = NativeCancellation()
@@ -135,30 +139,41 @@ private enum ComparisonWorker {
         }
     }
 
-    static func option(_ pair: TrainingPair, first: Model, second: Model, projectFolder: URL) -> ModelComparisonPair {
+    static func option(_ pair: TrainingPair, first: MembershipIndex, second: MembershipIndex) -> ModelComparisonPair {
         ModelComparisonPair(id: pair.id, inputURL: pair.input.url, targetURL: pair.target.url,
             label: pair.input.displayName + " · " + pair.input.dimensions,
             width: pair.input.width, height: pair.input.height,
-            seenByFirst: membership(pair, run: first.artifact.directory, projectFolder: projectFolder),
-            seenBySecond: membership(pair, run: second.artifact.directory, projectFolder: projectFolder))
+            seenByFirst: first.membership(pair), seenBySecond: second.membership(pair))
+    }
+
+    struct MembershipIndex {
+        var training: Set<URL> = [], heldOut: Set<URL> = [], unknown: Set<URL> = []
+        var incomplete = false
+
+        func membership(_ pair: TrainingPair) -> ModelComparisonMembership {
+            let material = pair.input.url.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath()
+            if training.contains(material) { return .training }
+            return heldOut.contains(material) && !unknown.contains(material) && !incomplete ? .heldOut : .unknown
+        }
     }
 
     // A material is held out only when its entire folder was absent from every
     // ancestor's training split. A held-out crop from a trained folder is training.
-    static func membership(_ pair: TrainingPair, run: URL, projectFolder: URL) -> ModelComparisonMembership {
-        var directory = run, visited: Set<String> = [], knownHeldOut = false, unknown = false
-        let material = pair.input.url.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath()
+    // Build once per model, rather than reparsing its entire sample catalog and
+    // ancestry for every image in the comparison picker.
+    static func membership(run: URL, projectFolder: URL) -> MembershipIndex {
+        var directory = run, visited: Set<String> = [], result = MembershipIndex()
         while true {
-            guard visited.insert(directory.lastPathComponent).inserted else { unknown = true; break }
+            guard visited.insert(directory.lastPathComponent).inserted else { result.incomplete = true; break }
             guard let request = try? NativeFactoryTraining.json(directory.appendingPathComponent("request.json")),
-                  let samples = request["samples"] as? [[String: Any]] else { unknown = true; break }
+                  let samples = request["samples"] as? [[String: Any]] else { result.incomplete = true; break }
             for sample in samples {
-                guard let path = sample["input"] as? String else { unknown = true; continue }
+                guard let path = sample["input"] as? String else { result.incomplete = true; continue }
                 let folder = URL(fileURLWithPath: path).deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath()
-                if folder == material {
-                    if sample["split"] as? String == "training" { return .training }
-                    if sample["split"] as? String == "validation" { knownHeldOut = true }
-                    else { unknown = true }
+                switch sample["split"] as? String {
+                case "training": result.training.insert(folder)
+                case "validation": result.heldOut.insert(folder)
+                default: result.unknown.insert(folder)
                 }
             }
             do {
@@ -166,15 +181,15 @@ private enum ComparisonWorker {
                     guard let lineage = metadata.lineage else { break }
                     directory = try TrainingRunFiles.runDirectory(lineage.parentRunID, projectFolder: projectFolder)
                 } else {
-                    guard request["schema"] as? String == "loom-factory-training-v1" else { unknown = true; break }
+                    guard request["schema"] as? String == "loom-factory-training-v1" else { result.incomplete = true; break }
                     if let path = request["resume_weights"] as? String {
                         directory = try TrainingRunFiles.ownedRun(URL(fileURLWithPath: path).deletingLastPathComponent(), projectFolder: projectFolder)
                     } else { break }
                 }
-            } catch { unknown = true; break }
+            } catch { result.incomplete = true; break }
         }
         // A new external material was not part of a recorded validation split.
-        return knownHeldOut && !unknown ? .heldOut : .unknown
+        return result
     }
 
     static func run(models: [Model], pair: TrainingPair, option: ModelComparisonPair, dataset: String, map: MapRole,

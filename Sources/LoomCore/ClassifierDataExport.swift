@@ -209,7 +209,11 @@ struct NativeClassifierInterface {
 /// Validate the actual native model at import and again when its deployment is
 /// packaged. The saved descriptor alone cannot prove that routing is valid.
 func nativeClassifierInterface(at modelURL: URL) async throws -> NativeClassifierInterface {
-    let compiled = modelURL.pathExtension.lowercased() == "mlmodelc" ? modelURL : try await MLModel.compileModel(at: modelURL)
+    let alreadyCompiled = modelURL.pathExtension.lowercased() == "mlmodelc"
+    let compiled = alreadyCompiled ? modelURL : try await MLModel.compileModel(at: modelURL)
+    defer {
+        if !alreadyCompiled { try? FileManager.default.removeItem(at: compiled) }
+    }
     try Task.checkCancellation()
     let configuration = MLModelConfiguration()
     configuration.computeUnits = .cpuOnly

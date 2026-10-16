@@ -4,6 +4,32 @@ import XCTest
 
 @MainActor
 final class RunDeletionTests: XCTestCase {
+    func testQueueOwnedByAnotherProjectActorBlocksDeletionBeforeAnyMove() async throws {
+        let fixture = try await Fixture(); defer { fixture.remove() }
+        let run = try fixture.run("protected")
+        var lease: TrainingQueueLease? = try TrainingQueueLease(projectFolder: fixture.project.projectFolder,
+            controlFolder: fixture.root)
+        do {
+            _ = try await fixture.project.deleteTrainingRuns(runIDs: ["protected"], moveToTrash: { _ in
+                XCTFail("A queue-owned run must not move to Trash"); return nil
+            })
+            XCTFail("A different actor's queue lease must block destructive operations")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("Another model operation")) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: run.path))
+        withExtendedLifetime(lease) {}
+        lease = nil
+        let trash = fixture.trash
+        let result = try await fixture.project.deleteTrainingRuns(runIDs: ["protected"], moveToTrash: { folder in
+            let destination = trash.appendingPathComponent(folder.lastPathComponent)
+            try FileManager.default.moveItem(at: folder, to: destination)
+            // Deletion holds its lease until every move has finished.
+            XCTAssertThrowsError(try TrainingQueueLease.requireAvailable(projectFolder: fixture.project.projectFolder))
+            return destination
+        })
+        XCTAssertEqual(result.runIDs, ["protected"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: run.path))
+    }
+
     func testDeletingSelectedRunPreservesExplicitChoiceOtherRunsOriginalsAndPackages() async throws {
         let fixture = try await Fixture(); defer { fixture.remove() }
         let old = try fixture.run("old"), keep = try fixture.run("keep")
