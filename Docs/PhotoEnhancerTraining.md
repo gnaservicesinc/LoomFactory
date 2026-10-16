@@ -7,6 +7,24 @@ train natively with Swift and MPSGraph.
 These are experimental training paths, not included pretrained weights or a
 claim that camera cleanup is solved.
 
+Training data should match close-up surface photography: stone, wood, brick,
+fabric, metal and the other material categories used by Studio. The synthetic
+generator already derives its clean targets from the current project's diffuse
+material maps. Ordinary room/object photographs can diagnose a camera/noise
+pipeline, but they do not establish that a model preserves surface grain, fibers,
+pores or color. The six-pair SIDD staging sample used for lifecycle checks is
+three physical scenes, including one carpet surface; it is not a suitable broad
+surface-training corpus. Preserve it as diagnostic evidence.
+
+Build Repair pairs from aligned noisy/clean and mildly blurred/sharp captures of
+the same surface, plus unchanged clean-surface controls. Build Lighting pairs
+separately from unevenly lit surface captures and aligned neutral references of
+that same surface. A low-noise reference may still contain baked-in lighting.
+Hold out entire physical surfaces and capture sessions, across every crop,
+resolution and degradation variant. Synthetic surface degradations are a useful
+starting experiment; real held-out surface captures are still needed to judge
+whether they match camera noise, blur, shadows and glare.
+
 | Stage | Product | Teaching pairs | First settings |
 | --- | --- | --- | --- |
 | Repair | `photo-repair-v1` | aligned noisy/clean or mildly blurred/sharp RGB; clean identity examples | Photo Compact NAF v1, width32 (1,000,515 parameters), native1K, AdamW LR0.0001, WD0, batch1, 30 minutes |

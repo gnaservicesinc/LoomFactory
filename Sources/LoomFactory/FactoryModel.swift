@@ -63,7 +63,7 @@ final class FactoryModel {
     var selectedTestVersionID = "" {
         didSet {
             if selectedTestVersionID != oldValue {
-                modelTestResult = nil; previousTestResult = nil; testWeightSource = nil; testCheckpointID = nil
+                modelTestResult = nil; previousTestResult = nil; checkpointProgression = nil; testWeightSource = nil; testCheckpointID = nil
                 refreshTestOriginalMap()
             }
         }
@@ -82,6 +82,7 @@ final class FactoryModel {
     private(set) var testInputURL: URL?
     private(set) var modelTestResult: ModelTestResult?
     private(set) var previousTestResult: ModelTestResult?
+    private(set) var checkpointProgression: CheckpointProgression?
     private(set) var blenderTestMaps: [BlenderTestMap] = []
     private(set) var lastBlenderExportURL: URL?
     private(set) var lastSyntheticPhotoDirectory: URL?
@@ -295,6 +296,7 @@ final class FactoryModel {
         return nil
     }
     var canTestModel: Bool { project != nil && !busy && modelTestIssue == nil && effectiveTestWeightSource != nil }
+    var canTestAllCheckpoints: Bool { project != nil && !busy && testInputURL != nil && !testCheckpointVersions.isEmpty }
     var eligiblePairCount: Int {
         trainingPlan?.totalPairCount ?? 0
     }
@@ -842,7 +844,7 @@ final class FactoryModel {
     func setModelTestInput(_ url: URL) {
         blenderTestMaps = []; lastBlenderExportURL = nil
         testInputURL = url
-        modelTestResult = nil; previousTestResult = nil
+        modelTestResult = nil; previousTestResult = nil; checkpointProgression = nil
         refreshTestOriginalMap()
     }
 
@@ -865,8 +867,9 @@ final class FactoryModel {
     }
 
     func setModelTestCheckpoint(_ id: String?) {
-        guard testCheckpointID != id else { return }
+        guard testCheckpointID != id || effectiveTestWeightSource != .checkpoint else { return }
         preserveTestResultForComparison()
+        testWeightSource = .checkpoint
         testCheckpointID = id; modelTestResult = nil
     }
 
@@ -877,6 +880,7 @@ final class FactoryModel {
     private func refreshTestOriginalMap() {
         originalMapOperation?.cancel()
         let input = testInputURL, map = selectedTestVersion?.map
+        let runID = selectedTestVersion?.id, project = self.project
         let images = snapshot?.images ?? []
         let current = generation
         testOriginalMap = ModelTestOriginalMap.resolve(inputURL: nil, map: nil, images: [])
@@ -887,6 +891,12 @@ final class FactoryModel {
             }.value
             guard !Task.isCancelled, generation == current, testInputURL == input, selectedTestVersion?.map == map else { return }
             testOriginalMap = value
+            if checkpointProgression == nil, let project, let input, let runID {
+                let saved = try? await project.latestCheckpointProgression(runID: runID, inputURL: input)
+                guard !Task.isCancelled, generation == current, testInputURL == input,
+                      selectedTestVersion?.id == runID, checkpointProgression == nil else { return }
+                checkpointProgression = saved
+            }
         }
     }
 
@@ -927,6 +937,36 @@ final class FactoryModel {
         let label = "\(name) · \(result.map.displayName) · \(result.runID.prefix(8)) · \(weights)"
         blenderTestMaps.removeAll { $0.result.map == result.map || $0.result.inputURL != result.inputURL || $0.result.inputSHA256 != result.inputSHA256 }
         blenderTestMaps.append(.init(result: result, modelName: label))
+    }
+
+    func testAllCheckpoints() {
+        guard canTestAllCheckpoints, let version = selectedTestVersion, let input = testInputURL else { return }
+        selectedTestVersionID = version.id
+        checkpointProgression = nil
+        let current = generation, boundary = testBoundaryHandling
+        let onProgress = progressHandler()
+        let update: @Sendable (CheckpointProgression) -> Void = { [weak self] value in
+            Task { @MainActor in
+                guard let self, self.generation == current, self.selectedTestVersion?.id == version.id,
+                      self.testInputURL == input else { return }
+                self.checkpointProgression = value
+            }
+        }
+        perform("Testing all checkpoints · \(version.datasetName)", clearEvents: true) { [weak self] project in
+            let value = try await project.testAllCheckpoints(datasetID: version.datasetID, map: version.map,
+                runID: version.id, inputURL: input, boundaryHandling: boundary, progress: onProgress, didSave: update)
+            guard let self, self.generation == current, self.selectedTestVersion?.id == version.id,
+                  self.testInputURL == input else { return }
+            self.checkpointProgression = value
+        }
+    }
+
+    func viewCheckpointOutput(_ result: ModelTestResult) {
+        guard !busy else { return }
+        preserveTestResultForComparison()
+        testWeightSource = .checkpoint
+        testCheckpointID = result.checkpointID
+        recordModelTestResult(result)
     }
 
     func exportModelTestsToBlender(_ maps: [BlenderTestMap], includeSource: Bool) {
@@ -1001,7 +1041,7 @@ final class FactoryModel {
         selectedTestVersionID = ""
         testWeightSource = nil
         testCheckpointID = nil
-        modelTestResult = nil; previousTestResult = nil
+        modelTestResult = nil; previousTestResult = nil; checkpointProgression = nil
         refreshTestOriginalMap()
     }
 

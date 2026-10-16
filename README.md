@@ -37,6 +37,8 @@ Crop origins can use every native pixel position that fits the selected size. Se
 
 **Models** keeps the chosen saved version and **Approve & Use** visible above independently scrolling groups and details. Approval records a human review and chooses that exact version for export. **Test output** opens any saved model or checkpoint with usable native weights, independently of approval or deployment-package availability. Choose any source diffuse or an external image; paired original maps appear beside the input and result when present. Testing inputs do not inherit training membership or ignore filters.
 
+**Test Model → Saved model and checkpoint history** lists the exported model and every saved checkpoint together, including completed runs. Select an epoch/update and choose **Run Model**, or choose **Run All Checkpoints** to process the same unchanged image through the run's saved history in training order. The progression gallery offers independent A/B checkpoint selectors and full-size inspection. **Show All Outputs** reveals numbered epoch/update folders with Float32 EXRs, fixed-scale 16-bit PNG previews and individual test records; `progression.json` records the order, input checksum and any failed checkpoints. Reopening the same run and unchanged input restores its latest saved progression. The sweep uses one model at a time and keeps finished outputs when stopped. It preserves existing model, checkpoint and source files, and can only test checkpoints that were actually saved.
+
 In **Test Model**, residual and Pyramid inference now uses surrounding native
 context and discards tile margins affected by the graph's zero padding. This
 removes tile-border contamination without retraining or changing saved weights.

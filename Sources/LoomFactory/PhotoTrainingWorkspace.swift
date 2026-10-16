@@ -13,17 +13,17 @@ struct PhotoTrainingWorkspace: View {
                 Text("Train RGB models to clean up camera noise, mild blur and uneven lighting before generating material maps.")
                     .foregroundStyle(.secondary)
                 FactoryPanel("Repair · noise and mild blur") {
-                    Text("Teach an aligned noisy/clean or mildly blurred/sharp photo pair. Include clean photos paired with themselves to check that real surface detail survives.")
+                    Text("Teach aligned noisy/clean or mildly blurred/sharp close-ups of physical surfaces. Include clean surface images paired with themselves to check that grain, fibers and pores survive.")
                     actions(for: .repair)
                 }
                 FactoryPanel("Lighting · uneven illumination") {
-                    Text("Teach unevenly lit photos against neutral references. Train separate weights after Repair; synthetic lighting pairs provide an initial experiment.")
+                    Text("Teach unevenly lit surface photos against aligned neutral references of the same surface. Train separate weights after Repair; synthetic lighting pairs provide an initial experiment.")
                     actions(for: .lighting)
                 }
                 FactoryPanel("Prepare, train and compare") {
-                    Text("1. Generate stage-specific pairs from your source materials, or use aligned real photo pairs.")
+                    Text("1. Generate stage-specific pairs from your source material maps, or use aligned real surface-photo pairs. General room/object photos are camera diagnostics; they do not establish material coverage.")
                     Text("2. Open the trainer and import the generated manifest or choose an imported dataset.")
-                    Text("3. Train, save checkpoints and compare saved models on unfamiliar photos and clean inputs.")
+                    Text("3. Train, save checkpoints and compare saved models on held-out physical surfaces and clean surface inputs. Keep every crop and capture of one surface in the same split.")
                     Text("Experimental training paths are available. Pretrained cleanup weights, generated microdetail and alpha training are not included. Review useful texture detail before including an export in a Texture Studio build.")
                         .font(.callout).foregroundStyle(.secondary)
                 }

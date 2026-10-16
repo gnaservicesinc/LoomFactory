@@ -22,7 +22,7 @@ struct PhotoEnhancerSheet: View {
             Text("Repair learns noise and mild blur cleanup. Lighting learns uneven illumination correction. These experimental RGB models train separately from height, normal and roughness.")
                 .foregroundStyle(.secondary)
             Form {
-                Section("1 · Choose a stage and native photo pairs") {
+                Section("1 · Choose a stage and native surface-photo pairs") {
                     Picker("Enhancer", selection: $settings.kind) { ForEach(PhotoEnhancerKind.allCases) { Text($0.title).tag($0) } }
                         .disabled(resume != nil)
                     HStack {
@@ -35,10 +35,10 @@ struct PhotoEnhancerSheet: View {
                             model.importPhotoPairs(manifest: generated.appendingPathComponent("manifest.json"), kind: settings.kind) { dataset = $0 }
                         }
                     }
-                    Text(dataset?.path ?? "Generate stage-specific pairs in Materials → Synthetic Photos (Repair or Lighting preset), or import real paired 1K photographs.")
+                    Text(dataset?.path ?? "Generate stage-specific pairs from your surface material maps using the Repair or Lighting preset, or import aligned real 1K surface-photo pairs.")
                         .font(.caption).textSelection(.enabled)
                     Text(model.photoDatasetSummary).font(.caption).foregroundStyle(.secondary)
-                    Text("Whole physical surfaces stay in one split. Real noisy/clean pairs teach repair, not albedo. Synthetic lighting is a starting experiment; shadow removal is not yet a qualified capability.")
+                    Text("Use close-ups of surfaces such as stone, wood, brick, fabric and metal. Keep whole physical surfaces in one split; ordinary room/object photos are diagnostics. Noisy/clean pairs teach repair. Lighting needs a neutral reference of the same surface; a cleaner camera image can still contain shadows and glare.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Section("2 · Train a small residual RGB model") {

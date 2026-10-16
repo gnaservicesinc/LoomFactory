@@ -7,6 +7,7 @@ struct ModelTestView: View {
     @State private var imageZoom: ComparisonImageZoom = .fit
     @State private var choosingSource = false
     @State private var choosingBlenderExport = false
+    @State private var inspectingCheckpoint = false
 
     private var originalMap: ModelTestOriginalMap {
         model.testOriginalMap
@@ -28,6 +29,9 @@ struct ModelTestView: View {
                         .buttonStyle(.borderedProminent).controlSize(.large)
                         .disabled(!model.canTestModel)
                         .accessibilityIdentifier("modelTest.run")
+                    Button("Run All Checkpoints", systemImage: "square.stack.3d.down.right") { model.testAllCheckpoints() }
+                        .controlSize(.large).disabled(!model.canTestAllCheckpoints)
+                        .accessibilityIdentifier("modelTest.runAllCheckpoints")
                     if model.busy {
                         ProgressView(value: model.progress).frame(width: 170)
                         Text(model.events.last?.message ?? model.activityTitle).font(.callout).foregroundStyle(.secondary)
@@ -53,6 +57,13 @@ struct ModelTestView: View {
                         Text(output.path).font(.caption).textSelection(.enabled)
                     }.accessibilityIdentifier("modelTest.blenderExportResult")
                 }
+            }
+            if let progression = model.checkpointProgression {
+                CheckpointProgressionView(progression: progression, busy: model.busy,
+                    viewOutput: {
+                        model.viewCheckpointOutput($0)
+                        inspectingCheckpoint = true
+                    }, reveal: model.reveal)
             }
             if let result = model.modelTestResult {
                 if let previous = model.previousTestResult {
@@ -101,6 +112,20 @@ struct ModelTestView: View {
                     model.exportModelTestsToBlender(maps, includeSource: includeSource)
                 }
             }
+            .sheet(isPresented: $inspectingCheckpoint) {
+                VStack(alignment: .trailing) {
+                    Button("Done") { inspectingCheckpoint = false }.keyboardShortcut(.cancelAction)
+                    if let result = model.modelTestResult {
+                        ScrollView {
+                            ModelTestResultView(result: result, imageZoom: $imageZoom,
+                                saveOutput: { model.saveModelTestOutput(format: .float32EXR) },
+                                savePNGPreview: { model.saveModelTestOutput(format: .png16) },
+                                showOutput: { model.reveal(result.outputURL) }, showFolder: { model.reveal(result.directory) },
+                                originalMap: originalMap, originalMapRevision: originalMap.image.map(model.imagePreviewRevision))
+                        }
+                    }
+                }.padding(20).frame(width: 1100, height: 820)
+            }
     }
 
     private func inputRevision(_ url: URL) -> String {
@@ -123,7 +148,6 @@ struct ModelTestView: View {
                     }.labelsHidden().accessibilityIdentifier("modelTest.map")
                 }.frame(width: 210, alignment: .leading)
             }
-            HStack(alignment: .top, spacing: 20) {
             VStack(alignment: .leading, spacing: 7) {
                 Text("Saved run").font(.caption.weight(.medium)).foregroundStyle(.secondary)
                 Picker("Saved run", selection: Binding(get: { model.selectedTestVersionID.isEmpty ? model.selectedTestVersion?.id ?? "" : model.selectedTestVersionID },
@@ -138,24 +162,19 @@ struct ModelTestView: View {
                     }
                 }.labelsHidden().accessibilityIdentifier("modelTest.version")
             }.frame(maxWidth: .infinity, alignment: .leading)
-            VStack(alignment: .leading, spacing: 7) {
-                Text("Saved weights").font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                Picker("Saved weights", selection: Binding(get: { model.effectiveTestWeightSource ?? .model },
-                                                           set: { model.testWeightSource = $0 })) {
-                    if model.availableTestWeightSources.isEmpty { Text("No saved weights").tag(TrainingWeightSource.model) }
-                    ForEach(model.availableTestWeightSources, id: \.rawValue) { source in
-                        Text(source == .model ? "Exported model" : "Saved checkpoint").tag(source)
-                    }
-                }.labelsHidden().accessibilityIdentifier("modelTest.weights")
-            }.frame(width: 210, alignment: .leading)
-            }
-            if model.effectiveTestWeightSource == .checkpoint {
+            if model.selectedTestVersion != nil {
                 VStack(alignment: .leading, spacing: 7) {
-                    Text("Checkpoint").font(.caption.weight(.medium)).foregroundStyle(.secondary)
-                    Picker("Checkpoint", selection: Binding(get: { model.testCheckpointID ?? "" }, set: { model.setModelTestCheckpoint($0.isEmpty ? nil : $0) })) {
-                        Text("Latest saved checkpoint").tag("")
+                    Text("Saved model and checkpoint history").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                    Picker("Saved weights", selection: Binding(get: {
+                        model.effectiveTestWeightSource == .model ? "exported-model" : model.testCheckpointID ?? ""
+                    }, set: {
+                        if $0 == "exported-model" { model.testWeightSource = .model }
+                        else { model.setModelTestCheckpoint($0.isEmpty ? nil : $0) }
+                    })) {
+                        if model.availableTestWeightSources.contains(.model) { Text("Exported model").tag("exported-model") }
+                        if !model.testCheckpointVersions.isEmpty { Text("Latest saved checkpoint").tag("") }
                         ForEach(model.testCheckpointVersions.filter { $0.revisionID != nil }) { checkpoint in
-                            Text("Epoch \(checkpoint.totalEpochsCompleted) · update \(checkpoint.totalUpdatesCompleted) · \(checkpoint.modifiedAt.formatted(date: .abbreviated, time: .shortened))")
+                            Text("Epoch \(checkpoint.totalEpochsCompleted) · update \(checkpoint.totalUpdatesCompleted) · \(checkpoint.modifiedAt.formatted(date: .abbreviated, time: .shortened)) · \(checkpoint.revisionID?.prefix(8) ?? "latest")")
                                 .tag(checkpoint.revisionID ?? "")
                         }
                     }.labelsHidden().accessibilityIdentifier("modelTest.checkpoint")
@@ -164,12 +183,15 @@ struct ModelTestView: View {
                             .font(.caption).foregroundStyle(.secondary)
                         Spacer()
                         if let version = model.selectedTestVersion {
+                            Button("Show Checkpoint Files", systemImage: "folder") { model.reveal(version.directory) }
                             Button("Use selected checkpoint as model", systemImage: "checkmark.circle") {
                                 model.useCheckpointAsModel(version, checkpointID: model.testCheckpointID)
-                            }.disabled(model.busy).controlSize(.small)
+                            }.disabled(model.busy || model.effectiveTestWeightSource != .checkpoint).controlSize(.small)
                                 .accessibilityIdentifier("modelTest.useCheckpoint")
                         }
                     }
+                    Text("Choose any saved checkpoint and Run Model, or Run All Checkpoints to compare the same image through the entire training history.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
             if let version = model.selectedTestVersion {
@@ -183,7 +205,7 @@ struct ModelTestView: View {
                 }.font(.caption).foregroundStyle(.secondary)
                     .accessibilityIdentifier("modelTest.savedEpochs")
             }
-        }
+        }.disabled(model.busy)
     }
 
     private var inputSelection: some View {
@@ -203,7 +225,7 @@ struct ModelTestView: View {
             }
             Text("You can test any material, including an image outside this project. Original files remain untouched; no paired target is needed.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-        }
+        }.disabled(model.busy)
     }
 }
 

@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import ImageIO
 import LoomCore
 import LoomNative
@@ -9,6 +10,87 @@ import UniformTypeIdentifiers
 
 @Suite(.serialized)
 struct ModelTestControlsTests {
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["LOOM_CHECKPOINT_SWEEP_UI"] == "1")) @MainActor
+    func completedProductionRunReopensSavedProgressionWithoutInference() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        let source = try #require(environment["LOOM_CHECKPOINT_SWEEP_SOURCE"])
+        let run = try #require(environment["LOOM_CHECKPOINT_SWEEP_RUN"])
+        let input = try #require(environment["LOOM_CHECKPOINT_SWEEP_INPUT"])
+        let model = FactoryModel(rememberSourceFolder: false)
+        model.openFolder(URL(fileURLWithPath: source))
+        for _ in 0..<1000 { if !model.busy { break }; try await Task.sleep(for: .milliseconds(20)) }
+        #expect(model.errorMessage == nil)
+        let version = try #require(model.snapshot?.modelVersions.first { $0.id == run })
+        model.showModelTesting(version)
+        model.setModelTestInput(URL(fileURLWithPath: input))
+        for _ in 0..<500 { if model.checkpointProgression != nil { break }; try await Task.sleep(for: .milliseconds(20)) }
+        let progression = try #require(model.checkpointProgression)
+        #expect(progression.results.count == version.checkpointVersions.count)
+        #expect(progression.results.count > 1)
+        try await render(CheckpointProgressionView(progression: progression, busy: false,
+            viewOutput: model.viewCheckpointOutput, reveal: { _ in }).preferredColorScheme(.dark),
+            size: NSSize(width: 1400, height: 2500), name: "rock-cliff-marble-checkpoint-progression.png")
+    }
+
+    @Test @MainActor
+    func completedRunCheckpointSweepRunsFromExportedSelectionAndShowsChronologicalComparison() async throws {
+        let fixture = try await ModelTestControlsFixture()
+        defer { fixture.remove() }
+        let run = fixture.source.appendingPathComponent(".loom-factory/runs/one-saved-run")
+        let latest = run.appendingPathComponent("checkpoint.json")
+        var descriptor = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: latest)) as? [String: Any])
+        let architecture = try NativeArchitecture(mapKind: "depth", width: 8, blocks: 1)
+        for epoch in [10, 20] {
+            let weights = architecture.parameterShapes.mapValues { shape in
+                NativeTensor(shape: shape, values: [Float](repeating: Float(epoch) / 10000, count: shape.reduce(1, *)))
+            }
+            let path = run.appendingPathComponent("checkpoint-epoch-\(epoch).safetensors")
+            try NativeWeights.write(weights, to: path)
+            descriptor["checkpoint_id"] = "epoch-\(epoch)"
+            descriptor["epochs_completed"] = epoch; descriptor["updates"] = epoch * 10
+            descriptor["weights_path"] = path.lastPathComponent
+            descriptor["weights_sha256"] = SHA256.hash(data: try Data(contentsOf: path)).map { String(format: "%02x", $0) }.joined()
+            let data = try JSONSerialization.data(withJSONObject: descriptor)
+            try data.write(to: run.appendingPathComponent("checkpoint-epoch-\(epoch).json"))
+            try data.write(to: latest)
+        }
+        let model = FactoryModel(rememberSourceFolder: false)
+        model.openFolder(fixture.source)
+        try await wait(model)
+        let version = try #require(model.testableModelVersions.first)
+        #expect(version.status == "completed")
+        model.showModelTesting(version)
+        model.setModelTestInput(fixture.externalInput)
+        #expect(model.effectiveTestWeightSource == .model)
+        #expect(model.canTestAllCheckpoints)
+        try await render(ModelTestView(model: model), size: NSSize(width: 1140, height: 1050), name: "completed-checkpoint-controls.png")
+        model.testAllCheckpoints()
+        try await wait(model)
+        let progression = try #require(model.checkpointProgression)
+        #expect(progression.results.count == 2)
+        #expect(progression.outputs.map { $0.checkpoint.epochsCompleted } == [10, 20])
+        try await render(CheckpointProgressionView(progression: progression, busy: false,
+            viewOutput: model.viewCheckpointOutput, reveal: { _ in }),
+            size: NSSize(width: 1140, height: 1100), name: "completed-checkpoint-progression.png")
+        model.viewCheckpointOutput(try #require(progression.results.first))
+        #expect(model.effectiveTestWeightSource == .checkpoint)
+        #expect(model.testCheckpointID == "epoch-10")
+        model.viewCheckpointOutput(try #require(progression.results.last))
+        #expect(model.modelTestResult?.checkpointID == "epoch-20")
+        #expect(model.previousTestResult?.checkpointID == "epoch-10")
+        model.testWeightSource = .model
+        model.setModelTestCheckpoint("epoch-10")
+        #expect(model.effectiveTestWeightSource == .checkpoint)
+        #expect(model.canTestModel)
+        model.testModel()
+        try await wait(model)
+        #expect(model.modelTestResult?.checkpointID == "epoch-10")
+        #expect(model.modelTestResult?.epochsCompleted == 10)
+        #expect(model.snapshot?.modelVersions.count == 1)
+        model.setModelTestInput(fixture.sourceInput)
+        #expect(model.checkpointProgression == nil)
+    }
+
     @Test @MainActor
     func boundaryPolicyComparisonRetainsTheSameSavedCheckpointAndInput() async throws {
         let fixture = try await ModelTestControlsFixture()
