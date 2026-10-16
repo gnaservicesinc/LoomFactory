@@ -18,6 +18,7 @@ cp Resources/Info.plist "$factory_stage/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Add :LoomBuildConfiguration string Release' "$factory_stage/Contents/Info.plist"
 swift Scripts/MakeIcon.swift "$factory_stage/Contents/Resources"
 /usr/bin/ditto Resources/ModelLicenses "$factory_stage/Contents/Resources/ModelLicenses"
+cp Sources/LoomCore/Resources/BlenderExport.py "$factory_stage/Contents/Resources/BlenderExport.py"
 factory_bootstrap="${LOOM_FACTORY_BOOTSTRAP_MODEL:-$factory_root/Resources/DTTC3.mlmodel}"
 if [[ ! -e "$factory_bootstrap" ]]; then
     printf 'Categorizer asset missing: %s\n' "$factory_bootstrap" >&2

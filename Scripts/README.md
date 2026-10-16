@@ -26,7 +26,44 @@ its obsolete links. Unrelated output files are preserved. A fresh run with the
 same files creates no duplicate examples. This utility is an explicit export;
 it does not retrain, install or connect a map-type classifier to the apps.
 
-# Blender material review from a user template
+# Test Model → Export to Blender
+
+Choose any saved model or checkpoint and a diffuse image on **Test Model**, then
+**Run Model → Export to Blender…**. Test other map types on the same unchanged
+input to make them available together. The export options list each exact tested
+version; choose the maps to combine and optionally **Add source material on a
+second plane**. Uniquely paired native source maps are used when available;
+missing/ambiguous maps are recorded and use flat height/normal or roughness .85.
+External images work without paired source maps. Changing the input/category
+clears the accumulated test results. Export never runs another model implicitly.
+
+The new export folder contains `Material Review.blend`, unchanged native map
+copies, `review.json`, `export-receipt.json`, a background Blender log, and a
+retry script. All images and the studio environment are packed. The model names
+and exact run/checkpoint identities are recorded on objects/materials and texture
+nodes. One or two simple quads use one UVMap each, shared UV/Mapping coordinates,
+Non-Color numeric maps, OpenGL generated normals and the explicit convention of
+source normals. Shader displacement is .025 with midpoint .5. Missing maps never
+silently substitute another model. No dense displaced mesh is baked.
+
+Nine Cycles/Eevee scenes follow the reviewed settings: world .5, CPU Auto-Detect,
+Blackman-Harris pixel width1, Simple adaptive subdivision, map-isolation and
+matte controls. The no-denoise Cycles scene is explicit. Eevee is a shading
+diagnostic; use Cycles for adaptive geometry. Export saves without rendering or
+changing model approvals/selections. Blender.app is located in Applications or
+chosen by the user. The bundled Python file calls only Blender's API inside
+that separate process; native model training/inference have no Python runtime.
+
+If Blender export fails, exact maps and the manifest remain available. Retry:
+
+```sh
+blender --background --factory-startup --disable-autoexec --python-exit-code 1 \
+  --python /path/to/export/BlenderExport.py -- /path/to/export/review.json
+blender --background --factory-startup --disable-autoexec --python-exit-code 1 \
+  --python Scripts/verify-blender-export.py -- /path/to/export
+```
+
+# Historical Blender material review from a user template
 
 `build-blender-template-review.py` creates self-contained `.blend` comparisons
 from a saved example and an existing artistic-review configuration. It preserves

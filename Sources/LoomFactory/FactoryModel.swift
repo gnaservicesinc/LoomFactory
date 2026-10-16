@@ -77,6 +77,8 @@ final class FactoryModel {
     private(set) var testInputURL: URL?
     private(set) var modelTestResult: ModelTestResult?
     private(set) var previousTestResult: ModelTestResult?
+    private(set) var blenderTestMaps: [BlenderTestMap] = []
+    private(set) var lastBlenderExportURL: URL?
     private(set) var testOriginalMap = ModelTestOriginalMap.resolve(inputURL: nil, map: nil, images: [])
     var imageSearch = ""
     var fileFilter: MaterialBrowserFilter = .all
@@ -827,6 +829,7 @@ final class FactoryModel {
     }
 
     func setModelTestInput(_ url: URL) {
+        blenderTestMaps = []; lastBlenderExportURL = nil
         testInputURL = url
         modelTestResult = nil; previousTestResult = nil
         refreshTestOriginalMap()
@@ -835,6 +838,7 @@ final class FactoryModel {
     func setModelTestDataset(_ id: String) {
         guard testDatasetID != id else { return }
         modelTestDatasetID = id
+        blenderTestMaps = []; lastBlenderExportURL = nil
         clearModelTestRunSelection()
         if let input = testInputURL, snapshot?.images.contains(where: { $0.url == input }) == true {
             testInputURL = testDiffuseImages.first?.url
@@ -903,6 +907,58 @@ final class FactoryModel {
             previousTestResult = nil
         }
         modelTestResult = result
+        let version = snapshot?.modelVersions.first { $0.id == result.runID }
+        let name = version.flatMap { $0.label.isEmpty ? nil : $0.label } ?? version?.datasetName ?? "Model"
+        let weights = result.source == .model ? "model" : "checkpoint \(result.checkpointID?.prefix(8) ?? "latest")"
+        let label = "\(name) · \(result.map.displayName) · \(result.runID.prefix(8)) · \(weights)"
+        blenderTestMaps.removeAll { $0.result.map == result.map || $0.result.inputURL != result.inputURL || $0.result.inputSHA256 != result.inputSHA256 }
+        blenderTestMaps.append(.init(result: result, modelName: label))
+    }
+
+    func exportModelTestsToBlender(_ maps: [BlenderTestMap], includeSource: Bool) {
+        guard !busy, !maps.isEmpty else { return }
+        let blender: URL
+        if let installed = BlenderExportProcess.installedBlender { blender = installed }
+        else {
+            let chooser = NSOpenPanel()
+            chooser.title = "Locate Blender"
+            chooser.message = "Choose Blender.app. Its built-in scripting engine creates the project without rendering."
+            chooser.allowedContentTypes = [.application]
+            chooser.directoryURL = URL(fileURLWithPath: "/Applications")
+            guard chooser.runModal() == .OK, let app = chooser.url else { return }
+            blender = app.appendingPathComponent("Contents/MacOS/Blender")
+        }
+        let panel = NSOpenPanel()
+        panel.title = "Export to Blender"
+        panel.message = "A new folder will contain a packed .blend project, exact native maps and model identities."
+        panel.prompt = "Export Here"
+        panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.canCreateDirectories = true
+        panel.directoryURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        guard panel.runModal() == .OK, let parent = panel.url else { return }
+        if let sourceFolder {
+            let root = sourceFolder.standardizedFileURL.resolvingSymlinksInPath().path
+            let target = parent.standardizedFileURL.resolvingSymlinksInPath().path
+            guard target != root, !target.hasPrefix(root + "/") else {
+                errorMessage = "Choose an export folder outside the source materials so exported copies cannot enter the training dataset."
+                return
+            }
+        }
+        let directory = parent.appendingPathComponent("Loom Blender " + UUID().uuidString.prefix(8), isDirectory: true)
+        let images = snapshot?.images ?? []
+        let current = generation
+        perform("Exporting tested maps to Blender") { [weak self] _ in
+            let process = BlenderExportProcess()
+            let output = try await withTaskCancellationHandler {
+                try await Task.detached(priority: .utility) {
+                    let manifest = try BlenderMaterialExport.prepare(maps, sourceImages: images,
+                        includeSource: includeSource, directory: directory)
+                    return try process.run(blender: blender, manifest: manifest)
+                }.value
+            } onCancel: { process.cancel() }
+            try Task.checkCancellation()
+            guard let self, self.generation == current else { return }
+            self.lastBlenderExportURL = output
+        }
     }
 
     func saveModelTestOutput(format: ModelTestExportFormat = .float32EXR) {
@@ -922,6 +978,7 @@ final class FactoryModel {
     }
 
     private func resetModelTestSelection() {
+        blenderTestMaps = []; lastBlenderExportURL = nil
         modelTestDatasetID = nil; modelTestMap = nil
         clearModelTestRunSelection()
     }

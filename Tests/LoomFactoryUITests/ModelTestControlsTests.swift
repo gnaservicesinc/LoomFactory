@@ -9,6 +9,55 @@ import UniformTypeIdentifiers
 
 @Suite(.serialized)
 struct ModelTestControlsTests {
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["LOOM_TEST_BLENDER_EXPORT"] == "1"))
+    @MainActor func backgroundBlenderProcessExportsExactCheckpointWithoutInference() async throws {
+        let fixture = try await ModelTestControlsFixture()
+        defer { fixture.remove() }
+        let blender = try #require(BlenderExportProcess.installedBlender)
+        let directory = fixture.root.appendingPathComponent("real-blender-export")
+        let manifest = try BlenderMaterialExport.prepare([
+            .init(result: fixture.result, modelName: "Checkpoint branch · epoch 17")
+        ], sourceImages: [], includeSource: true, directory: directory)
+        let process = BlenderExportProcess()
+        let blend = try await Task.detached { try process.run(blender: blender, manifest: manifest) }.value
+        #expect(FileManager.default.fileExists(atPath: blend.path))
+        let receipt = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: directory.appendingPathComponent("export-receipt.json"))) as? [String: Any])
+        #expect((receipt["scenes"] as? [String])?.count == 9)
+        #expect(receipt["rendered"] as? Bool == false)
+        let stopped = BlenderExportProcess()
+        stopped.cancel()
+        #expect(throws: CancellationError.self) { try stopped.run(blender: blender, manifest: manifest) }
+    }
+
+    @Test @MainActor
+    func blenderExportRetainsExactTestedMapsAcrossMapChoicesAndClearsOnNewInput() async throws {
+        let fixture = try await ModelTestControlsFixture()
+        defer { fixture.remove() }
+        let model = FactoryModel(rememberSourceFolder: false)
+        model.openFolder(fixture.source)
+        try await wait(model)
+        model.showModelTesting(try #require(model.testableModelVersions.first))
+        model.setModelTestInput(fixture.externalInput)
+        let r = fixture.result
+        model.recordModelTestResult(r)
+        #expect(model.blenderTestMaps.count == 1)
+        #expect(model.blenderTestMaps[0].result.source == .checkpoint)
+        model.setModelTestMap(.normal)
+        #expect(model.modelTestResult == nil)
+        #expect(model.blenderTestMaps[0].result.runID == r.runID)
+        let normal = ModelTestResult(directory: r.directory, inputURL: r.inputURL, outputURL: r.outputURL,
+            runID: "another-normal-model", source: .model, map: .normal, width: r.width, height: r.height,
+            tileSize: r.tileSize, tileCount: 1, note: "CPU selection fixture")
+        model.recordModelTestResult(normal)
+        #expect(model.blenderTestMaps.count == 2)
+        #expect(model.blenderTestMaps.last?.result.source == .model)
+        #expect(model.blenderTestMaps.first?.modelName.contains("one-save") == true)
+        try await render(BlenderExportOptions(maps: model.blenderTestMaps) { _, _ in },
+            size: NSSize(width: 680, height: 500), name: "blender-export-options.png")
+        model.setModelTestInput(fixture.sourceInput)
+        #expect(model.blenderTestMaps.isEmpty)
+    }
+
     @Test @MainActor
     func defaultTestVersionRefreshesOriginalMapWhenTrainingMapChangesWithoutAnExplicitRun() async throws {
         let fixture = try await ModelTestControlsFixture()

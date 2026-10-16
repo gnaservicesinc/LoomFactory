@@ -6,6 +6,7 @@ struct ModelTestView: View {
     @Bindable var model: FactoryModel
     @State private var imageZoom: ComparisonImageZoom = .fit
     @State private var choosingSource = false
+    @State private var choosingBlenderExport = false
 
     private var originalMap: ModelTestOriginalMap {
         model.testOriginalMap
@@ -31,6 +32,20 @@ struct ModelTestView: View {
                 if let issue = model.modelTestIssue {
                     Text(issue).font(.callout).foregroundStyle(.secondary)
                         .accessibilityIdentifier("modelTest.issue")
+                }
+                HStack {
+                    Button("Export to Blender…", systemImage: "cube.transparent") { choosingBlenderExport = true }
+                        .disabled(model.busy || model.blenderTestMaps.isEmpty)
+                        .accessibilityIdentifier("modelTest.exportBlender")
+                    Text("Test any saved model or checkpoint, then export its native maps. Test other map types on the same input to combine them.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if let output = model.lastBlenderExportURL {
+                    HStack {
+                        Button("Open Blender Project") { NSWorkspace.shared.open(output) }
+                        Button("Show Export") { model.reveal(output) }
+                        Text(output.path).font(.caption).textSelection(.enabled)
+                    }.accessibilityIdentifier("modelTest.blenderExportResult")
                 }
             }
             if let result = model.modelTestResult {
@@ -73,6 +88,12 @@ struct ModelTestView: View {
         }.accessibilityIdentifier("modelTest.workspace")
             .sheet(isPresented: $choosingSource) {
                 ModelTestSourcePicker(images: model.testDiffuseImages) { model.setModelTestInput($0.url) }
+            }
+            .sheet(isPresented: $choosingBlenderExport) {
+                BlenderExportOptions(maps: model.blenderTestMaps) { maps, includeSource in
+                    choosingBlenderExport = false
+                    model.exportModelTestsToBlender(maps, includeSource: includeSource)
+                }
             }
     }
 
@@ -177,6 +198,36 @@ struct ModelTestView: View {
             Text("You can test any material, including an image outside this project. Original files remain untouched; no paired target is needed.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+struct BlenderExportOptions: View {
+    let maps: [BlenderTestMap]
+    let export: ([BlenderTestMap], Bool) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var includeSource = false
+    @State private var omitted: Set<MapRole> = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Export to Blender").font(.title2)
+            Text("Choose tested maps for the generated plane. The exact model/checkpoint names are stored on its object, material and texture nodes.")
+            ForEach(maps, id: \.result.map) { map in
+                Toggle(map.modelName, isOn: Binding(get: { !omitted.contains(map.result.map) }, set: {
+                    if $0 { omitted.remove(map.result.map) } else { omitted.insert(map.result.map) }
+                }))
+            }
+            Toggle("Add source material on a second plane", isOn: $includeSource)
+                .accessibilityIdentifier("modelTest.blenderIncludeSource")
+            Text("Uses uniquely paired source maps at the same native dimensions. Missing maps are labeled and use flat height/normal or roughness .85. Images are packed without resizing. Cycles and Eevee comparison scenes are included; export does not render.")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Export…") { export(maps.filter { !omitted.contains($0.result.map) }, includeSource) }
+                    .keyboardShortcut(.defaultAction).disabled(maps.allSatisfy { omitted.contains($0.result.map) })
+            }
+        }.padding(24).frame(width: 620)
     }
 }
 
