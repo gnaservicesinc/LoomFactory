@@ -26,8 +26,9 @@ public struct PhotoPairMetadata: Codable, Equatable, Sendable {
     public var split: String
     public var provenance: String
     public var ignored = false
-    public init(kind: PhotoEnhancerKind, target: String, group: String, split: String, provenance: String) {
-        self.kind = kind; self.target = target; self.group = group; self.split = split; self.provenance = provenance
+    public var category: String? = nil
+    public init(kind: PhotoEnhancerKind, target: String, group: String, split: String, provenance: String, category: String? = nil) {
+        self.kind = kind; self.target = target; self.group = group; self.split = split; self.provenance = provenance; self.category = category
     }
 }
 
@@ -45,6 +46,7 @@ public struct PhotoTrainingData: Sendable {
     public var training: [PhotoTrainingPair] { pairs.filter { $0.metadata.split == "train" } }
     public var validation: [PhotoTrainingPair] { pairs.filter { $0.metadata.split == "validation" } }
     public var test: [PhotoTrainingPair] { pairs.filter { $0.metadata.split == "test" } }
+    public var trainingCategories: [String] { Array(Set(training.compactMap { $0.metadata.category })).sorted() }
     public var summary: String {
         "\(training.count) train / \(validation.count) validation / \(test.count) test pairs · \(Set(pairs.map { $0.metadata.group }).count) physical groups"
     }
@@ -112,7 +114,7 @@ public enum PhotoEnhancerData {
                 hashes[hash] = metadata.split; pairHashes.append(hash)
             }
             pairs.append(.init(input: input, target: target, metadata: metadata, inputSHA256: pairHashes[0], targetSHA256: pairHashes[1]))
-            identities.append([input.path.replacingOccurrences(of: root.path + "/", with: ""), metadata.group, metadata.split, metadata.kind.rawValue] .joined(separator: ":") + pairHashes.joined())
+            identities.append([input.path.replacingOccurrences(of: root.path + "/", with: ""), metadata.group, metadata.split, metadata.kind.rawValue] .joined(separator: ":") + (metadata.category.map { ":category=" + $0 } ?? "") + pairHashes.joined())
         }
         return .init(pairs: pairs.sorted { $0.input.path < $1.input.path }, fingerprint: syntheticHash(identities.sorted().joined(separator: "\n")))
     }
@@ -161,7 +163,7 @@ public enum PhotoEnhancerData {
                 copiedBytes += inputBytes + targetBytes
                 try FileManager.default.copyItem(at: input, to: destination.appendingPathComponent(a))
                 if needsTarget { try FileManager.default.copyItem(at: target, to: destination.appendingPathComponent(b)) }
-                try write(.init(kind: kind, target: b, group: group, split: split, provenance: provenance), to: destination.appendingPathComponent(a))
+                try write(.init(kind: kind, target: b, group: group, split: split, provenance: provenance, category: row["category"] as? String), to: destination.appendingPathComponent(a))
                 count += 1
             }
             guard count > 0 else { throw LoomError("No supported pairs found.") }

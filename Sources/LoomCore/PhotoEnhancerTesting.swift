@@ -19,7 +19,7 @@ public enum PhotoEnhancerTesting {
         let descriptor = PhotoEnhancerModel(name: "\(checkpoint.settings.kind.title) · \(checkpoint.runID.prefix(8)) · \(best ? "best" : "latest") update \(updates)",
             product: checkpoint.settings.kind.product.rawValue, width: checkpoint.settings.width,
             modelSHA256: try NativeFileHash.sha256(destination.appendingPathComponent("Enhancer.mlmodel")),
-            weightsSHA256: try NativeFileHash.sha256(destination.appendingPathComponent("weights.safetensors")), runID: checkpoint.runID, updates: updates)
+            weightsSHA256: try NativeFileHash.sha256(destination.appendingPathComponent("weights.safetensors")), runID: checkpoint.runID, updates: updates, trainingCategories: checkpoint.trainingCategories)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(descriptor).write(to: destination.appendingPathComponent("enhancer.json"), options: .atomic)
         return destination

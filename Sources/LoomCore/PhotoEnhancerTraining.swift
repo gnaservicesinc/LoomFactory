@@ -37,6 +37,7 @@ public struct PhotoEnhancerCheckpoint: Codable, Sendable {
     public var bestWeightsSHA256: String
     public var bestScore: Double
     public var bestUpdates: Int
+    public var trainingCategories: [String]? = nil
     public var objective = "rgb-linear-detail-v1"
     public var status: String
 }
@@ -58,6 +59,7 @@ public struct PhotoEnhancerModel: Codable, Sendable {
     public var runID: String
     public var updates: Int
     public var qualified = false
+    public var trainingCategories: [String]? = nil
 }
 
 extension LoomProject {
@@ -164,6 +166,12 @@ enum PhotoEnhancerTrainer {
         let session = try NativeTrainingSession(architecture: architecture,
             options: NativeTrainingOptions(weightDecay: 0, scalarLoss: .linearDetailV1), seed: settings.seed,
             weights: starting, optimizerState: moments, initialUpdateCount: previous?.updates ?? 0, cancellation: cancellation)
+        if let starting {
+            guard try session.weights() == starting, session.updateCount == previous?.updates,
+                  try session.optimizerState() == moments else {
+                throw LoomError("The actual photo session did not restore its exact parent weights/optimizer. No teaching updates were applied.")
+            }
+        }
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(settings).write(to: output.appendingPathComponent("settings.json"), options: .atomic)
@@ -197,7 +205,7 @@ enum PhotoEnhancerTrainer {
                 weights: revision + "/weights.safetensors", weightsSHA256: try NativeFileHash.sha256(folder.appendingPathComponent("weights.safetensors")),
                 optimizer: revision + "/optimizer.safetensors", optimizerSHA256: try NativeFileHash.sha256(folder.appendingPathComponent("optimizer.safetensors")),
                 bestWeights: revision + "/best.safetensors", bestWeightsSHA256: try NativeFileHash.sha256(folder.appendingPathComponent("best.safetensors")),
-                bestScore: bestScore, bestUpdates: bestUpdates, status: status)
+                bestScore: bestScore, bestUpdates: bestUpdates, trainingCategories: data.trainingCategories, status: status)
             let bytes = try encoder.encode(record)
             try bytes.write(to: folder.appendingPathComponent("checkpoint.json"), options: .atomic)
             if preserve { try Data().write(to: folder.appendingPathComponent("MANUAL"), options: .atomic) }
@@ -259,7 +267,7 @@ enum PhotoEnhancerTrainer {
         defer { try? FileManager.default.removeItem(at: compiled) }
         let descriptor = PhotoEnhancerModel(name: "\(settings.kind.title) · \(runID.prefix(8)) · best update \(bestUpdates)", product: settings.kind.product.rawValue,
             width: settings.width, modelSHA256: try NativeFileHash.sha256(exported.appendingPathComponent("Enhancer.mlmodel")),
-            weightsSHA256: try NativeFileHash.sha256(exported.appendingPathComponent("weights.safetensors")), runID: runID, updates: bestUpdates)
+            weightsSHA256: try NativeFileHash.sha256(exported.appendingPathComponent("weights.safetensors")), runID: runID, updates: bestUpdates, trainingCategories: data.trainingCategories)
         try encoder.encode(descriptor).write(to: exported.appendingPathComponent("enhancer.json"), options: .atomic)
         progress(.init(type: "summary", message: "Saved latest resumable checkpoint and exact best RGB export: \(exported.path). Unapproved candidate; inspect real photos and clean-input identity before use."))
         return output

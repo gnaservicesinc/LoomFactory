@@ -74,13 +74,13 @@ final class PhotoEnhancerDataTests: XCTestCase {
             for (file, value) in [(input, Float(i+1)*0.13), (target, Float(i+1)*0.18)] {
                 try ModelTestImage.writePNG(Array(repeating: value, count: 3*1024*1024), channels: 3, width: 1024, height: 1024, to: root.appendingPathComponent(file))
             }
-            rows.append(["input":input, "target":target, "group":"physical-\(i)", "split":split])
+            rows.append(["input":input, "target":target, "group":"physical-\(i)", "split":split, "category":"Paper"])
         }
         let manifest = root.appendingPathComponent("manifest.json")
         try JSONSerialization.data(withJSONObject: ["schema":"loom.photo-import.v1", "pairs":rows]).write(to: manifest)
         let destination = root.appendingPathComponent("imported")
         let imported = try PhotoEnhancerData.importDataset(manifest: manifest, kind: .repair, destination: destination)
-        XCTAssertEqual(imported.pairs.count,3); XCTAssertEqual(imported.training.count,1)
+        XCTAssertEqual(imported.trainingCategories,["Paper"]); XCTAssertEqual(imported.pairs.count,3); XCTAssertEqual(imported.training.count,1)
         XCTAssertEqual(imported.validation.count,1); XCTAssertEqual(imported.test.count,1)
         XCTAssertNil(try PhotoEnhancerData.read(root.appendingPathComponent("0-input.png")))
         XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("0-input.png")), try Data(contentsOf: imported.training[0].input))

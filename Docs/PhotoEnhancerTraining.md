@@ -69,7 +69,9 @@ use this transfer format (membership subsequently lives in image metadata):
 
 Use `train`, `validation`, `test`, with each physical surface/session in one split.
 No review flag changes membership. Live per-file photo metadata stores product,
-target, physical group, split, provenance and ignore state. Scan current files,
+target, physical group, category, split, provenance and ignore state. Training
+category names are carried into checkpoints/exports as training scope, never
+as an automatic claim that those categories are qualified. Scan current files,
 not a saved membership manifest. Duplicate bytes across splits are rejected.
 Changed pixels/metadata halt the run with completed updates preserved. Originals
 and existing material tags/selections are never edited.
@@ -87,9 +89,14 @@ Texture Studio uses optional fixed **build-time** products, separate from its
 material package. After A/B review, include either or both exported folders:
 
 ```sh
+TEXTURE_LOOM_PACKAGE='/absolute/path/to/material-package' \
 PHOTO_REPAIR_MODEL='/absolute/path/to/repair-run/export' \
 PHOTO_LIGHTING_MODEL='/absolute/path/to/lighting-run/export' make build
 ```
+
+The material package supplies the classifier and depth/normal/roughness models.
+Without it Studio remains a shell or an attached-map workflow; photo enhancers
+alone do not supply material-map generation.
 
 The stager validates product/interface/architecture/width/checksums, compiles
 Core ML, and signs the finished app. No source photos enter the app. Missing

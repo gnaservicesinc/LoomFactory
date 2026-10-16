@@ -23,7 +23,8 @@ and logs in sibling `PhotoDiffuseResearch-2026-10-16`.
   update4, correct parent identity, unchanged parent checkpoint/data fingerprint,
   exact best export and separately exported latest weights. Actual starting
   weights pass the native/Core ML CPU1K preflight in each run. The complete test
-  took73.717 seconds. Best by RGB error remained initialization (update0); no
+  took73.717 seconds. Continuation also checks the actual restored session
+  tensors/moments/count against the chosen parent before teaching. Best by RGB error remained initialization (update0); no
   learned appearance or production model is claimed from four updates.
 - That test first caught an automatic checkpoint pruning bug: Foundation URL
   directory flags could make the current revision compare unequal to the same
@@ -47,7 +48,9 @@ and logs in sibling `PhotoDiffuseResearch-2026-10-16`.
   names are frozen in result/test.json and shown under generated/A/B previews;
   source images carry file labels. Rendering/action evidence is not a live
   installed-app gesture acceptance claim.
-- Factory and Studio optimized Release builds pass. Prepared signed apps are
+- Factory and Studio optimized Release builds pass. A separate Release-mode
+  lifecycle attempt compiled but correctly skipped because the material project
+  was busy again; the completed GPU lifecycle proof is the Debug test run. Prepared signed apps are
   retained in user storage; installed apps were not overwritten or launched by
   this task. Studio includes no newly trained photo payload. Root and Factory
   documentation give the exact manual training, review and build-inclusion steps.
