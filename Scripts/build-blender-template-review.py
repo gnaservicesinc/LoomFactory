@@ -156,7 +156,7 @@ def build(template, review, output, only=None):
                           'interpolation': node.interpolation, 'extension': node.extension}
         for node in source.world.node_tree.nodes:
             if node.type == 'BACKGROUND':
-                node.inputs['Strength'].default_value = .05
+                node.inputs['Strength'].default_value = .5
         source.render.threads_mode = 'AUTO'
         source.cycles.pixel_filter_type = 'BLACKMAN_HARRIS'
         source.cycles.filter_width = 1
@@ -187,7 +187,7 @@ def build(template, review, output, only=None):
                        ('09 Cycles - Matte control', 'CYCLES', 'matte')]
         for name, engine, control in definitions:
             clone_scene(source, plane, name, engine, control)
-        # Keep rendered view tied to the actual .05 world, not a separate
+        # Keep rendered view tied to the actual .5 world, not a separate
         # material-preview studio brightness. Preserve the user's camera view.
         for screen in bpy.data.screens:
             for area in screen.areas:
@@ -210,7 +210,7 @@ Native 1K maps packed byte-for-byte. No dense object/OBJ is generated.
 Shared UV -> Mapping drives color, normal, roughness and height textures.
 Tangent OpenGL normal, Displaced Base. Shader displacement .025, midpoint .5.
 Simple quad plus the original Simple adaptive subdivision modifier.
-World strength .05. Cycles Blackman-Harris pixel width1. CPU Auto-Detect.
+World strength .5. Cycles Blackman-Harris pixel width1. CPU Auto-Detect.
 
 Scenes: 01 Cycles Combined; 02 Eevee Combined; 03 Cycles No denoising;
 04 Eevee Normal only; 05 Eevee Height only; 06 Eevee Roughness only;
@@ -232,7 +232,7 @@ These are artistic comparisons, never automatic model approval/selection.
         results.append({'id': entry['id'], 'name': entry['name'], 'file': str(dest),
                         'sha256': sha(dest), 'runs': entry['runs'], 'maps': maps,
                         'material_settings': numeric_settings, 'scenes': [s.name for s in bpy.data.scenes],
-                        'world_strength': .05, 'pixel_filter': 'BLACKMAN_HARRIS',
+                        'world_strength': .5, 'pixel_filter': 'BLACKMAN_HARRIS',
                         'pixel_filter_width': source.cycles.filter_width,
                         'threads_mode': source.render.threads_mode,
                         'detected_threads': source.render.threads,

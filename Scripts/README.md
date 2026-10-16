@@ -33,7 +33,7 @@ from a saved example and an existing artistic-review configuration. It preserves
 the example's simple quad, UV/Mapping chain, shader displacement, normal-map
 basis, subdivision modifier and both render-engine configurations. Four native
 1K maps are packed byte-for-byte; no dense mesh, OBJ or resampled map is created.
-The world uses strength .05, Cycles uses Blackman-Harris filter width1, and CPU
+The world uses strength .5, Cycles uses Blackman-Harris filter width1, and CPU
 threads use Auto-Detect. Matching scenes retain the example's denoising; a
 separate labeled Cycles scene disables it. Additional scenes isolate normal,
 height and roughness contributions and provide a constant .85 roughness control.

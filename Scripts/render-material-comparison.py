@@ -140,7 +140,7 @@ def render_set(record, prefix, output, lighting, neutral=False, options=None):
         # A surface-normal coordinate link is not valid environment lighting.
         environment.texture_mapping.rotation[2] = math.radians(options.get('environment_rotation', 0))
         background = world_nodes.new('ShaderNodeBackground')
-        background.inputs['Strength'].default_value = options.get('environment_strength', 0.05)
+        background.inputs['Strength'].default_value = options.get('environment_strength', 0.5)
         world_out = world_nodes.new('ShaderNodeOutputWorld')
         world_links = scene.world.node_tree.links
         world_links.new(environment.outputs['Color'], background.inputs['Color'])

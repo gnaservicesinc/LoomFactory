@@ -76,7 +76,7 @@ def verify(folder):
                     assert actual_cycles[key] is False
                     actual_cycles[key] = cycles[key]
             assert actual_cycles == cycles
-            assert all(abs(n.inputs['Strength'].default_value - .05) < 1e-7
+            assert all(abs(n.inputs['Strength'].default_value - .5) < 1e-7
                        for n in scene.world.node_tree.nodes if n.type == 'BACKGROUND')
             material = surface.active_material
             assert material.displacement_method == 'BOTH'

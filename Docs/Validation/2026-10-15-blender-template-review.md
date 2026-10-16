@@ -34,3 +34,24 @@ Review assets and the exact user template are private data outside this source
 repository. The builder refuses existing output files. No models, source pixels
 or effective model selections are changed. Scene copies are retained explicitly
 so map-isolation scenes survive save/reopen.
+
+## Human verdict and world-strength correction
+
+The user inspected the hybrid in Blender and judged it usable, with possible
+local feature inversions still to investigate. The saved Pyramid v2 comparison
+was rejected for missing key brick shape and a rolled perimeter. This is a human
+artistic verdict on those particular saved versions and material, not an
+automatic assignment change or qualification of other categories.
+
+The intended world strength is .5, correcting the preceding .05 review setting.
+The generator, verifier and older renderer defaults now use .5. The user's saved
+edited Blender files already have .5 and are preserved rather than overwritten.
+
+The edge diagnosis reads the original numeric outputs unchanged. On this v2
+height map, the central field averages about .978 while the outer edge averages
+.648-.699, returning close to the center level around16 pixels inward. The
+reviewed mesh still uses Simple subdivision. Thus a perimeter height fall-off
+exists before Blender renders it. Pyramid's zero-padded convolutions are a
+plausible mechanism, not an isolated root-cause proof. Existing weights and
+inference contracts are not silently changed. Height-only versus combined
+normal shading is the next human check for suspected local inversions.
