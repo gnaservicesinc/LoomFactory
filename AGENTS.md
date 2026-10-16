@@ -25,3 +25,8 @@ repository's configured origin and verify the remote branch matches the local
 commit. Local checkouts may not survive between runs. Preserve unrelated work,
 never force-push shared history, and report any push failure. The user has given
 standing authorization for these task-scoped commits and pushes.
+
+After finishing verification and any required installation, remove completed
+SwiftPM `.build*` directories in this repository once no compiler or build is
+using them. Preserve any required handoff artifacts and evidence in user storage
+before removing the rebuildable build trees.
