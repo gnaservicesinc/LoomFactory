@@ -17,7 +17,7 @@ architecture and weights.
 
 Raw receipts are in the user storage directory:
 
-`/Users/andrewsmith/Library/Application Support/Loom Factory/Validation/2026-10-15-native-detail`
+`/path/to/user/Library/Application Support/Loom Factory/Validation/2026-10-15-native-detail`
 
 The UTC directory date is October 15; the local session date is October 14.
 Only `control-v2` and `detail-v3`, produced by the current-object harness, are
@@ -42,7 +42,7 @@ smooth either image or change the inference graph.
 
 The starting checkpoint is:
 
-`/opt/ipde/sources_mats/.loom-factory/runs/395fb421-7868-4f51-affe-018e47cbf83f/checkpoint-6e34cead-75ec-44f9-a68b-132cb6f48612.safetensors`
+`/path/to/workspace/sources_mats/.loom-factory/runs/395fb421-7868-4f51-affe-018e47cbf83f/checkpoint-6e34cead-75ec-44f9-a68b-132cb6f48612.safetensors`
 
 Its SHA-256 is
 `10a1506d96e135e5b2ddbfee6294985c3af0a510b5751e5126bb0ae13e0a03d1`.
@@ -213,9 +213,9 @@ These commands perform new GPU training and should run sequentially:
 ```sh
 swift build --configuration release --product LoomNativeProbe
 task_products="$(swift build --configuration release --show-bin-path)"
-task_receipts='/Users/andrewsmith/Library/Application Support/Loom Factory/Validation/2026-10-15-native-detail'
-task_request='/opt/ipde/sources_mats/.loom-factory/runs/395fb421-7868-4f51-affe-018e47cbf83f/request.json'
-task_weights='/opt/ipde/sources_mats/.loom-factory/runs/395fb421-7868-4f51-affe-018e47cbf83f/checkpoint-6e34cead-75ec-44f9-a68b-132cb6f48612.safetensors'
+task_receipts='/path/to/user/Library/Application Support/Loom Factory/Validation/2026-10-15-native-detail'
+task_request='/path/to/workspace/sources_mats/.loom-factory/runs/395fb421-7868-4f51-affe-018e47cbf83f/request.json'
+task_weights='/path/to/workspace/sources_mats/.loom-factory/runs/395fb421-7868-4f51-affe-018e47cbf83f/checkpoint-6e34cead-75ec-44f9-a68b-132cb6f48612.safetensors'
 swiftc -O -I "$task_products" "$task_receipts/detail-replay.swift" \
   "$task_products/LoomNative.o" -o "$task_receipts/detail-replay-reproduced"
 "$task_receipts/detail-replay-reproduced" "$task_request" "$task_weights" \
@@ -225,17 +225,17 @@ swiftc -O -I "$task_products" "$task_receipts/detail-replay.swift" \
 swiftc -O -I "$task_products" "$task_receipts/shift-probe.swift" \
   "$task_products/LoomNative.o" -o "$task_receipts/shift-probe-reproduced"
 "$task_receipts/shift-probe-reproduced" "$task_weights" \
-  /opt/ipde/sources_mats/red_brick_03/red_brick_03_diff_1k.png \
-  /opt/ipde/sources_mats/red_brick_03/red_brick_03_disp_1k.png
+  /path/to/workspace/sources_mats/red_brick_03/red_brick_03_diff_1k.png \
+  /path/to/workspace/sources_mats/red_brick_03/red_brick_03_disp_1k.png
 "$task_receipts/shift-probe-reproduced" "$task_receipts/detail-v3-reproduced/model.safetensors" \
-  /opt/ipde/sources_mats/red_brick_03/red_brick_03_diff_1k.png \
-  /opt/ipde/sources_mats/red_brick_03/red_brick_03_disp_1k.png
+  /path/to/workspace/sources_mats/red_brick_03/red_brick_03_diff_1k.png \
+  /path/to/workspace/sources_mats/red_brick_03/red_brick_03_disp_1k.png
 swiftc -O -I "$task_products" "$task_receipts/full-resolution-check.swift" \
   "$task_products/LoomNative.o" -o "$task_receipts/full-resolution-check-reproduced"
 "$task_receipts/full-resolution-check-reproduced" "$task_receipts/full-resolution-1k-reproduced"
 "$task_receipts/shift-probe-reproduced" "$task_receipts/full-resolution-1k-reproduced/model.safetensors" \
-  /opt/ipde/sources_mats/red_brick_03/red_brick_03_diff_1k.png \
-  /opt/ipde/sources_mats/red_brick_03/red_brick_03_disp_1k.png \
+  /path/to/workspace/sources_mats/red_brick_03/red_brick_03_diff_1k.png \
+  /path/to/workspace/sources_mats/red_brick_03/red_brick_03_disp_1k.png \
   164 4 loom-factory-material-residual-v1
 ```
 
@@ -259,7 +259,7 @@ augmentation settings specified above.
   `mid-epoch-objective-test.log`.
 - All 65 UI Swift Testing cases passed with `--skip-build --no-parallel` in
   28.013 seconds. The objective selector and saved-version controls were rendered
-  and inspected; renders are under `/opt/ipde/ipde/out/native-detail-ui`.
+  and inspected; renders are under `/path/to/workspace/ipde/out/native-detail-ui`.
   Receipt: `all-serialized-ui-tests.log`. This is rendered/state verification,
   not a claim of live installed-button interaction.
 - `Scripts/build-app.sh` produced the optimized Release app;
@@ -268,7 +268,7 @@ augmentation settings specified above.
   executable SHA-256 values match:
   `4ace61e7435bdc85a29a939afc0f455475d431d51543067ab0dbbc0108fc1782`.
   The previous app was retained at
-  `/Users/andrewsmith/Library/Application Support/Loom Factory/Backups/Loom Factory.backup-20261015-005631-2B1ED310.app`.
+  `/path/to/user/Library/Application Support/Loom Factory/Backups/Loom Factory.backup-20261015-005631-2B1ED310.app`.
   Receipts: `release-build.log`, `installation.log`,
   `installed-verification.log`, `integration.json`.
 

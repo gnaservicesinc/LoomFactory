@@ -9,6 +9,29 @@ import UniformTypeIdentifiers
 @Suite(.serialized)
 struct LoomRoomTests {
     @Test @MainActor
+    func photoTrainingWorkspaceRendersAtSupportedSizesWithoutChangingMaterialTraining() async throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let model = FactoryModel(rememberSourceFolder: false)
+        try await load(model, fixture.source)
+        model.selectedDatasetID = try #require(model.snapshot?.datasets.first?.id)
+        let dataset = model.selectedDatasetID
+        let settings = model.settings
+        let images = model.snapshot?.images.map(\.id)
+        model.workspaceSection = .photoTraining
+        for size in [NSSize(width: 1120, height: 760), NSSize(width: 1380, height: 980)] {
+            try await render(model: model, size: size, name: "loom-room-\(Int(size.width))x\(Int(size.height))-photo-training.png")
+        }
+        #expect(model.workspaceSection == .photoTraining)
+        #expect(!model.busy)
+        #expect(model.selectedDatasetID == dataset)
+        #expect(model.settings == settings)
+        #expect(model.snapshot?.images.map(\.id) == images)
+        model.workspaceSection = .training
+        #expect(model.selectedDatasetID == dataset)
+    }
+
+    @Test @MainActor
     func nativeRoomRendersGroupedMaterialsWithSeparateBumpAndDepthMaps() async throws {
         let fixture = try Fixture(grouped: true)
         defer { fixture.remove() }

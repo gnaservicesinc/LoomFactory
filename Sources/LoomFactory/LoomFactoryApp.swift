@@ -26,6 +26,9 @@ struct LoomFactoryApp: App {
                 Button("Manage Models") { model.workspaceSection = .models }
                     .keyboardShortcut("m", modifiers: [.command, .shift])
                     .disabled(model.snapshot == nil)
+                Button("Photo Training") { model.workspaceSection = .photoTraining }
+                    .keyboardShortcut("p", modifiers: [.command, .shift])
+                    .disabled(model.snapshot == nil)
                 Button("Refresh Source Folder") { model.refresh() }
                     .keyboardShortcut("r").disabled(model.snapshot == nil || model.busy)
             }

@@ -57,5 +57,13 @@ struct SyntheticPhotoDataViewTests {
         let output = try #require(model.lastSyntheticPhotoDirectory)
         #expect(FileManager.default.fileExists(atPath: output.appendingPathComponent("manifest.json").path))
         #expect(try Data(contentsOf: imageURL) == before)
+        let otherSource = root.appendingPathComponent("Other Source", isDirectory: true)
+        try FileManager.default.createDirectory(at: otherSource, withIntermediateDirectories: true)
+        model.openFolder(otherSource)
+        #expect(model.lastSyntheticPhotoDirectory == nil)
+        #expect(model.lastPhotoEnhancerDirectory == nil)
+        for _ in 0..<100 { if !model.busy { break }; try await Task.sleep(for: .milliseconds(20)) }
+        #expect(!model.busy)
+        #expect(model.errorMessage == nil)
     }
 }

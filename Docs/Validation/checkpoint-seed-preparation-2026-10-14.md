@@ -71,7 +71,7 @@ Default UI suite overlap twice exceeded the existing 250 ms heartbeat limit in
 the 1,000-map browser responsiveness test. That test passed alone, and the full
 UI suite passed when overlap was disabled. No timing threshold was relaxed.
 Checkpoint state/layout evidence is at
-`/opt/ipde/ipde/out/checkpoint-selection-ui/coverage-select-checkpoint-dark.png`.
+`/path/to/workspace/ipde/out/checkpoint-selection-ui/coverage-select-checkpoint-dark.png`.
 
 Desktop automation failed with `Sky Computer Use native pipe startup failed`.
 Hosted workflow tests and rendered checkpoint controls provide state/layout

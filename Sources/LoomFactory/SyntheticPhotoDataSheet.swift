@@ -10,9 +10,9 @@ struct SyntheticPhotoDataSheet: View {
     @State private var destination: URL?
     @State private var issue: String?
 
-    init(model: FactoryModel) {
+    init(model: FactoryModel, initialRecipe: SyntheticPhotoRecipe? = nil) {
         self.model = model
-        _recipe = State(initialValue: model.savedSyntheticPhotoRecipe())
+        _recipe = State(initialValue: initialRecipe ?? model.savedSyntheticPhotoRecipe())
     }
     private var plan: SyntheticPhotoPlan? { try? SyntheticPhotoPlan(images: model.snapshot?.images ?? [], recipe: recipe, sourceRoot: model.sourceFolder) }
     private var forecast: String { String(format: "%.2f", Double(plan?.estimatedMaximumBytes ?? 0)/1_073_741_824) }

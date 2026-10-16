@@ -1,6 +1,6 @@
 # Material quality recovery and bounded training
 
-The source project is `/opt/ipde/sources_mats`. Diagnostic receipts, predictions,
+The source project is `/path/to/workspace/sources_mats`. Diagnostic receipts, predictions,
 matched three-map renders and failed experiments are in user storage under
 `~/Library/Application Support/Loom Factory/Validation/2026-10-15-quality-recovery`.
 Original source pixels and pre-existing model/checkpoint tensors were preserved.

@@ -54,14 +54,14 @@ inspection failed with `Sky Computer Use native pipe startup failed`.
 ## Installation and evidence
 
 Evidence is stored outside the app source at:
-`/opt/ipde/ipde/out/loom-factory-materials-usability-2026-10-14`.
+`/path/to/workspace/ipde/out/loom-factory-materials-usability-2026-10-14`.
 
 The validated bundle is:
-`/opt/ipde/ipde/LoomFactory/.build/application/Loom Factory.app`.
+`/path/to/workspace/ipde/LoomFactory/.build/application/Loom Factory.app`.
 
 `Scripts/install-app.sh --skip-build` completed after confirming Factory was
 closed. The installer retained the prior app at:
-`/Users/andrewsmith/Library/Application Support/Loom Factory/Backups/Loom Factory.backup-20261014-220740-AF67246D.app`.
+`/path/to/user/Library/Application Support/Loom Factory/Backups/Loom Factory.backup-20261014-220740-AF67246D.app`.
 
 `installation-receipt.json` and `installation-completed.log` record the completed
 installation. The installed executable SHA-256 is the validated hash above;

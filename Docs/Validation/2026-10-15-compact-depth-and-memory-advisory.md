@@ -1,6 +1,6 @@
 # Depth fitting and Compact memory advisory
 
-The source project was `/opt/ipde/sources_mats/.loom-factory`. Inspection and
+The source project was `/path/to/workspace/sources_mats/.loom-factory`. Inspection and
 diagnostic outputs are outside the repository in
 `~/Library/Application Support/Loom Factory/Validation/2026-10-15-cliff-500k-investigation`.
 Original images and saved project weights were not rewritten.

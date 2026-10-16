@@ -1,7 +1,9 @@
 # Native photo enhancer training
 
-Factory's toolbar **Photo Enhancers…** trains two optional RGB products. It does
-not call a retired trainer, a Python runtime, or an online inference service.
+Factory's **Photo Training** workspace exposes two optional RGB products. Open
+it from the main workspace tabs, toolbar or **Edit → Photo Training**
+(Shift-Command-P), then choose **Train Repair…** or **Train Lighting…**. Both
+train natively with Swift and MPSGraph.
 These are experimental training paths, not included pretrained weights or a
 claim that camera cleanup is solved.
 
@@ -21,14 +23,16 @@ Photo LoRA is explicitly unsupported in v1; material packages remain v1.
 
 ## First run
 
-1. Finish the current material training before starting another GPU job. Install
-   the prepared Release build afterward. Choose the same source project in Factory.
-2. Materials → **Synthetic Photos…** → **Repair** preset. Choose all materials
+1. Choose a source project and open **Photo Training**. Finish any current
+   operation before generating data or starting another GPU job.
+2. Under **Repair**, choose **Generate Training Pairs…**. The Repair preset is
+   selected automatically. **Materials → Synthetic Photos…** also remains available. Choose all materials
    or a seeded percentage within each category; keep higher-resolution native1K
    crops enabled. Start with two variants plus identity, disk budget4GiB. Review
    the generated examples; increase selection if whole-material validation is empty.
-3. **Photo Enhancers…** → Repair → **Import Pair Manifest…** → generated
-   `manifest.json`. Imports make new derivative copies under the selected source
+3. Choose **Train Repair…** → **Import Last Generated Pairs**, or use
+   **Import Pair Manifest…** to select a generated `manifest.json` or real-pair manifest.
+   Imports make new derivative copies under the selected source
    project's `.loom-factory/photo-datasets`; target bytes are deduplicated.
    Import has an8GiB bound and interrupted imports are marked incomplete.
    The old all-effects mixed dataset cannot silently become a single-purpose stage.
@@ -50,7 +54,8 @@ Photo LoRA is explicitly unsupported in v1; material packages remain v1.
    Kind/width/LR/seed and current dataset fingerprint must match. Total epochs
    and this session's time budget may change. Original runs stay intact. Automatic saves retain the latest resumable state
    and best weights; explicit manual checkpoint revisions are retained.
-8. Generate and train **Lighting** separately, once Repair gives useful results.
+8. Generate and train **Lighting** separately from the Photo Training workspace,
+   once Repair gives useful results. Its generation button selects the Lighting preset.
    Synthetic exposure/illumination teaches a starting correction; moving a light
    around a room does not provide neutral albedo targets. Review/edit lighting
    references before expecting hard-shadow removal.
@@ -89,9 +94,9 @@ Texture Studio uses optional fixed **build-time** products, separate from its
 material package. After A/B review, include either or both exported folders:
 
 ```sh
-TEXTURE_LOOM_PACKAGE='/absolute/path/to/material-package' \
-PHOTO_REPAIR_MODEL='/absolute/path/to/repair-run/export' \
-PHOTO_LIGHTING_MODEL='/absolute/path/to/lighting-run/export' make build
+TEXTURE_LOOM_PACKAGE="$PWD/exports/Texture-Loom.textureloom" \
+PHOTO_REPAIR_MODEL="$PWD/exports/repair" \
+PHOTO_LIGHTING_MODEL="$PWD/exports/lighting" make build
 ```
 
 The material package supplies the classifier and depth/normal/roughness models.

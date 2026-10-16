@@ -78,7 +78,8 @@ pairs, the recipe and a cancelled manifest. Failed or incomplete exports are
 never labeled completed. Existing export folders are never overwritten. Sources
 are revalidated against current tags, dimensions and hashes while generating.
 
-RGB photo cleanup has distinct native products in **Photo Enhancers…**. Use the
+RGB photo cleanup has distinct native products in **Photo Training**. Its
+**Generate Training Pairs…** actions select the appropriate stage preset. Use the
 Repair or Lighting preset before importing pairs into that trainer; the mixed
 default recipe is not a single-purpose stage. See [PhotoEnhancerTraining.md](PhotoEnhancerTraining.md).
 Exports are not added to depth/normal/roughness membership. Their manifest marks

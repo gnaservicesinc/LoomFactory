@@ -1,11 +1,8 @@
 # Loom Factory
 
-Backend extensions use versioned product and architecture contracts. See
-[model product extension design](Docs/ModelProductExtensions.md) before adding
-new products or optional processing stages. Photo-to-diffuse generation remains
-future work.
+Loom Factory is a native macOS app for preparing material datasets, training and comparing models, and creating custom [Texture Studio](https://github.com/gnaservicesinc/Texture_Studio) deployments. [Loom Workshop](https://github.com/gnaservicesinc/LoomWorkshop) provides LoRA training for an installed deployment.
 
-Loom Factory creates custom Texture Loom deployments for Texture Studio. It is a fresh macOS app, separate from the texture editor and from Loom Workshop's LoRA trainer.
+Use **Training** for depth, roughness and normal models. Use **Photo Training** for experimental RGB noise repair, mild blur cleanup and lighting correction.
 
 Open Loom Room and choose a source folder. The folder owns the entire project: settings, training runs, models and exports live in `.loom-factory`. Choosing another folder opens a different project; reopening the first restores its settings and runs. Imports link to original images rather than copying them.
 
@@ -32,7 +29,7 @@ The builder shows source material folders and image files for the selected datas
 
 Crop positions and flip/rotation choices have independent timing: every use, once per epoch or once per run. Flip choices apply to each image pair, with a 50% chance for each enabled horizontal/vertical flip. Image-order randomization remains separate. Held-out validation separates whole material folders, including every resolution, and uses fixed native center crops. It can save/export the best validation weights and stop after a selected number of epochs without improvement. A single-material dataset trains without held-out validation; early stopping requires another tagged material folder. Manual review is optional: current files, dataset tags and matching map roles determine training membership.
 
-Crop origins can use every native pixel position that fits the selected size. Seed **-1**, the new default, chooses a system random seed once for a fresh run and records it for replay; explicit seeds remain deterministic. Continuing with -1 keeps the saved seed. Two bounded preparation workers overlap image decoding while consuming crops in the original training order.
+Crop origins can use every native pixel position that fits the selected size. Seed **-1** chooses a new system random seed on each start, including continuation, and records it for replay. Fixed seeds allow compatible optimizer and sampler restoration. Two bounded preparation workers overlap image decoding while consuming crops in the original training order.
 
 **Saved checkpoints and models** appears at the top of Training. Select a run to edit its name and notes, test it, reveal its folder or move it to Trash. **Load checkpoint** restores all recorded training settings, including optimizer, crops, augmentation, validation and schedules; the form remains editable afterward. Compatible interrupted checkpoints restore their optimizer state and next image position. Changed settings or completed runs start a new epoch schedule while preserving prior history, cumulative epochs, updates, image visits and measured time. Names and notes are stored separately from immutable run artifacts. Validation loss and completion describe execution; inspect predictions on unseen materials before calling a model production quality.
 
@@ -58,6 +55,25 @@ Loom Factory can publish the export to one Hugging Face model repository using t
 
 A separate [map-type export utility](Scripts/README.md) creates one image per type per material folder for Create ML, using saved map-type tags. It does not train or integrate a map-type classifier.
 
+## Train photo cleanup models
+
+Choose a source folder, then open the **Photo Training** tab. It is also available from the toolbar and **Edit → Photo Training** (Shift-Command-P).
+
+| Stage | Learns from | Purpose |
+| --- | --- | --- |
+| **Repair** | Aligned noisy/clean or mildly blurred/sharp RGB pairs, plus clean identity pairs | Camera noise and mild blur cleanup |
+| **Lighting** | Unevenly lit RGB paired with neutral references | Illumination correction using separate weights |
+
+1. Choose **Generate Training Pairs…** beneath the stage to open its synthetic preset. Review the generated native 1K pairs, or prepare aligned real photo pairs.
+2. Choose **Train Repair…** or **Train Lighting…**, then **Import Last Generated Pairs**, **Import Pair Manifest…** or **Use Imported Dataset…**.
+3. Train with editable model width, learning rate, seed, epoch limit and time budget. **Checkpoint**, **Save & Stop** and **Continue Checkpoint…** preserve native weights and optimizer state.
+4. Use **Test Saved Enhancer…** or **Test Checkpoint…** to compare candidates on unfamiliar surfaces and already-clean photos. Keep useful surface detail and inspect color shifts, halos and lost grain.
+5. Include reviewed exports in a Texture Studio build using `PHOTO_REPAIR_MODEL` and/or `PHOTO_LIGHTING_MODEL`. Photo exports are separate from the material `.textureloom` package.
+
+The trainers run natively using a distinct RGB Compact NAF model. These are experimental workflows without qualified pretrained cleanup weights. Synthetic lighting is an initial experiment; hard-shadow removal, generated microdetail and alpha training still require further work. A short execution check or a lower loss does not establish useful learned quality.
+
+See [photo enhancer training](Docs/PhotoEnhancerTraining.md) for settings, real-pair imports, checkpoints and Studio inclusion, and [synthetic photo data](Docs/SyntheticPhotoData.md) for pair generation and split rules.
+
 ## Build and verify
 
 Requires Apple Silicon, macOS 26 and a Swift 6.2 toolchain.
@@ -71,3 +87,5 @@ Scripts/install-app.sh
 Training runs in native Swift with Metal and MPSGraph. Parameters, gradients and optimizer moments remain on the Apple GPU between updates. ImageIO reads original pixels at native precision, and the app exports Core ML models and compatible Safetensors weights without an interpreter or conversion worker. Stop signals the worker independently, saves completed finite updates and returns after the current GPU operation. Existing project settings and saved weights remain compatible. See [the package contract](Docs/TextureLoomPackage.md) and [native training notes](Docs/NativeTraining.md).
 
 Execution tests establish file handling, training and export behavior. They do not establish prediction quality. Review trained models on unseen materials before shipping a deployment.
+
+Backend contributors should read [model product extension design](Docs/ModelProductExtensions.md) before adding products or processing stages. Product and architecture contracts are versioned independently of image map roles.

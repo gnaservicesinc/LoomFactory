@@ -23,6 +23,14 @@ independently, and mark intentionally omitted products optional. Missing models,
 approved candidates and approved assignments are distinct statuses. See
 [Model management](ModelManagement.md) for persistence and extension boundaries.
 
+The **Photo Training** workspace has separate **Train Repair…** and
+**Train Lighting…** actions for RGB noise/mild blur cleanup and illumination
+correction. Each stage offers **Generate Training Pairs…** with its own preset.
+The toolbar and **Edit → Photo Training** (Shift-Command-P) open the same workspace.
+Training, checkpoints and saved-model testing open in the stage's trainer.
+See [Photo enhancer training](PhotoEnhancerTraining.md) for the full workflow and
+experimental quality limits.
+
 The **Train a dataset** panel shows the selected dataset and target map, the
 current pair count, native training dimensions, epochs, crop augmentation, and
 image-order options. The **Exaggerate features** option appears for depth maps

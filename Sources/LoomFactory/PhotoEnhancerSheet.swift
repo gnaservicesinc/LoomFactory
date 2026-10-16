@@ -10,10 +10,16 @@ struct PhotoEnhancerSheet: View {
     @State private var dataset: URL?
     @State private var resume: URL?
     @State private var issue: String?
+    init(model: FactoryModel, kind: PhotoEnhancerKind = .repair) {
+        self.model = model
+        var initial = PhotoEnhancerSettings()
+        initial.kind = kind
+        _settings = State(initialValue: initial)
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Train Photo Enhancers").font(.title2.bold())
-            Text("Native RGB photo models, separate from height, normal and roughness. Start with repair, then lighting; generated microdetail and alpha are later stages.")
+            Text("Repair learns noise and mild blur cleanup. Lighting learns uneven illumination correction. These experimental RGB models train separately from height, normal and roughness.")
                 .foregroundStyle(.secondary)
             Form {
                 Section("1 · Choose a stage and native photo pairs") {
@@ -22,6 +28,12 @@ struct PhotoEnhancerSheet: View {
                     HStack {
                         Button("Import Pair Manifest…") { importPairs() }
                         Button("Use Imported Dataset…") { chooseDataset() }
+                    }
+                    if let generated = model.lastSyntheticPhotoDirectory {
+                        Button("Import Last Generated Pairs") {
+                            resume = nil
+                            model.importPhotoPairs(manifest: generated.appendingPathComponent("manifest.json"), kind: settings.kind) { dataset = $0 }
+                        }
                     }
                     Text(dataset?.path ?? "Generate stage-specific pairs in Materials → Synthetic Photos (Repair or Lighting preset), or import real paired 1K photographs.")
                         .font(.caption).textSelection(.enabled)

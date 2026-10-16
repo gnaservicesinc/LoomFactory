@@ -1,5 +1,11 @@
 # Conservative photo-to-diffuse recovery — proposal, 2026-10-15
 
+This is the original research proposal. Experimental native Repair and Lighting
+trainers are now available in **Photo Training**; see the current
+[training guide](PhotoEnhancerTraining.md) for data preparation, checkpoints,
+evaluation and Texture Studio integration. The research candidates below are
+separate from the implemented trainer and its quality evidence.
+
 The intended input is a reasonably focused, reasonably lit photograph of a
 material surface. The output is a useful color/diffuse texture of that same
 surface: the same grain, marks, fibers and layout, with camera and lighting

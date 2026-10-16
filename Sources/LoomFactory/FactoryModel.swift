@@ -445,6 +445,9 @@ final class FactoryModel {
         settings = ProjectSettings()
         exportedPackage = nil
         publishedURL = nil
+        lastSyntheticPhotoDirectory = nil
+        lastPhotoEnhancerDirectory = nil
+        photoDatasetSummary = "Choose or import a photo-pair dataset."
         events = []
         latestTrainingMeasurements = nil
         trainingProgress = nil

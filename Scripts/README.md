@@ -3,11 +3,11 @@
 Export one original image of each recognized map type per material folder:
 
 ```sh
-swift Scripts/export-map-type-dataset.swift --source /opt/ipde/sources_mats --output /opt/ipde/mat_type_ds
+swift Scripts/export-map-type-dataset.swift --source ./source-materials --output ./map-type-dataset
 ```
 
-Use `--dry-run` to print the selection without writing anything. The defaults
-are the two paths above. The utility uses saved Loom Factory image tags, not
+Supply your source and export folders explicitly. Use `--dry-run` to print the
+selection without writing anything. The utility uses saved Loom Factory image tags, not
 filename guesses or the category classifier. It reads native dimensions with
 ImageIO without decoding full images or installing Python dependencies.
 

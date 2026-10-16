@@ -1,7 +1,7 @@
 # Training mathematics and model lifecycle validation
 
 Native training inspection used the saved source project at
-`/opt/ipde/sources_mats/.loom-factory`. Original images, saved requests,
+`/path/to/workspace/sources_mats/.loom-factory`. Original images, saved requests,
 checkpoints, optimizer states and models were read without rewriting them.
 Receipts and diagnostic sources are outside the repositories under
 `~/Library/Application Support/Loom Factory/Validation/2026-10-15-training-math-audit`.

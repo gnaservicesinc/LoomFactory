@@ -7,6 +7,8 @@ struct LoomRoomView: View {
     @State private var pairingSheet = false
     @State private var syntheticPhotoSheet = false
     @State private var photoEnhancerSheet = false
+    @State private var photoEnhancerKind: PhotoEnhancerKind = .repair
+    @State private var syntheticPhotoRecipe: SyntheticPhotoRecipe?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -17,6 +19,17 @@ struct LoomRoomView: View {
                 modelsWorkspace(snapshot)
             } else if model.workspaceSection == .training, let snapshot = model.snapshot {
                 trainingWorkspace(snapshot)
+            } else if model.workspaceSection == .photoTraining, let snapshot = model.snapshot {
+                VStack(spacing: 0) {
+                    compactSourceBar(snapshot)
+                    PhotoTrainingWorkspace(model: model, train: { kind in
+                        photoEnhancerKind = kind
+                        photoEnhancerSheet = true
+                    }, generatePairs: { kind in
+                        syntheticPhotoRecipe = kind.recipe
+                        syntheticPhotoSheet = true
+                    })
+                }
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: FactoryStyle.spacing) {
@@ -31,6 +44,8 @@ struct LoomRoomView: View {
                             case .models:
                                 ModelCoverageView(model: model)
                             case .training:
+                                EmptyView()
+                            case .photoTraining:
                                 EmptyView()
                             case .testing:
                                 ModelTestView(model: model)
@@ -56,8 +71,9 @@ struct LoomRoomView: View {
             ToolbarItem(placement: .principal) { Text("Loom Factory").font(.headline) }
             ToolbarItemGroup(placement: .primaryAction) {
                 if model.snapshot != nil {
-                    Button("Photo Enhancers…", systemImage: "camera.filters") { photoEnhancerSheet = true }
-                        .disabled(model.busy)
+                    Button("Photo Training", systemImage: "camera.filters") { model.workspaceSection = .photoTraining }
+                        .help("Train Repair models for noise and mild blur, or Lighting models for uneven illumination.")
+                        .accessibilityIdentifier("loom.photoTraining")
                     Button { model.showModelTesting() } label: { Label("Test Model", systemImage: "play.rectangle") }
                         .accessibilityIdentifier("loom.testModel")
                     Button { model.importImages() } label: { Label("Import Images", systemImage: "square.and.arrow.down") }
@@ -73,8 +89,8 @@ struct LoomRoomView: View {
             Button("OK") { model.errorMessage = nil }
         } message: { Text(model.errorMessage ?? "") }
         .sheet(isPresented: $pairingSheet) { PairImagesSheet(model: model) }
-        .sheet(isPresented: $photoEnhancerSheet) { PhotoEnhancerSheet(model: model) }
-        .sheet(isPresented: $syntheticPhotoSheet) { SyntheticPhotoDataSheet(model: model) }
+        .sheet(isPresented: $photoEnhancerSheet) { PhotoEnhancerSheet(model: model, kind: photoEnhancerKind) }
+        .sheet(isPresented: $syntheticPhotoSheet) { SyntheticPhotoDataSheet(model: model, initialRecipe: syntheticPhotoRecipe) }
         .onChange(of: model.settings) { model.scheduleSettingsSave() }
         .task {
             model.restoreLastFolder()
@@ -91,7 +107,7 @@ struct LoomRoomView: View {
                 ForEach(LoomWorkspaceSection.allCases) { section in
                     Text(section.displayName).tag(section)
                 }
-            }.pickerStyle(.segmented).labelsHidden().frame(width: 660, alignment: .leading)
+            }.pickerStyle(.segmented).labelsHidden().frame(width: 820, alignment: .leading)
                 .accessibilityIdentifier("loom.workspaceSection")
             Spacer()
         }
@@ -170,7 +186,7 @@ struct LoomRoomView: View {
             .padding(.vertical, 34)
             HStack(alignment: .top, spacing: 18) {
                 welcomeStep("Review your datasets", "Images are categorized into datasets. Review the labels and correct them directly on the images.", "square.grid.2x2")
-                welcomeStep("Train Texture Loom", "Train depth, roughness and normal models for your datasets.", "sparkles")
+                welcomeStep("Train your models", "Train depth, roughness and normal maps, or open Photo Training for noise repair and lighting correction.", "sparkles")
                 welcomeStep("Export one package", "Bundle the classifier and your models for a custom Texture Studio build, or publish them together.", "shippingbox")
             }
         }
@@ -274,7 +290,10 @@ struct LoomRoomView: View {
                 Spacer()
                 TextField("Find a material or map", text: $model.imageSearch).textFieldStyle(.roundedBorder).frame(width: 200)
                 Button("Pair Images…") { pairingSheet = true }.disabled(model.busy || snapshot.images.count < 2)
-                Button("Synthetic Photos…", systemImage: "camera.badge.ellipsis") { syntheticPhotoSheet = true }
+                Button("Synthetic Photos…", systemImage: "camera.badge.ellipsis") {
+                    syntheticPhotoRecipe = nil
+                    syntheticPhotoSheet = true
+                }
                     .disabled(model.busy)
                     .accessibilityIdentifier("loom.syntheticPhotos")
                 Button("Categorize", systemImage: "tag") { model.categorize() }.disabled(model.busy || snapshot.images.isEmpty)
@@ -480,13 +499,14 @@ struct PairImagesSheet: View {
 }
 
 enum LoomWorkspaceSection: String, CaseIterable, Identifiable {
-    case materials, models, training, testing, package
+    case materials, models, training, photoTraining, testing, package
     var id: String { rawValue }
     var displayName: String {
         switch self {
         case .materials: "Materials"
         case .models: "Models"
         case .training: "Training"
+        case .photoTraining: "Photo Training"
         case .testing: "Test Model"
         case .package: "Package"
         }
