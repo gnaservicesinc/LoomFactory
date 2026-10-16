@@ -78,9 +78,11 @@ pairs, the recipe and a cancelled manifest. Failed or incomplete exports are
 never labeled completed. Existing export folders are never overwritten. Sources
 are revalidated against current tags, dimensions and hashes while generating.
 
-RGB photo cleanup training is a future, distinct product. These exports are not
-added to the current depth/normal/roughness training membership. The manifest
-marks them for review rather than claiming a trained or approved RGB product.
+RGB photo cleanup has distinct native products in **Photo Enhancers…**. Use the
+Repair or Lighting preset before importing pairs into that trainer; the mixed
+default recipe is not a single-purpose stage. See [PhotoEnhancerTraining.md](PhotoEnhancerTraining.md).
+Exports are not added to depth/normal/roughness membership. Their manifest marks
+them for review/import rather than claiming a trained or approved RGB product.
 A fixed independent split seed assigns material groups approximately 80/10/10;
 small exports may not populate every split and need coverage review.
 

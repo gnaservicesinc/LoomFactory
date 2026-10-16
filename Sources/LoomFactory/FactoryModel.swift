@@ -85,6 +85,8 @@ final class FactoryModel {
     private(set) var blenderTestMaps: [BlenderTestMap] = []
     private(set) var lastBlenderExportURL: URL?
     private(set) var lastSyntheticPhotoDirectory: URL?
+    private(set) var lastPhotoEnhancerDirectory: URL?
+    private(set) var photoDatasetSummary = "Choose or import a photo-pair dataset."
     private(set) var testOriginalMap = ModelTestOriginalMap.resolve(inputURL: nil, map: nil, images: [])
     var imageSearch = ""
     var fileFilter: MaterialBrowserFilter = .all
@@ -1030,6 +1032,52 @@ final class FactoryModel {
                     "Folders needing review for Create ML: \(names). Check their category and native 1,024 × 1,024 diffuse image."))
             }
             NSWorkspace.shared.activateFileViewerSelecting([summary.directory])
+        }
+    }
+
+    func testPhotoCheckpoint(checkpoint: URL, input: URL, best: Bool) {
+        perform("Testing photo checkpoint on CPU", clearEvents: true) { [weak self] project in
+            let output = project.projectFolder.appendingPathComponent("photo-tests/" + UUID().uuidString.lowercased())
+            let result = try await Task.detached(priority: .utility) {
+                let export = try PhotoEnhancerTesting.exportCheckpoint(checkpoint, best: best, destination: output.appendingPathComponent("model"))
+                return try PhotoEnhancerTesting.test(export: export, input: input, destination: output.appendingPathComponent("review"))
+            }.value
+            self?.lastPhotoEnhancerDirectory = output
+            NSWorkspace.shared.open(result.appendingPathComponent("Review.html"))
+        }
+    }
+
+    func testPhotoEnhancer(export: URL, input: URL) {
+        perform("Testing photo enhancer on CPU", clearEvents: true) { [weak self] project in
+            let output = project.projectFolder.appendingPathComponent("photo-tests/" + UUID().uuidString.lowercased())
+            let cancellation = NativeCancellation()
+            let result = try await withTaskCancellationHandler {
+                try await Task.detached(priority: .utility) { try PhotoEnhancerTesting.test(export: export, input: input, destination: output, cancellation: cancellation) }.value
+            } onCancel: { cancellation.cancel() }
+            self?.lastPhotoEnhancerDirectory = result
+            NSWorkspace.shared.open(result.appendingPathComponent("Review.html"))
+        }
+    }
+
+    func importPhotoPairs(manifest: URL, kind: PhotoEnhancerKind, completion: @escaping @MainActor (URL) -> Void) {
+        perform("Importing photo pairs", clearEvents: true) { [weak self] project in
+            let folder = project.projectFolder.appendingPathComponent("photo-datasets/" + UUID().uuidString.lowercased())
+            let cancellation = NativeCancellation()
+            let value = try await withTaskCancellationHandler {
+                try await Task.detached(priority: .utility) {
+                    try PhotoEnhancerData.importDataset(manifest: manifest, kind: kind, destination: folder, cancellation: cancellation)
+                }.value
+            } onCancel: { cancellation.cancel() }
+            self?.photoDatasetSummary = value.summary
+            completion(folder)
+        }
+    }
+
+    func trainPhotoEnhancer(dataset: URL, settings: PhotoEnhancerSettings, resume: URL?) {
+        let handler = progressHandler()
+        perform("Training photo enhancer", clearEvents: true, training: true) { [weak self] project in
+            let folder = try await project.trainPhotoEnhancer(dataset: dataset, settings: settings, resume: resume, progress: handler)
+            self?.lastPhotoEnhancerDirectory = folder
         }
     }
 

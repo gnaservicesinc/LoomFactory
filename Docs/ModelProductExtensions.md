@@ -4,9 +4,12 @@ Loom Factory currently trains depth, roughness and normal products. Their
 versioned architecture IDs, explicit native input/output contracts, and package
 catalog are the extension boundary. The current package format is deliberately
 limited to those implemented products. Photo-to-diffuse generation and additional
-processing stages are future work.
+processing stages have separate contracts. The implemented experimental Repair
+and Lighting RGB products use the catalog and constructor registry in
+`NativeModelProduct.swift`; see [PhotoEnhancerTraining.md](PhotoEnhancerTraining.md).
+The material package remains limited to depth/roughness/normal.
 
-Before introducing another product, consolidate the existing product rules into
+Before introducing another product, extend the existing product rules in
 one small product catalog and an architecture-constructor registry. This keeps a
 new product from requiring separate, potentially inconsistent conditionals in
 the trainer, export, Studio inference and Workshop adaptation code. Do not add a

@@ -40,6 +40,13 @@ struct SyntheticPhotoDataSheet: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Section("Synthetic camera effects") {
+                        HStack {
+                            Text("Enhancer training presets")
+                            Button("Repair") { var preset = PhotoEnhancerKind.repair.recipe; preset.seed = recipe.seed; preset.materialPercentage = recipe.materialPercentage; recipe = preset }
+                            Button("Lighting") { var preset = PhotoEnhancerKind.lighting.recipe; preset.seed = recipe.seed; preset.materialPercentage = recipe.materialPercentage; recipe = preset }
+                        }
+                        Text("Use a stage preset when training an enhancer. Mixed lighting and blur/noise recipes remain useful experiments but cannot be imported as a single-purpose stage.")
+                            .font(.caption).foregroundStyle(.secondary)
                         Toggle("Exposure (brighter and darker)", isOn: $recipe.exposure)
                         Toggle("Mild defocus blur", isOn: $recipe.blur)
                         Toggle("Approximate sensor noise", isOn: $recipe.noise)

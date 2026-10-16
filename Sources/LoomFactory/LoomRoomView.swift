@@ -6,6 +6,7 @@ struct LoomRoomView: View {
     @Bindable var model: FactoryModel
     @State private var pairingSheet = false
     @State private var syntheticPhotoSheet = false
+    @State private var photoEnhancerSheet = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -55,6 +56,8 @@ struct LoomRoomView: View {
             ToolbarItem(placement: .principal) { Text("Loom Factory").font(.headline) }
             ToolbarItemGroup(placement: .primaryAction) {
                 if model.snapshot != nil {
+                    Button("Photo Enhancers…", systemImage: "camera.filters") { photoEnhancerSheet = true }
+                        .disabled(model.busy)
                     Button { model.showModelTesting() } label: { Label("Test Model", systemImage: "play.rectangle") }
                         .accessibilityIdentifier("loom.testModel")
                     Button { model.importImages() } label: { Label("Import Images", systemImage: "square.and.arrow.down") }
@@ -70,6 +73,7 @@ struct LoomRoomView: View {
             Button("OK") { model.errorMessage = nil }
         } message: { Text(model.errorMessage ?? "") }
         .sheet(isPresented: $pairingSheet) { PairImagesSheet(model: model) }
+        .sheet(isPresented: $photoEnhancerSheet) { PhotoEnhancerSheet(model: model) }
         .sheet(isPresented: $syntheticPhotoSheet) { SyntheticPhotoDataSheet(model: model) }
         .onChange(of: model.settings) { model.scheduleSettingsSave() }
         .task {

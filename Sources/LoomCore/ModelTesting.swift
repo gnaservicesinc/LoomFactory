@@ -22,18 +22,25 @@ public struct ModelTestResult: Sendable {
     public let checkpointID: String?
     public let inputSHA256: String?
     public let boundaryHandling: String
+    /// Frozen when these exact weights are tested, independent of later picker changes.
+    public let modelName: String?
+    public var imageCaption: String {
+        let name = modelName ?? "Model"
+        let weights = source == .model ? "Saved model" : "Checkpoint \(checkpointID ?? "latest")"
+        return "\(name) · \(map.displayName) · \(weights) · Run \(runID.prefix(8))"
+    }
 
     public init(directory: URL, inputURL: URL, outputURL: URL, runID: String, source: TrainingWeightSource,
                 map: MapRole, width: Int, height: Int, tileSize: Int, tileCount: Int, note: String,
                 previewURL: URL? = nil, checkpointID: String? = nil, inputSHA256: String? = nil,
-                boundaryHandling: String = ModelTestBoundaryHandling.legacy.rawValue) {
+                boundaryHandling: String = ModelTestBoundaryHandling.legacy.rawValue, modelName: String? = nil) {
         self.directory = directory; self.inputURL = inputURL; self.outputURL = outputURL
         self.previewURL = previewURL ?? outputURL
         self.runID = runID; self.source = source; self.map = map
         self.width = width; self.height = height; self.tileSize = tileSize; self.tileCount = tileCount; self.note = note
         self.checkpointID = checkpointID
         self.inputSHA256 = inputSHA256
-        self.boundaryHandling = boundaryHandling
+        self.boundaryHandling = boundaryHandling; self.modelName = modelName
     }
 }
 
@@ -73,6 +80,7 @@ struct ModelTestSelection: Sendable {
     let weightsURL: URL
     let weightsSHA256: String
     var checkpointID: String? = nil
+    var modelName: String? = nil
 
     static func load(runID: String, source: TrainingWeightSource, datasetID: String, map: MapRole,
                      projectFolder: URL, projectID: String, checkpointID: String? = nil) throws -> Self {
@@ -94,9 +102,12 @@ struct ModelTestSelection: Sendable {
         let resume = try TrainingRunFiles.resume(weights: weightsURL, projectFolder: projectFolder,
             projectID: projectID, datasetID: datasetID, map: map, settings: settings, checkpointID: checkpointID)
         guard resume.source == source else { throw LoomError("The selected saved weights do not match their source.") }
+        let label = try TrainingRunFiles.metadata(at: directory)?.label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let network = TrainingNetwork(rawValue: architecture.identifier)?.displayName ?? architecture.identifier
+        let name = [label?.isEmpty == false ? label : nil, network, "\(architecture.parameterCount.formatted()) parameters"].compactMap { $0 }.joined(separator: " · ")
         return Self(runID: runID, source: source, datasetID: datasetID, map: map,
             architecture: architecture, imageSize: settings.imageSize,
-            weightsURL: resume.weights, weightsSHA256: resume.sha256, checkpointID: descriptor["checkpoint_id"] as? String)
+            weightsURL: resume.weights, weightsSHA256: resume.sha256, checkpointID: descriptor["checkpoint_id"] as? String, modelName: name)
     }
 }
 
@@ -275,7 +286,7 @@ enum ModelTestWorker {
             + (model.architecture.isCompact ? "The PNG preview clamps to [0,1] before 16-bit quantization, without per-output normalization."
                 : "The PNG preview uses fixed [0,1] values quantized to 16 bits, without per-output normalization.")
         try NativeFactoryTraining.writeJSON(["schema": "loom-factory-model-test-v1", "run_id": model.runID,
-            "checkpoint_id": model.checkpointID as Any? ?? NSNull(),
+            "checkpoint_id": model.checkpointID as Any? ?? NSNull(), "model_name": model.modelName as Any? ?? NSNull(),
             "weight_source": model.source.rawValue, "dataset_id": model.datasetID, "map": model.map.rawValue,
             "architecture": model.architecture.identifier, "input_path": original.path, "input_sha256": inputHash,
             "weights_sha256": model.weightsSHA256, "output_path": name,
@@ -299,7 +310,7 @@ enum ModelTestWorker {
         let result = ModelTestResult(directory: output, inputURL: original, outputURL: output.appendingPathComponent(name),
             runID: model.runID, source: model.source, map: model.map, width: image.width, height: image.height,
             tileSize: tileSize, tileCount: tileCount, note: note, previewURL: output.appendingPathComponent(previewName),
-            checkpointID: model.checkpointID, inputSHA256: inputHash, boundaryHandling: stitching)
+            checkpointID: model.checkpointID, inputSHA256: inputHash, boundaryHandling: stitching, modelName: model.modelName)
         progress(.init(type: "completed", message: "Saved full-resolution \(model.map.rawValue) output", progress: 1))
         return result
     }

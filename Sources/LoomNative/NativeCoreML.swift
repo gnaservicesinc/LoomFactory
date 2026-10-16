@@ -18,7 +18,7 @@ public enum NativeCoreML {
         configuration.computeUnits = .cpuOnly
         let model = try MLModel(contentsOf: compiled, configuration: configuration)
         guard model.modelDescription.inputDescriptionsByName["rgb"]?.multiArrayConstraint?.shape.count == 4,
-              model.modelDescription.outputDescriptionsByName["material_map"] != nil else {
+              model.modelDescription.outputDescriptionsByName[architecture.outputName] != nil else {
             throw NativeIOError.invalid("The compiled Core ML model does not retain the native NCHW tensor interface.")
         }
         return compiled
@@ -308,14 +308,17 @@ public enum NativeCoreML {
             value = block("decoder.\(level)", value, channels: architecture.width << level)
         }
         value = convolution("output", value)
+        if architecture.isPhoto { value = operation("photo_rgb_residual", ["rgb", value], 880) }
         var outputShape = CoreMLWire(); outputShape.integers(1, [1, architecture.outputChannels, 0, 0])
-        layer("output_nchw", [value], ["material_map"], 1150, outputShape)
+        layer("output_nchw", [value], [architecture.outputName], 1150, outputShape)
 
         var description = CoreMLWire()
         description.message(1, feature(name: "rgb", channels: 3, size: imageSize, flexible: true))
-        description.message(10, feature(name: "material_map", channels: architecture.outputChannels, size: imageSize, flexible: true))
+        description.message(10, feature(name: architecture.outputName, channels: architecture.outputChannels, size: imageSize, flexible: true))
         var metadata = CoreMLWire(); metadata.string(1, "Texture Loom model trained natively in Loom Factory")
-        for (key, value) in ["loom.schema": "loom-factory-model-v1", "loom.architecture": architecture.identifier] {
+        var attributes = ["loom.schema": "loom-factory-model-v1", "loom.architecture": architecture.identifier]
+        if architecture.isPhoto { attributes["loom.schema"] = "loom-factory-photo-model-v1"; attributes["loom.product"] = architecture.mapKind; attributes["loom.width"] = String(architecture.width) }
+        for (key, value) in attributes {
             var pair = CoreMLWire(); pair.string(1, key); pair.string(2, value); metadata.message(100, pair)
         }
         description.message(100, metadata)

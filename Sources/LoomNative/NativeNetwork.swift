@@ -21,23 +21,26 @@ public struct NativeArchitecture: Sendable, Equatable {
     public static let pyramidIdentifier = "loom-factory-material-pyramid-v1"
     public static let pyramidV2Identifier = "loom-factory-material-pyramid-v2"
     public static let compactIdentifier = "loom-factory-material-compact-naf-v1"
-    public static let supportedIdentifiers = [identifier, residualV2Identifier, pyramidIdentifier, pyramidV2Identifier, compactIdentifier]
+    public static let photoCompactIdentifier = "loom-factory-photo-compact-naf-v1"
+    public static var supportedIdentifiers: [String] { NativeArchitectureConstructor.all.map(\.id) }
     public let identifier: String
     public let mapKind: String
     public let width: Int
     public let blocks: Int
-    public var outputChannels: Int { mapKind == "normal" ? 3 : 1 }
+    public var product: NativeModelProduct { NativeModelProduct(rawValue: mapKind)! }
+    public var isPhoto: Bool { product.isPhoto }
+    public var outputChannels: Int { product.channels }
+    public var outputName: String { product.outputName }
     public init(mapKind: String, width: Int, blocks: Int, identifier: String = Self.identifier) throws {
-        guard Self.supportedIdentifiers.contains(identifier),
-              ["depth", "roughness", "normal"].contains(mapKind), (1...512).contains(width), (1...64).contains(blocks),
-              identifier != Self.compactIdentifier || blocks == 1 else {
+        guard let product = NativeModelProduct(rawValue: mapKind), product.constructors.contains(identifier), (1...512).contains(width), (1...64).contains(blocks),
+              ![Self.compactIdentifier, Self.photoCompactIdentifier].contains(identifier) || blocks == 1 else {
             throw NativeTrainingError.invalid("Unsupported native architecture identity, map kind, or dimensions.")
         }
         self.identifier = identifier; self.mapKind = mapKind; self.width = width; self.blocks = blocks
     }
     public var isPyramid: Bool { identifier == Self.pyramidIdentifier || isPyramidV2 }
     public var isPyramidV2: Bool { identifier == Self.pyramidV2Identifier }
-    public var isCompact: Bool { identifier == Self.compactIdentifier }
+    public var isCompact: Bool { identifier == Self.compactIdentifier || identifier == Self.photoCompactIdentifier }
     public var isResidualV2: Bool { identifier == Self.residualV2Identifier }
     public var usesLeakyActivation: Bool { isResidualV2 || isPyramidV2 }
     public var hiddenNegativeSlope: Double { usesLeakyActivation ? 0.1 : 0 }
@@ -127,6 +130,13 @@ public struct NativeArchitecture: Sendable, Equatable {
             result["normal_output_transform"] = "none"
             result["lora_scope"] = "dense-convolutions-only"
         }
+        if isPhoto {
+            result["product"] = mapKind
+            result["head_activation"] = "input-plus-linear-residual"
+            result["output"] = "sRGB numeric RGB float32 NCHW raw; no normal-vector transform"
+            result["initial_output"] = "identity-zero-residual-head"
+            result["lora_scope"] = "unsupported-v1"
+        }
         return result
     }
 }
@@ -194,8 +204,9 @@ extension MPSGraph {
                         parameters: [String: MPSGraphTensor], adapter: NativeAdapterConfiguration?,
                         channelsLast: Bool = false) -> MPSGraphTensor {
         if architecture.isCompact {
-            return compactMaterialNetwork(input: input, architecture: architecture, parameters: parameters,
+            let residual = compactMaterialNetwork(input: input, architecture: architecture, parameters: parameters,
                 adapter: adapter, channelsLast: channelsLast)
+            return architecture.isPhoto ? addition(input, residual, name: "photo_rgb_residual") : residual
         }
         func activation(_ value: MPSGraphTensor) -> MPSGraphTensor {
             architecture.usesLeakyActivation

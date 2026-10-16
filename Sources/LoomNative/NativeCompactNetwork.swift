@@ -56,12 +56,13 @@ enum NativeCompactNetwork {
         let shapes = architecture.parameterShapes
         for name in shapes.keys.sorted() {
             let shape = shapes[name]!
-            result[name] = NativeTensor(shape: shape, values: initialValues(name: name, shape: shape, random: &random))
+            result[name] = NativeTensor(shape: shape, values: initialValues(name: name, shape: shape, random: &random, photo: architecture.isPhoto))
         }
         return result
     }
-    static func initialValues(name: String, shape: [Int], random: inout NativeRandom) -> [Float] {
+    static func initialValues(name: String, shape: [Int], random: inout NativeRandom, photo: Bool = false) -> [Float] {
         let count = shape.reduce(1, *)
+        if photo && name.hasPrefix("output.") { return Array(repeating: 0, count: count) }
         if name.contains(".norm"), name.hasSuffix(".weight") { return Array(repeating: 1, count: count) }
         if name.hasSuffix(".beta") || name.hasSuffix(".gamma") { return Array(repeating: 0.1, count: count) }
         if name == "output.bias" { return count == 3 ? [0.5, 0.5, 1] : [0.5] }

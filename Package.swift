@@ -17,7 +17,7 @@ let package = Package(
         .executableTarget(name: "LoomTrainingQueue", dependencies: ["LoomCore", "LoomNative"]),
         .target(name: "LoomCore", dependencies: ["LoomNative"], resources: [.copy("Resources/BlenderExport.py")]),
         .executableTarget(name: "LoomFactory", dependencies: ["LoomCore"]),
-        .testTarget(name: "LoomNativeTests", dependencies: ["LoomNative"], path: "Tests/LoomNativeTests"),
+        .testTarget(name: "LoomNativeTests", dependencies: ["LoomNative", "LoomCore"], path: "Tests/LoomNativeTests"),
         .testTarget(name: "LoomCoreTests", dependencies: ["LoomCore", "LoomNative"], path: "Tests/LoomCoreTests"),
         .testTarget(name: "LoomFactoryUITests", dependencies: ["LoomFactory", "LoomCore"], path: "Tests/LoomFactoryUITests")
     ]

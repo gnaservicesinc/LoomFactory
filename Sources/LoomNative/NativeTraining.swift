@@ -151,6 +151,7 @@ public final class NativeTrainingSession {
             throw NativeTrainingError.invalid("Compact NAF currently uses its verified NCHW layout.")
         }
         guard initialUpdateCount >= 0 else { throw NativeTrainingError.invalid("Optimizer step count cannot be negative.") }
+        if architecture.isPhoto && adapter != nil { throw NativeTrainingError.invalid("Photo enhancer adapters are not supported in v1.") }
         if adapter != nil && weights == nil { throw NativeTrainingError.invalid("LoRA training requires the exact installed base weights.") }
         if adapter == nil && adapterWeights != nil { throw NativeTrainingError.invalid("Adapter weights require a LoRA configuration.") }
         self.architecture = architecture; self.options = options; self.adapter = adapter
@@ -184,7 +185,7 @@ public final class NativeTrainingSession {
             let values: [Float]
             if let supplied { values = supplied.values }
             else if architecture.isCompact, architecture.parameterShapes[name] != nil {
-                values = NativeCompactNetwork.initialValues(name: name, shape: shape, random: &random)
+                values = NativeCompactNetwork.initialValues(name: name, shape: shape, random: &random, photo: architecture.isPhoto)
             }
             else if name.hasSuffix(".up.weight") { values = Array(repeating: 0, count: shape.reduce(1, *)) }
             else {

@@ -259,6 +259,9 @@ struct ModelTestCheckpointComparison: View {
             FactoryImage(url: result.previewURL, revision: result.directory.path, maximumPixels: max(result.width, result.height),
                 interpolation: .none, applyOrientationTransform: false)
                 .frame(height: 400).clipShape(RoundedRectangle(cornerRadius: 7))
+            Text(result.imageCaption).font(.caption.weight(.medium)).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("modelTest.comparisonCaption")
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -341,7 +344,7 @@ struct ModelTestResultView: View {
                     imagePanel("Original \(result.map.displayName.lowercased()) map", url: target.url, revision: originalMapRevision)
                         .accessibilityIdentifier("modelTest.originalMap")
                 } else { imagePanel("Diffuse input", url: result.inputURL) }
-                imagePanel("Generated \(result.map.displayName.lowercased())", url: result.previewURL)
+                imagePanel("Generated \(result.map.displayName.lowercased())", url: result.previewURL, caption: result.imageCaption)
             }
             if let target = originalMap.image {
                 Text("Original: \(target.url.path)\(target.normalConvention.map { " · " + $0 + " normals" } ?? "")")
@@ -360,7 +363,7 @@ struct ModelTestResultView: View {
         }.accessibilityIdentifier("modelTest.result")
     }
 
-    private func imagePanel(_ title: String, url: URL, revision: String? = nil) -> some View {
+    private func imagePanel(_ title: String, url: URL, revision: String? = nil, caption: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             Text(title).font(.subheadline.weight(.medium))
             if let scale = imageZoom.scale {
@@ -374,6 +377,10 @@ struct ModelTestResultView: View {
                 FactoryImage(url: url, revision: revision ?? result.directory.path, maximumPixels: 1600, applyOrientationTransform: false)
                     .frame(height: 480).clipShape(RoundedRectangle(cornerRadius: 7))
             }
+            Text(caption ?? "Source · " + url.lastPathComponent)
+                .font(.caption.weight(.medium)).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier(caption == nil ? "modelTest.sourceCaption" : "modelTest.generatedCaption")
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }
