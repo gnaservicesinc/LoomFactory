@@ -7,7 +7,16 @@ enum ModelVersionPresentation {
     static func title(_ version: ModelVersion) -> String {
         let label = version.label.trimmingCharacters(in: .whitespacesAndNewlines)
         let name = label.isEmpty ? "Run \(version.id.prefix(8))" : label
-        return "\(name) · \(version.createdAt.formatted(date: .abbreviated, time: .shortened))"
+        return "\(name) · \(version.id.prefix(8)) · \(clipping(version.settings)) · \(version.createdAt.formatted(date: .abbreviated, time: .shortened))"
+    }
+
+    static func clipping(_ settings: TrainingSettings?) -> String {
+        guard let settings else { return "Clipping unknown" }
+        guard settings.gradientClipPolicy != .off, settings.gradientClipNorm > 0 else { return "Clipping off" }
+        if settings.gradientClipPolicy == .warmup {
+            return "Clipping warmup \(number(settings.gradientClipWarmupStartNorm)) → \(number(settings.gradientClipNorm))"
+        }
+        return "Clipping max norm \(number(settings.gradientClipNorm))"
     }
 
     static func summary(_ settings: TrainingSettings, map: MapRole? = nil) -> String {
@@ -69,8 +78,13 @@ struct ModelVersionRow: View {
                     if let loss = metric.validationLoss { Text("Validation loss \(ModelVersionPresentation.number(loss))") }
                 }.font(.caption).monospacedDigit().foregroundStyle(.secondary)
                 if let norm = metric.meanGradientNorm {
-                    Text("Mean global norm \(ModelVersionPresentation.number(norm))\(metric.peakGradientNorm.map { " · peak " + ModelVersionPresentation.number($0) } ?? "")\(metric.clippedUpdates.map { " · " + $0.formatted() + " clipped updates" } ?? "")")
+                    Text("Mean global norm \(ModelVersionPresentation.number(norm))\(metric.peakGradientNorm.map { " · peak " + ModelVersionPresentation.number($0) } ?? "")")
                         .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+                }
+                if let clipped = metric.clippedUpdates {
+                    Text("Saved run \(version.id.prefix(8)) · epoch \(metric.epoch): \(clipped)\(metric.optimizerUpdates.map { " of " + $0.formatted() } ?? "") updates clipped\(metric.gradientClipThreshold.map { " · applied cap " + ModelVersionPresentation.number($0) } ?? "")")
+                        .font(.caption).monospacedDigit().foregroundStyle(.secondary).textSelection(.enabled)
+                        .accessibilityIdentifier("training.version.clippingMeasurements.\(version.id)")
                 }
             }
             if let lineage = version.lineage {
@@ -146,7 +160,7 @@ struct ModelComparisonView: View {
         VStack(alignment: .leading, spacing: 15) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("A/B Compare · \(model.selectedMap.displayName)").font(.title2.weight(.semibold))
+                    Text("Compare two runs · \(model.comparisonMap.displayName)").font(.title2.weight(.semibold))
                     Text("Both saved models receive the same exact crop from a current paired material.")
                         .font(.callout).foregroundStyle(.secondary)
                 }
@@ -157,6 +171,9 @@ struct ModelComparisonView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 17) {
                     versionSelection
+                    Text("Compare differences in structure, fine detail and artifacts across several materials. Different seeds are useful context when looking for an effect large enough to matter.")
+                        .font(.callout).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("comparison.seedContext")
                     pairSelection
                     HStack {
                         Button("Compare same crop", systemImage: "rectangle.split.2x1") { model.compareModels() }
@@ -201,10 +218,16 @@ struct ModelComparisonView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.subheadline.weight(.semibold))
             Picker(title, selection: selection) {
-                ForEach(model.exportedModelVersions.filter { $0.id != exclude }) { version in
+                if !selection.wrappedValue.isEmpty, !model.comparisonVersions.contains(where: { $0.id == selection.wrappedValue && $0.id != exclude }) {
+                    Text("Selected run is unavailable; choose a run").tag(selection.wrappedValue)
+                }
+                ForEach(model.comparisonVersions.filter { $0.id != exclude }) { version in
                     Text(ModelVersionPresentation.title(version)).tag(version.id)
                 }
             }.labelsHidden().accessibilityIdentifier(title == "Model A" ? "comparison.modelA" : "comparison.modelB")
+            if let version = model.comparisonVersions.first(where: { $0.id == selection.wrappedValue }) {
+                ModelComparisonRunDetails(version: version)
+            }
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -253,8 +276,8 @@ struct ModelComparisonView: View {
                 ForEach(ComparisonImageZoom.allCases) { Text($0.displayName).tag($0) }
             }.pickerStyle(.segmented).frame(width: 270).accessibilityIdentifier("comparison.zoom")
             HStack(spacing: 20) {
-                imagePanel("Model A · MAE \(ModelVersionPresentation.number(result.firstMAE))", url: result.firstOutputURL, pixels: result.cropSize)
-                imagePanel("Model B · MAE \(ModelVersionPresentation.number(result.secondMAE))", url: result.secondOutputURL, pixels: result.cropSize)
+                imagePanel(outputTitle("A", id: result.firstArtifactID, mae: result.firstMAE), url: result.firstOutputURL, pixels: result.cropSize)
+                imagePanel(outputTitle("B", id: result.secondArtifactID, mae: result.secondMAE), url: result.secondOutputURL, pixels: result.cropSize)
             }
             HStack(spacing: 20) {
                 imagePanel("Diffuse input", url: result.inputURL, pixels: result.cropSize)
@@ -266,6 +289,12 @@ struct ModelComparisonView: View {
             Text("Compare several held-out materials before drawing conclusions about model quality.")
                 .font(.caption).foregroundStyle(.secondary)
         }.accessibilityIdentifier("comparison.result")
+    }
+
+    private func outputTitle(_ side: String, id: String, mae: Double) -> String {
+        let version = model.comparisonVersions.first { $0.artifact?.id == id }
+        let name = version.flatMap { $0.label.isEmpty ? nil : $0.label } ?? "Run"
+        return "\(side) · \(name) · \(id.prefix(8)) · \(ModelVersionPresentation.clipping(version?.settings)) · MAE \(ModelVersionPresentation.number(mae))"
     }
 
     private func imagePanel(_ title: String, url: URL, pixels: Int) -> some View {
@@ -281,6 +310,21 @@ struct ModelComparisonView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 7))
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct ModelComparisonRunDetails: View {
+    let version: ModelVersion
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(ModelVersionPresentation.clipping(version.settings)).font(.callout.weight(.semibold))
+            Text("Run \(version.id.prefix(8)) · \(version.exportedEpochsCompleted) exported epochs")
+            if let settings = version.settings {
+                Text("Seed \(settings.seed) · \(ModelVersionPresentation.summary(settings, map: version.map))")
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }.font(.caption).textSelection(.enabled)
     }
 }
 
@@ -304,6 +348,8 @@ struct TrainingSettingValue: Identifiable, Equatable {
         func item(_ id: String, _ label: String, _ value: String) -> Self { .init(id: id, label: label, value: value) }
         func number(_ value: Double) -> String { ModelVersionPresentation.number(value) }
         func yesNo(_ value: Bool) -> String { value ? "On" : "Off" }
+        let clips = settings.gradientClipPolicy != .off && settings.gradientClipNorm > 0
+        let warmsUp = clips && settings.gradientClipPolicy == .warmup
         var values: [Self] = [
             item("modelArchitecture", "Model architecture", TrainingNetwork(rawValue: settings.modelArchitecture)?.displayName ?? settings.modelArchitecture),
             item("scalarLoss", "Scalar training objective", settings.scalarLoss.displayName),
@@ -316,9 +362,10 @@ struct TrainingSettingValue: Identifiable, Equatable {
             item("batchSize", "Batch size", "\(settings.batchSize)"),
             item("gradientAccumulationSteps", "Gradient accumulation", "\(settings.gradientAccumulationSteps)"),
             item("gradientClipPolicy", "Gradient clipping", settings.gradientClipPolicy.displayName),
-            item("gradientClipNorm", "Max norm", number(settings.gradientClipNorm)),
-            item("gradientClipWarmupStartNorm", "Initial max norm", number(settings.gradientClipWarmupStartNorm)),
-            item("gradientClipWarmupUpdates", "Clipping warmup updates", "\(settings.gradientClipWarmupUpdates)"),
+            item("effectiveGradientClipping", "Effective clipping", ModelVersionPresentation.clipping(settings)),
+            item("gradientClipNorm", "Max norm", clips ? number(settings.gradientClipNorm) : "Not used (clipping off)"),
+            item("gradientClipWarmupStartNorm", "Initial max norm", warmsUp ? number(settings.gradientClipWarmupStartNorm) : "Not used"),
+            item("gradientClipWarmupUpdates", "Clipping warmup updates", warmsUp ? "\(settings.gradientClipWarmupUpdates)" : "Not used"),
             item("weightDecay", "Weight decay", number(settings.weightDecay)),
             item("beta1", "Beta 1", number(settings.beta1)),
             item("beta2", "Beta 2", number(settings.beta2)),

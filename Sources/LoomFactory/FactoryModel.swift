@@ -60,6 +60,8 @@ final class FactoryModel {
     private(set) var comparisonResult: ModelComparisonResult?
     private(set) var comparisonIssue: String?
     private(set) var loadingComparisonPairs = false
+    private var comparisonContext: (datasetID: String, map: MapRole)?
+    private var preferredComparisonInput: URL?
     var selectedTestVersionID = "" {
         didSet {
             if selectedTestVersionID != oldValue {
@@ -227,22 +229,30 @@ final class FactoryModel {
         return effectiveStartMode == .exportedModel ? .model(runID: version.id) : .checkpoint(runID: version.id)
     }
     var firstComparisonVersion: ModelVersion? {
-        exportedModelVersions.first { $0.id == comparisonFirstVersionID } ??
-            exportedModelVersions.first(where: \.isActive) ?? exportedModelVersions.first
+        if !comparisonFirstVersionID.isEmpty { return comparisonVersions.first { $0.id == comparisonFirstVersionID } }
+        return comparisonVersions.first(where: \.isActive) ?? comparisonVersions.first
     }
     var secondComparisonVersion: ModelVersion? {
-        let remaining = exportedModelVersions.filter { $0.id != firstComparisonVersion?.id }
-        return remaining.first { $0.id == comparisonSecondVersionID } ?? remaining.first
+        let remaining = comparisonVersions.filter { $0.id != firstComparisonVersion?.id }
+        if !comparisonSecondVersionID.isEmpty { return remaining.first { $0.id == comparisonSecondVersionID } }
+        return remaining.first
+    }
+    var comparisonDatasetID: String { comparisonContext?.datasetID ?? selectedDatasetID }
+    var comparisonMap: MapRole { comparisonContext?.map ?? selectedMap }
+    var comparisonVersions: [ModelVersion] {
+        snapshot?.modelVersions.filter { $0.datasetID == comparisonDatasetID && $0.map == comparisonMap &&
+            $0.artifact?.weightsPath != nil } ?? []
     }
     var comparisonSelectionKey: String {
         var membership = Hasher()
-        for image in snapshot?.images ?? [] where image.category == selectedDataset?.name {
+        let category = snapshot?.datasets.first { $0.id == comparisonDatasetID }?.name
+        for image in snapshot?.images ?? [] where image.category == category {
             membership.combine(image.id); membership.combine(image.url); membership.combine(image.role)
             membership.combine(image.pairingKey); membership.combine(image.ignored)
             membership.combine(image.width); membership.combine(image.height)
             membership.combine(comparisonImageRevisions[image.id])
         }
-        return [selectedDatasetID, selectedMap.rawValue, firstComparisonVersion?.id ?? "", secondComparisonVersion?.id ?? "",
+        return [comparisonDatasetID, comparisonMap.rawValue, firstComparisonVersion?.id ?? "", secondComparisonVersion?.id ?? "",
                 String(membership.finalize())].joined(separator: "|")
     }
     var selectedComparisonPair: ModelComparisonPair? {
@@ -429,6 +439,8 @@ final class FactoryModel {
         trainingStartMode = .checkpoint
         selectedTrainingVersionID = ""
         runLabel = ""
+        comparisonContext = nil
+        preferredComparisonInput = nil
         comparisonFirstVersionID = ""
         comparisonSecondVersionID = ""
         comparisonPairID = ""
@@ -762,6 +774,16 @@ final class FactoryModel {
         }
     }
 
+    /// Testing can compare runs without changing the training category, map or settings.
+    func prepareModelComparison(from version: ModelVersion? = nil, inputURL: URL? = nil) {
+        comparisonContext = version.map { ($0.datasetID, $0.map) }
+        preferredComparisonInput = inputURL
+        comparisonFirstVersionID = version?.id ?? ""
+        comparisonSecondVersionID = ""
+        comparisonPairID = ""
+        invalidateComparisonSelection()
+    }
+
     func loadComparisonPairs() async {
         let key = comparisonSelectionKey
         guard key != loadedComparisonKey else { return }
@@ -776,11 +798,13 @@ final class FactoryModel {
         let current = generation
         loadingComparisonPairs = true
         do {
-            let pairs = try await project.comparePairOptions(datasetID: selectedDatasetID, map: selectedMap,
+            let pairs = try await project.comparePairOptions(datasetID: comparisonDatasetID, map: comparisonMap,
                                                              artifactIDs: [first.id, second.id])
             guard !Task.isCancelled, current == generation, key == comparisonSelectionKey else { return }
             comparisonPairs = pairs
-            if !pairs.contains(where: { $0.id == comparisonPairID }) { comparisonPairID = pairs.first?.id ?? "" }
+            if !pairs.contains(where: { $0.id == comparisonPairID }) {
+                comparisonPairID = pairs.first { $0.inputURL == preferredComparisonInput }?.id ?? pairs.first?.id ?? ""
+            }
             if pairs.isEmpty { comparisonIssue = "No current paired material can supply a common crop for these versions." }
             loadedComparisonKey = key
             loadingComparisonPairs = false

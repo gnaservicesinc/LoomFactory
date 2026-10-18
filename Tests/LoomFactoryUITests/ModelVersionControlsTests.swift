@@ -10,6 +10,57 @@ import UniformTypeIdentifiers
 @Suite(.serialized)
 struct ModelVersionControlsTests {
     @Test @MainActor
+    func comparisonFromTestingKeepsItsRunAndInputWithoutChangingTraining() async throws {
+        let fixture = try await VersionControlsFixture()
+        defer { fixture.remove() }
+        let model = FactoryModel(rememberSourceFolder: false)
+        try await load(model, source: fixture.source)
+        model.selectedDatasetID = fixture.datasetID
+        await model.loadComparisonPairs()
+        let input = try #require(model.comparisonPairs.last?.inputURL)
+        let version = try #require(model.selectedModelVersions.last)
+        model.selectedMap = .normal
+        let trainingSettings = model.settings.training
+        model.showModelTesting(version)
+        model.setModelTestInput(input)
+        model.prepareModelComparison(from: version, inputURL: input)
+        await model.loadComparisonPairs()
+        #expect(model.firstComparisonVersion?.id == version.id)
+        #expect(model.secondComparisonVersion?.id != version.id)
+        #expect(model.comparisonMap == .depth)
+        #expect(model.selectedMap == .normal)
+        #expect(model.settings.training == trainingSettings)
+        #expect(model.selectedComparisonPair?.inputURL == input)
+        #expect(model.canCompareModels)
+        try await render(ModelComparisonView(model: model), size: NSSize(width: 1140, height: 1050), name: "compare-two-runs-settings.png")
+        model.comparisonSecondVersionID = "deleted-run"
+        await model.loadComparisonPairs()
+        #expect(model.secondComparisonVersion == nil)
+        #expect(!model.canCompareModels)
+        model.prepareModelComparison()
+        #expect(model.comparisonMap == .normal)
+        #expect(model.comparisonVersions.isEmpty)
+    }
+
+    @Test
+    func clippingLabelsDescribeTheEffectivePolicy() {
+        var settings = TrainingSettings()
+        settings.gradientClipPolicy = .fixed
+        settings.gradientClipNorm = 0
+        #expect(ModelVersionPresentation.clipping(settings) == "Clipping off")
+        #expect(TrainingSettingValue.values(settings).first { $0.id == "effectiveGradientClipping" }?.value == "Clipping off")
+        #expect(TrainingSettingValue.values(settings).first { $0.id == "gradientClipWarmupUpdates" }?.value == "Not used")
+        settings.gradientClipNorm = 1
+        #expect(ModelVersionPresentation.clipping(settings) == "Clipping max norm 1")
+        settings.gradientClipPolicy = .off
+        #expect(ModelVersionPresentation.clipping(settings) == "Clipping off")
+        settings.gradientClipPolicy = .warmup
+        settings.gradientClipWarmupStartNorm = 0.01
+        #expect(ModelVersionPresentation.clipping(settings).contains("0.01 → 1"))
+        #expect(ModelVersionPresentation.clipping(nil) == "Clipping unknown")
+    }
+
+    @Test @MainActor
     func everyVersionRemainsAvailableAndHigherErrorVersionCanBeUsedForExport() async throws {
         let fixture = try await VersionControlsFixture()
         defer { fixture.remove() }

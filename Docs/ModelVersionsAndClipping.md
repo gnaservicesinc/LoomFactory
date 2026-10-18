@@ -32,7 +32,12 @@ operations block deletion. Deleting a selected version leaves that assignment
 unavailable until you choose another model, so another run cannot silently take
 its place. Stopped and failed runs can be deleted even without usable weights.
 
-**A/B Compare** takes two completed versions and a current diffuse/target pair.
+**Compare Two Runs…**, available in Test Model, Training and Models, takes two
+completed versions and a current diffuse/target pair. From Test Model it starts
+with that selected run and paired input, without changing training settings.
+Run IDs, effective clipping, random seeds and exported epochs identify both
+versions above their outputs. A checkpoint progression compares only one run;
+each gallery card identifies its run and clipping policy.
 It runs both exported Core ML models on the same exact center crop, using the
 smaller of their recorded training dimensions. It neither resizes nor rewrites
 the originals. Architecture sizes may differ because the native Core ML
@@ -67,6 +72,12 @@ New projects offer three policies:
 - **Fixed** uses the same cap throughout the run.
 - **Off** disables clipping. A zero norm cap also preserves the earlier disabled
   behavior. Previously saved settings without a policy decode as Fixed.
+
+Fixed with Max norm 0 and Off use the same unclipped optimizer behavior. Both
+are labeled **Clipping off** in saved-run summaries. The training form explains
+this when the cap is zero; inactive warmup values read **Not used** in comparison
+tables. Saved counts identify the run, epoch and applied cap, so an older run's
+clipping measurements are separate from the next run's editable settings.
 
 The warmup schedule is a tunable heuristic for this supervised residual map
 trainer. It is not a claim that a diffusion-specific method improves these

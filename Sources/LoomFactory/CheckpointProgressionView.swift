@@ -6,6 +6,7 @@ struct CheckpointProgressionView: View {
     let busy: Bool
     let viewOutput: (ModelTestResult) -> Void
     let reveal: (URL) -> Void
+    var version: ModelVersion? = nil
     @State private var firstID = ""
     @State private var secondID = ""
 
@@ -14,7 +15,12 @@ struct CheckpointProgressionView: View {
     private var second: CheckpointTestOutput? { successful.first { $0.id == secondID } ?? successful.last }
 
     var body: some View {
-        FactoryPanel("Checkpoint progression", subtitle: "One unchanged image, in training order. Previews share a fixed [0,1] scale; the saved EXRs retain the full Float32 predictions.") {
+        FactoryPanel("One run · checkpoint progression", subtitle: "This compares checkpoints within one run. Use Compare Two Runs to compare training settings on the same input.") {
+            if let version {
+                Text(ModelVersionPresentation.title(version)).font(.headline).textSelection(.enabled)
+            }
+            Text("Previews share a fixed [0,1] scale; saved EXRs retain the full Float32 predictions.")
+                .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Text("\(progression.results.count) of \(progression.checkpointCount) outputs saved\(progression.cancelled ? " · Stopped" : "")")
                     .font(.callout.weight(.medium))
@@ -53,6 +59,8 @@ struct CheckpointProgressionView: View {
 
     private func output(_ entry: CheckpointTestOutput, height: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 7) {
+            Text("Run \(entry.checkpoint.runID.prefix(8)) · \(ModelVersionPresentation.clipping(version?.settings))")
+                .font(.caption.weight(.semibold)).foregroundStyle(.secondary).textSelection(.enabled)
             Text(title(entry)).font(.callout.weight(.medium)).textSelection(.enabled)
             if let result = entry.result {
                 FactoryImage(url: result.previewURL, revision: result.directory.path, applyOrientationTransform: false)

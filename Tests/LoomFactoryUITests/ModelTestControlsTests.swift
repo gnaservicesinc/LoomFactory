@@ -28,8 +28,16 @@ struct ModelTestControlsTests {
         #expect(progression.results.count == version.checkpointVersions.count)
         #expect(progression.results.count > 1)
         try await render(CheckpointProgressionView(progression: progression, busy: false,
-            viewOutput: model.viewCheckpointOutput, reveal: { _ in }).preferredColorScheme(.dark),
+            viewOutput: model.viewCheckpointOutput, reveal: { _ in }, version: version).preferredColorScheme(.dark),
             size: NSSize(width: 1400, height: 2500), name: "rock-cliff-marble-checkpoint-progression.png")
+        try await render(ModelTestView(model: model).preferredColorScheme(.dark),
+            size: NSSize(width: 1400, height: 2200), name: "production-run-identity.png")
+        model.prepareModelComparison(from: version, inputURL: URL(fileURLWithPath: input))
+        await model.loadComparisonPairs()
+        #expect(model.firstComparisonVersion?.id == run)
+        #expect(model.selectedComparisonPair?.inputURL == URL(fileURLWithPath: input))
+        try await render(ModelComparisonView(model: model).preferredColorScheme(.dark),
+            size: NSSize(width: 1200, height: 1100), name: "production-two-run-comparison.png")
     }
 
     @Test @MainActor

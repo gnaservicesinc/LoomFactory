@@ -8,6 +8,7 @@ struct ModelTestView: View {
     @State private var choosingSource = false
     @State private var choosingBlenderExport = false
     @State private var inspectingCheckpoint = false
+    @State private var comparingModels = false
 
     private var originalMap: ModelTestOriginalMap {
         model.testOriginalMap
@@ -29,9 +30,15 @@ struct ModelTestView: View {
                         .buttonStyle(.borderedProminent).controlSize(.large)
                         .disabled(!model.canTestModel)
                         .accessibilityIdentifier("modelTest.run")
-                    Button("Run All Checkpoints", systemImage: "square.stack.3d.down.right") { model.testAllCheckpoints() }
+                    Button("Run This Run's Checkpoints", systemImage: "square.stack.3d.down.right") { model.testAllCheckpoints() }
                         .controlSize(.large).disabled(!model.canTestAllCheckpoints)
                         .accessibilityIdentifier("modelTest.runAllCheckpoints")
+                    Button("Compare Two Runs…", systemImage: "rectangle.split.2x1") {
+                        model.prepareModelComparison(from: model.selectedTestVersion, inputURL: model.testInputURL)
+                        comparingModels = true
+                    }.disabled(model.busy || model.selectedTestVersion?.artifact == nil ||
+                               model.testableModelVersions.filter { $0.artifact?.weightsPath != nil }.count < 2)
+                        .accessibilityIdentifier("modelTest.compareRuns")
                     if model.busy {
                         ProgressView(value: model.progress).frame(width: 170)
                         Text(model.events.last?.message ?? model.activityTitle).font(.callout).foregroundStyle(.secondary)
@@ -63,7 +70,9 @@ struct ModelTestView: View {
                     viewOutput: {
                         model.viewCheckpointOutput($0)
                         inspectingCheckpoint = true
-                    }, reveal: model.reveal)
+                    }, reveal: model.reveal, version: model.snapshot?.modelVersions.first {
+                        $0.id == progression.outputs.first?.checkpoint.directory.lastPathComponent
+                    })
             }
             if let result = model.modelTestResult {
                 if let previous = model.previousTestResult {
@@ -103,6 +112,7 @@ struct ModelTestView: View {
                 }
             }
         }.accessibilityIdentifier("modelTest.workspace")
+            .sheet(isPresented: $comparingModels) { ModelComparisonView(model: model) }
             .sheet(isPresented: $choosingSource) {
                 ModelTestSourcePicker(images: model.testDiffuseImages) { model.setModelTestInput($0.url) }
             }
@@ -190,11 +200,15 @@ struct ModelTestView: View {
                                 .accessibilityIdentifier("modelTest.useCheckpoint")
                         }
                     }
-                    Text("Choose any saved checkpoint and Run Model, or Run All Checkpoints to compare the same image through the entire training history.")
+                    Text("Run Model tests the selected weights. Run This Run's Checkpoints shows one training history. Compare Two Runs compares different saved models on the same input crop.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
             if let version = model.selectedTestVersion {
+                ModelComparisonRunDetails(version: version)
+                    .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 7))
+                    .accessibilityIdentifier("modelTest.runIdentity")
                 HStack(spacing: 16) {
                     if version.artifact != nil {
                         Text("Exported model: \(version.exportedEpochsCompleted.formatted()) completed epochs")

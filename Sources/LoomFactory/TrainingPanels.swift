@@ -247,11 +247,16 @@ struct TrainingPanel: View {
                 }
                 if model.settings.training.gradientClipPolicy != .off {
                     numberRow("Max norm", value: $model.settings.training.gradientClipNorm, detail: "Maximum global norm; warmup increases toward this cap. 0 disables clipping.", identifier: "training.gradientClipping")
-                    if model.settings.training.gradientClipPolicy == .warmup {
+                    if model.settings.training.gradientClipPolicy == .warmup && model.settings.training.gradientClipNorm > 0 {
                         numberRow("Initial max norm", value: $model.settings.training.gradientClipWarmupStartNorm, detail: "Smaller cap for the first update; must be at most Max norm.", identifier: "training.gradientClipWarmupStartNorm")
                         numberRow("Warmup updates", value: $model.settings.training.gradientClipWarmupUpdates, detail: "Optimizer updates until the cap reaches Max norm. Separate from learning-rate warmup.", identifier: "training.gradientClipWarmupUpdates")
                     }
                 }
+            }
+            if model.settings.training.gradientClipPolicy != .off && model.settings.training.gradientClipNorm == 0 {
+                Label("Clipping off — Max norm is 0. This has the same behavior as choosing Off.", systemImage: "info.circle")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("training.clippingDisabledByZero")
             }
             DisclosureGroup("Optimizer tuning", isExpanded: $optimizerTuning) {
                 Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 11) {
@@ -395,7 +400,10 @@ struct TrainingPanel: View {
                 HStack {
                     Text("Saved checkpoints and models").font(.subheadline.weight(.semibold))
                     Spacer()
-                    Button("A/B Compare", systemImage: "rectangle.split.2x1") { comparingModels = true }
+                    Button("Compare Two Runs…", systemImage: "rectangle.split.2x1") {
+                        model.prepareModelComparison()
+                        comparingModels = true
+                    }
                         .disabled(model.exportedModelVersions.count < 2).accessibilityIdentifier("training.compare")
                 }
                 Text("Select a saved run to rename, add notes, test, or load its checkpoint and settings.")

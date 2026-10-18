@@ -302,8 +302,9 @@ struct ModelCoverageView: View {
                 }.disabled(model.busy)
                     .accessibilityIdentifier("coverage.train.\(entry.id)")
                 if comparisonVersions(entry).count >= 2 {
-                    Button("A/B Compare", systemImage: "rectangle.split.2x1") {
+                    Button("Compare Two Runs…", systemImage: "rectangle.split.2x1") {
                         selectTrainingContext(entry)
+                        model.prepareModelComparison()
                         comparingModels = true
                     }.disabled(model.busy).accessibilityIdentifier("coverage.compare.\(entry.id)")
                 }
