@@ -55,6 +55,7 @@ struct ModelVersionRow: View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
+                    Text("Saved run").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     Text(ModelVersionPresentation.title(version)).font(.callout.weight(.semibold)).textSelection(.enabled)
                     Text("\(version.status.capitalized) · \(epochs.formatted()) completed epochs")
                         .font(.caption).foregroundStyle(.secondary)

@@ -362,7 +362,7 @@ struct TrainingPanel: View {
 
     private var runSummary: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("This run").font(.subheadline.weight(.semibold))
+            Text("Next training run").font(.subheadline.weight(.semibold))
             Text("\(model.settings.training.optimizer.displayName) · \(effectiveBatchDescription)")
                 .font(.callout).monospacedDigit()
             if let plan = model.trainingPlan {
@@ -668,7 +668,9 @@ struct TrainingOverviewPanel: View {
     @Bindable var model: FactoryModel
 
     var body: some View {
-        FactoryPanel("This run") {
+        FactoryPanel(model.isTraining ? "Running training settings" : "Next training run",
+            subtitle: model.isTraining ? "Settings for the running training operation." :
+                "Editable settings for your next start. Saved-run measurements are shown in the selected run's card.") {
             VStack(alignment: .leading, spacing: 6) {
                 Text(model.selectedDataset?.name ?? "Choose a dataset").font(.headline)
                 Text("\(model.selectedMap.displayName) model").font(.callout).foregroundStyle(.secondary)
@@ -682,7 +684,7 @@ struct TrainingOverviewPanel: View {
             summary("Optimizer", model.settings.training.optimizer.displayName)
             summary("Learning rate", model.settings.training.learningRate.formatted(.number.precision(.significantDigits(1...4))))
             summary("Effective batch", "Up to \(model.settings.training.effectiveBatchSize.formatted()) images")
-            summary("Gradient clipping", model.settings.training.gradientClipPolicy.displayName)
+            summary("Effective clipping", ModelVersionPresentation.clipping(model.effectiveTrainingSettings))
             if model.continuingTraining, let version = model.selectedTrainingVersion {
                 Text("Continuing \(model.effectiveStartMode == .exportedModel ? "exported model" : "saved checkpoint") · \(ModelVersionPresentation.title(version))")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
