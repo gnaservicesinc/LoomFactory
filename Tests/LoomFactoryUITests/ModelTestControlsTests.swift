@@ -40,7 +40,9 @@ struct ModelTestControlsTests {
             size: NSSize(width: 1200, height: 1100), name: "production-two-run-comparison.png")
         model.selectedDatasetID = version.datasetID
         try await render(HStack(alignment: .top, spacing: 20) {
-            ModelVersionRow(model: model, version: version).frame(width: 820)
+            FactoryPanel("Saved training result") {
+                ModelVersionRow(model: model, version: version)
+            }.frame(width: 820)
             TrainingOverviewPanel(model: model).frame(width: 320)
         }.preferredColorScheme(.dark), size: NSSize(width: 1200, height: 820),
             name: "saved-run-versus-next-settings.png")
