@@ -683,8 +683,9 @@ final class FactoryModel {
     func setModelApproval(runID: String, approved: Bool) {
         let current = generation
         perform(approved ? "Approving model" : "Removing model approval") { [weak self] project in
-            try await project.setModelApproval(runID: runID, approved: approved)
+            let cleanup = try await project.setModelApproval(runID: runID, approved: approved)
             guard let self, self.generation == current else { return }
+            if cleanup.fileCount > 0 { self.events.append(.init(type: "summary", message: cleanup.message)) }
             self.invalidateExportedPackage()
         }
     }
@@ -698,8 +699,9 @@ final class FactoryModel {
             } else if let datasetID = artifact.datasetID, let map = artifact.map {
                 try await project.selectModelVersion(runID: runID, datasetID: datasetID, map: map)
             } else { throw LoomError("Choose a model belonging to this group and product.") }
-            try await project.setModelApproval(runID: runID, approved: true)
+            let cleanup = try await project.setModelApproval(runID: runID, approved: true)
             guard let self, self.generation == current else { return }
+            if cleanup.fileCount > 0 { self.events.append(.init(type: "summary", message: cleanup.message)) }
             self.invalidateExportedPackage()
         }
     }
@@ -711,6 +713,23 @@ final class FactoryModel {
             guard let self, self.generation == current else { return }
             self.invalidateExportedPackage()
         }
+    }
+
+    func cleanupApprovedCheckpoints() {
+        let current = generation
+        perform("Cleaning approved checkpoints") { [weak self] project in
+            let cleanup = try await project.cleanupApprovedCheckpoints()
+            guard let self, self.generation == current else { return }
+            self.events.append(.init(type: "summary", message: cleanup.message))
+        }
+    }
+
+    func approvedCheckpointCleanupPreview() async throws -> CheckpointCleanupSummary {
+        guard let project, !busy else { throw LoomError("Wait for the current operation before cleaning checkpoints.") }
+        let current = generation
+        let preview = try await project.approvedCheckpointCleanupPreview()
+        guard current == generation else { throw LoomError("The source folder changed. Open cleanup again.") }
+        return preview
     }
 
     func trainCoverageSlot(slot: ModelSlot) {

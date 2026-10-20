@@ -123,6 +123,15 @@ func writeJSON(_ value: Any, _ url: URL) throws {
                 try await run(URL(fileURLWithPath: args[1]))
             } else if args.count == 2, args[0] == "--evaluate" {
                 try await evaluate(URL(fileURLWithPath: args[1]))
+            } else if args.count == 2, ["--preview-approved-cleanup", "--cleanup-approved-checkpoints"].contains(args[0]) {
+                let project = try LoomProject(sourceFolder: URL(fileURLWithPath: args[1]))
+                let summary = args[0] == "--preview-approved-cleanup"
+                    ? try await project.approvedCheckpointCleanupPreview()
+                    : try await project.cleanupApprovedCheckpoints()
+                let record: [String: Any] = ["preview": args[0] == "--preview-approved-cleanup",
+                    "runs": summary.runCount, "checkpoints": summary.checkpointCount,
+                    "files": summary.fileCount, "bytes": summary.byteCount]
+                print(String(decoding: try JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]), as: UTF8.self))
             } else if args.count == 5, ["--select-model", "--select-checkpoint", "--export-best-checkpoint"].contains(args[0]),
                       let map = MapRole(rawValue: args[3]), MapRole.targets.contains(map) {
                 let project = try LoomProject(sourceFolder: URL(fileURLWithPath: args[1]))
@@ -138,7 +147,7 @@ func writeJSON(_ value: Any, _ url: URL) throws {
                     print(args[4])
                 }
             } else {
-                throw LoomError("Use --inventory SOURCE OUTPUT.json, --run CONFIGURATION.json, --evaluate REVIEW.json, or --select-model/--select-checkpoint/--export-best-checkpoint SOURCE DATASET MAP RUN_ID")
+                throw LoomError("Use --inventory SOURCE OUTPUT.json, --run CONFIGURATION.json, --evaluate REVIEW.json, --preview-approved-cleanup/--cleanup-approved-checkpoints SOURCE, or --select-model/--select-checkpoint/--export-best-checkpoint SOURCE DATASET MAP RUN_ID")
             }
         } catch {
             let args = Array(CommandLine.arguments.dropFirst())

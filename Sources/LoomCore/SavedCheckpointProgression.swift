@@ -5,7 +5,18 @@ extension LoomProject {
     /// All returned paths remain inside the saved progression directory.
     public func latestCheckpointProgression(runID: String, inputURL: URL) throws -> CheckpointProgression? {
         let run = try TrainingRunFiles.runDirectory(runID, projectFolder: projectFolder)
-        let checkpoints = try loadCheckpointVersions(directory: run)
+        var checkpoints = try loadCheckpointVersions(directory: run)
+        let historyURL = run.appendingPathComponent("pruned-checkpoints.json")
+        if FileManager.default.fileExists(atPath: historyURL.path) {
+            let file = try TrainingRunFiles.containedFile(historyURL.lastPathComponent, directory: run)
+            if let history = TrainingRunFiles.optionalJSON(file) {
+                checkpoints += history.compactMap { id, value in
+                    guard let descriptor = value as? [String: Any], descriptor["checkpoint_id"] as? String == id,
+                          let filename = try? CheckpointArchive.filename(id) else { return nil }
+                    return checkpointMetadata(descriptor, filename: filename, directory: run, requiresWeights: false)
+                }
+            }
+        }
         let input = inputURL.standardizedFileURL.resolvingSymlinksInPath()
         let hash = try TrainingRunFiles.sha256(input)
         let root = projectFolder.appendingPathComponent("model-tests", isDirectory: true)

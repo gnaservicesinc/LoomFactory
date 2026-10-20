@@ -109,21 +109,34 @@ extension LoomProject {
 
     /// Approval records the human's decision about these exact saved files.
     /// It neither changes the chosen deployment version nor asserts learned quality.
-    public func setModelApproval(runID: String, approved: Bool) throws {
+    @discardableResult
+    public func setModelApproval(runID: String, approved: Bool) throws -> CheckpointCleanupSummary {
         guard !operationActive else { throw LoomError("Finish or stop the current project operation before reviewing models.") }
         var management = try loadModelManagement()
+        var cleanup: CheckpointCleanup.Plan?
+        var cleanupLease: TrainingQueueLease?
+        defer { withExtendedLifetime(cleanupLease) {} }
         if approved {
             guard let artifact = try loadArtifacts().first(where: { $0.directory.lastPathComponent == runID }),
                   let slot = modelSlot(for: artifact) else { throw LoomError("Choose a completed model from this source project.") }
+            if artifact.kind == "map" {
+                try CheckpointCleanup.validateRoot(projectFolder)
+                cleanupLease = try TrainingQueueLease.requireExclusive(projectFolder: projectFolder)
+            }
             let datasets = artifact.kind == "classifier" ? try snapshot().datasets : nil
             let fingerprint = try ManagedArtifactFiles.fingerprint(artifact, projectFolder: projectFolder,
                 projectID: document.id, datasets: datasets)
+            if artifact.kind == "map" {
+                cleanup = try CheckpointCleanup.plan(artifact: artifact, projectFolder: projectFolder, projectID: document.id)
+            }
             management.approvals.removeAll { $0.runID == runID }
             management.approvals.append(.init(slot: slot, runID: runID, fingerprint: fingerprint, approvedAt: .now))
         } else {
             management.approvals.removeAll { $0.runID == runID }
         }
         try saveModelManagement(management)
+        do { return try CheckpointCleanup.execute(cleanup.map { [$0] } ?? []) }
+        catch { throw LoomError("The model is approved, but cleanup could not finish: \(error.localizedDescription)") }
     }
 
     public func setModelRequirement(slot: ModelSlot, required: Bool) throws {

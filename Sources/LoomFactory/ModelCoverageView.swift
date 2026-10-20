@@ -88,6 +88,8 @@ struct ModelCoverageView: View {
     @State private var selectedEntryID: String?
     @State private var selectedCandidateRunID: String?
     @State private var comparingModels = false
+    @State private var cleanupPreview: CheckpointCleanupSummary?
+    @State private var preparingCleanup = false
 
     private var entries: [ModelCoverageEntry] { model.modelCoverage }
     private var requiredEntries: [ModelCoverageEntry] { entries.filter(\.isRequired) }
@@ -113,6 +115,20 @@ struct ModelCoverageView: View {
             FactoryPanel("Models", subtitle: "Approve & Use accepts the displayed version and chooses it for your package. Test output opens any saved version for inspection.") {
                 if let selectedEntry { selectedModelActions(selectedEntry) }
                 summary
+                HStack {
+                    Text("Approval keeps only the latest resumable checkpoint. Older checkpoints are permanently removed.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Clean approved checkpoints…", systemImage: "internaldrive") {
+                        preparingCleanup = true
+                        Task { @MainActor in
+                            defer { preparingCleanup = false }
+                            do { cleanupPreview = try await model.approvedCheckpointCleanupPreview() }
+                            catch { model.errorMessage = error.localizedDescription }
+                        }
+                    }.disabled(model.busy || preparingCleanup || model.snapshot == nil)
+                        .accessibilityIdentifier("coverage.cleanupApprovedCheckpoints")
+                }
                 HStack(spacing: 16) {
                     Picker("Show groups", selection: $filter) {
                         ForEach(ModelCoverageFilter.allCases) { Text($0.title).tag($0) }
@@ -145,11 +161,21 @@ struct ModelCoverageView: View {
             }
         }
         .accessibilityIdentifier("loom.modelCoverage")
-        .onChange(of: model.snapshot?.projectID) { selectedEntryID = nil; selectedCandidateRunID = nil }
+        .onChange(of: model.snapshot?.projectID) { selectedEntryID = nil; selectedCandidateRunID = nil; cleanupPreview = nil }
         .onChange(of: filter) { selectedEntryID = nil; selectedCandidateRunID = nil }
         .onChange(of: search) { selectedEntryID = nil; selectedCandidateRunID = nil }
         .onChange(of: selectedEntryID) { selectedCandidateRunID = nil }
         .sheet(isPresented: $comparingModels) { ModelComparisonView(model: model) }
+        .confirmationDialog("Remove older checkpoints from approved models?", isPresented: Binding(
+            get: { cleanupPreview != nil }, set: { if !$0 { cleanupPreview = nil } }), titleVisibility: .visible) {
+                Button("Remove \(cleanupPreview?.checkpointCount ?? 0) checkpoints", role: .destructive) {
+                    cleanupPreview = nil
+                    model.cleanupApprovedCheckpoints()
+                }.disabled(cleanupPreview?.fileCount == 0)
+                Button("Cancel", role: .cancel) { cleanupPreview = nil }
+            } message: {
+                Text("Reclaims approximately \(cleanupPreview?.formattedSize ?? "0 bytes") across \(cleanupPreview?.runCount ?? 0) approved models. Keeps each exported model, latest checkpoint, optimizer and best-validation state, training history, and saved tests. Deleted checkpoints cannot be recovered.")
+            }
     }
 
     private var summary: some View {
@@ -488,7 +514,8 @@ struct ModelCoverageCandidateRow: View {
                 Button(removesApproval ? "Remove approval" : "Mark approved only", systemImage: "checkmark.seal") {
                     model.setModelApproval(runID: candidate.id, approved: !removesApproval)
                 }.disabled(model.busy || (!candidate.isAvailable && !removesApproval))
-                    .help("Records your review without changing which saved model is used.")
+                    .help(removesApproval ? "Removes approval. Previously deleted checkpoints cannot be restored."
+                        : "Records your review and permanently removes older checkpoints, keeping the latest resumable checkpoint and exported model.")
                     .accessibilityIdentifier("coverage.approve.\(candidate.id)")
             }.controlSize(.small)
             if let version, version.checkpoint != nil {

@@ -65,8 +65,14 @@ extension LoomProject {
     private func loadCheckpoint(at path: URL, directory: URL) -> TrainingCheckpoint? {
             guard let file = try? TrainingRunFiles.containedFile(path.lastPathComponent, directory: directory),
                   let data = try? Data(contentsOf: file),
-                  let descriptor = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  descriptor["schema"] as? String == "loom-factory-checkpoint-v1",
+                  let descriptor = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            return checkpointMetadata(descriptor, filename: path.lastPathComponent, directory: directory, requiresWeights: true)
+    }
+
+    /// Historical metadata is for reopening saved outputs, never for resuming or inference.
+    func checkpointMetadata(_ descriptor: [String: Any], filename: String, directory: URL,
+                            requiresWeights: Bool) -> TrainingCheckpoint? {
+            guard descriptor["schema"] as? String == "loom-factory-checkpoint-v1",
                   descriptor["project_id"] as? String == document.id,
                   descriptor["kind"] as? String == "map",
                   let datasetID = descriptor["dataset_id"] as? String,
@@ -79,17 +85,19 @@ extension LoomProject {
                   let savedSettings = descriptor["settings"] as? [String: Any],
                   let scalarLoss = NativeScalarLoss(rawValue: savedSettings["scalar_loss"] as? String ?? NativeScalarLoss.absoluteV1.rawValue),
                   let size = savedSettings["image_size"] as? Int, (32...8192).contains(size),
-                  let weights = try? TrainingRunFiles.containedFile(descriptor["weights_path"] as? String ?? "checkpoint.safetensors", directory: directory),
-                  FileManager.default.fileExists(atPath: weights.path),
                   let native = try? TrainingRunFiles.nativeArchitecture(from: descriptor, map: map),
                   native.identifier == architectureID, native.width == width, native.blocks == blocks,
                   !native.isCompact || (scalarLoss.isCompactObjective && size % 8 == 0) else { return nil }
-            if path.lastPathComponent != "checkpoint.json" {
+            if requiresWeights {
+                guard let weights = try? TrainingRunFiles.containedFile(descriptor["weights_path"] as? String ?? "checkpoint.safetensors", directory: directory),
+                      FileManager.default.fileExists(atPath: weights.path) else { return nil }
+            }
+            if filename != "checkpoint.json" {
                 guard let id = descriptor["checkpoint_id"] as? String,
-                      (try? CheckpointArchive.filename(id)) == path.lastPathComponent else { return nil }
+                      (try? CheckpointArchive.filename(id)) == filename else { return nil }
             }
             let modified = (descriptor["saved_at"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) }
-                ?? (try? path.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                ?? (try? directory.appendingPathComponent(filename).resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
             return TrainingCheckpoint(directory: directory, datasetID: datasetID, map: map, modelWidth: width,
                 modelBlocks: blocks, modelArchitecture: architectureID, imageSize: size, exaggerateFeatures: savedSettings["exaggerate_features"] as? Bool ?? false,
                 epochsCompleted: descriptor["epochs_completed"] as? Int ?? 0, status: descriptor["status"] as? String ?? "saved", modifiedAt: modified,
