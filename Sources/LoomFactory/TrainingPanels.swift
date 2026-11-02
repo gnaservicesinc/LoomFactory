@@ -98,13 +98,20 @@ struct TrainingPanel: View {
                     }
                 }.labelsHidden().accessibilityIdentifier("training.imageSize")
             }
-            row("Source resolution levels", detail: "Per material folder, start with the smallest usable original. Level 2 includes sources up to 2× that resolution; level 3 includes up to 4×.") {
+            row("Source resolution levels", detail: "Missing Poly Haven originals download before training, through 16K. For a 1K base, levels 4 and 5 request 8K and 16K sources while training still uses native crops. All available fills gaps through each material’s highest local tier.") {
                 Picker("Source resolution levels", selection: $model.settings.training.sourceResolutionLevels) {
                     Text("1 (base)").tag(1)
                     Text("2 (up to 2×)").tag(2)
                     Text("3 (up to 4×)").tag(3)
+                    Text("4 (up to 8×)").tag(4)
+                    Text("5 (up to 16×)").tag(5)
                     Text("All available").tag(0)
                 }.labelsHidden().accessibilityIdentifier("training.sourceResolutionLevels")
+            }
+            row("Prepare source images", detail: "Check and download missing diffuse and selected target maps, then refresh dataset counts. Powered by Poly Haven.") {
+                Button("Check & Download") { model.prepareTrainingSources() }
+                    .disabled(model.selectedDataset == nil || model.busy || model.effectiveTrainingSettings.validationIssue != nil)
+                    .accessibilityIdentifier("training.prepareSources")
             }
             row("Keep decoded images in RAM", detail: "Loads images as training needs them while workers prepare upcoming images. Older entries are evicted at the limit; larger datasets keep training.") {
                 Toggle("Keep decoded images in RAM", isOn: $model.settings.training.cacheImagesInMemory)
@@ -288,29 +295,23 @@ struct TrainingPanel: View {
 
     private var cropSettings: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 11) {
-                row("New crop positions", detail: refreshDescription(model.settings.training.cropRefresh, transform: false)) {
-                    refreshPicker("New crop positions", selection: $model.settings.training.cropRefresh)
-                        .accessibilityIdentifier("training.cropRefresh")
-                }
-            }
+            Text("Each epoch uses a new random native crop from larger sources. Crop positions stay inside the frame and do not repeat until all positions have been used. Sources matching the training dimensions use the whole image.")
+                .font(.caption).foregroundStyle(.secondary)
             Toggle("Randomize image order each epoch", isOn: $model.settings.training.shuffleEachEpoch)
                 .help("Off keeps the image order the same for every epoch.")
                 .accessibilityIdentifier("training.shuffle")
             HStack(spacing: 24) {
                 Toggle("Randomly flip crops", isOn: $model.settings.training.flipCrops)
                     .accessibilityIdentifier("training.flip")
-                Toggle("Randomly rotate crops", isOn: $model.settings.training.rotateCrops)
-                    .accessibilityIdentifier("training.rotate")
             }
-            if model.settings.training.flipCrops || model.settings.training.rotateCrops {
+            if model.settings.training.flipCrops {
                 Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 11) {
-                    row("New flips and rotations", detail: refreshDescription(model.settings.training.augmentationRefresh, transform: true)) {
-                        refreshPicker("New flips and rotations", selection: $model.settings.training.augmentationRefresh)
+                    row("New flips", detail: refreshDescription(model.settings.training.augmentationRefresh, transform: true)) {
+                        refreshPicker("New flips", selection: $model.settings.training.augmentationRefresh)
                             .accessibilityIdentifier("training.augmentationRefresh")
                     }
                 }
-                Text("Random flips choose horizontal and vertical directions. Rotations use quarter turns; normal-map vectors follow the same transforms.")
+                Text("Random flips choose horizontal and vertical directions; normal-map vectors follow the same transforms.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if model.selectedMap == .depth {
@@ -381,10 +382,10 @@ struct TrainingPanel: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
-            Text("Crop positions: \(model.settings.training.cropRefresh.displayName.lowercased()) · Image order: \(model.settings.training.shuffleEachEpoch ? "reshuffled each epoch" : "same each epoch")")
+            Text("Crop positions: new each epoch · Image order: \(model.settings.training.shuffleEachEpoch ? "reshuffled each epoch" : "same each epoch")")
                 .font(.caption).foregroundStyle(.secondary)
-            if model.settings.training.flipCrops || model.settings.training.rotateCrops {
-                Text("Flips and rotations: \(model.settings.training.augmentationRefresh.displayName.lowercased())")
+            if model.settings.training.flipCrops {
+                Text("Flips: \(model.settings.training.augmentationRefresh.displayName.lowercased())")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Text("Validation reserves whole material folders so their maps stay together.")
@@ -700,10 +701,10 @@ struct TrainingOverviewPanel: View {
                     Text("Validation needs at least two source materials.").font(.caption).foregroundStyle(.secondary)
                 }
             }
-            Text("Crop positions: \(model.settings.training.cropRefresh.displayName.lowercased())")
+            Text("Crop positions: new each epoch")
                 .font(.caption).foregroundStyle(.secondary)
-            if model.settings.training.flipCrops || model.settings.training.rotateCrops {
-                Text("Flips and rotations: \(model.settings.training.augmentationRefresh.displayName.lowercased())")
+            if model.settings.training.flipCrops {
+                Text("Flips: \(model.settings.training.augmentationRefresh.displayName.lowercased())")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let issue = model.trainingOptionsIssue {
@@ -815,9 +816,9 @@ struct RunPanel: View {
                 Text(model.trainingProgress == nil || !model.isTraining ? model.activityTitle : "Training run")
                     .font(.callout).textSelection(.enabled)
                 Spacer()
-                if model.busy && !model.isTraining { Button("Stop") { model.cancel() }.accessibilityIdentifier("training.stop") }
+                if model.busy && (!model.isTraining || model.trainingProgress == nil) { Button("Stop") { model.cancel() }.accessibilityIdentifier("training.stop") }
             }
-            if model.isTraining {
+            if model.isTraining && model.trainingProgress != nil {
                 HStack(spacing: 10) {
                     Button("Save Checkpoint", systemImage: "square.and.arrow.down") { model.saveCheckpoint() }
                         .accessibilityIdentifier("training.saveCheckpoint")

@@ -10,6 +10,29 @@ import UniformTypeIdentifiers
 @Suite(.serialized)
 struct TrainingCheckpointUITests {
     @Test @MainActor
+    func quittingDuringSourcePreparationCancelsBeforeTrainingWithoutRequestingACheckpoint() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("source-preparation-cancel-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try createPair(root)
+        let model = FactoryModel(rememberSourceFolder: false)
+        model.openFolder(root)
+        for _ in 0..<1_000 {
+            if !model.busy { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        model.selectedDatasetID = try #require(model.snapshot?.datasets.first?.id)
+        model.setTrainingStartMode(.fresh)
+        model.settings.training = .init(imageSize: 32, epochs: 1000, modelWidth: 8, modelBlocks: 1, validationFraction: 0)
+        model.trainMap()
+        #expect(model.busy && model.isTraining && model.trainingProgress == nil)
+        #expect(await model.saveTrainingAndPrepareForTermination())
+        #expect(!model.busy && !model.isTraining && !model.checkpointRequestPending)
+        #expect(model.lastCheckpointDirectory == nil && model.errorMessage == nil)
+        #expect(model.snapshot?.modelVersions.isEmpty == true)
+    }
+
+    @Test @MainActor
     func saveControlsReportQueuedAndSavedStateAndSourceSwitchPreservesRun() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("checkpoint-ui-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -29,6 +52,11 @@ struct TrainingCheckpointUITests {
         #expect(model.canTrain)
         model.trainMap()
         #expect(model.busy && model.isTraining)
+        for _ in 0..<1_000 {
+            if model.trainingProgress != nil { break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(model.trainingProgress != nil)
         try render(model, name: "checkpoint-controls-running.png")
         model.saveCheckpoint()
         #expect(model.checkpointRequestPending)

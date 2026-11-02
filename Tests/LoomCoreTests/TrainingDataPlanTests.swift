@@ -5,6 +5,19 @@ import XCTest
 final class TrainingDataPlanTests: XCTestCase {
     private let root = URL(fileURLWithPath: "/source")
 
+    func testHigherSourceLevelsSelect8KAnd16KWithoutChangingThe1KCrop() throws {
+        let images = pairs("large-originals", sizes: [1024, 2048, 4096, 8192, 16384])
+        var settings = TrainingSettings(imageSize: 1024, sourceResolutionLevels: 4, validationFraction: 0)
+        let eight = try plan(snapshot(images), settings)
+        XCTAssertEqual(eight.trainingPairCount, 4)
+        XCTAssertEqual(eight.training.map(\.input.width).max(), 8192)
+        settings.sourceResolutionLevels = 5
+        let sixteen = try plan(snapshot(images), settings)
+        XCTAssertEqual(sixteen.trainingPairCount, 5)
+        XCTAssertEqual(sixteen.training.map(\.input.width).max(), 16384)
+        XCTAssertEqual(settings.imageSize, 1024)
+    }
+
     func testSourceResolutionLevelsChooseExistingOriginalsAndUseEachMaterialsFirstUsableGrid() throws {
         let images = pairs("all-grids", sizes: [512, 1024, 2048, 4096, 8192])
             + pairs("missing-grid", sizes: [1024, 4096, 8192])

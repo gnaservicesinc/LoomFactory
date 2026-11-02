@@ -443,6 +443,10 @@ public struct NativeAugmentationPlan: Codable, Sendable {
     private let cropRefresh: String
     private let augmentationRefresh: String
     private var visits = 0
+    // Missing on old cursors. New runs use a keyed permutation of all valid
+    // origins so an epoch cannot accidentally reuse a previous crop.
+    private var cropSamplerVersion: Int? = 2
+    private var cropVisits: [String: Int]? = [:]
     public init(seed: Int, cropRefresh: String, augmentationRefresh: String) {
         self.seed = seed; self.cropRefresh = cropRefresh; self.augmentationRefresh = augmentationRefresh
     }
@@ -456,12 +460,45 @@ public struct NativeAugmentationPlan: Codable, Sendable {
         var crop = generator(stream: "crop", refresh: cropRefresh, sampleID: sampleID, epoch: epoch)
         var augmentation = generator(stream: "transform", refresh: augmentationRefresh, sampleID: sampleID, epoch: epoch)
         visits += 1
-        let x = centerCrop ? (width - size) / 2 : crop.integer(width - size + 1)
-        let y = centerCrop ? (height - size) / 2 : crop.integer(height - size + 1)
+        let x: Int, y: Int
+        if !centerCrop, cropSamplerVersion == 2 {
+            let columns = width - size + 1, rows = height - size + 1
+            let (count, overflow) = columns.multipliedReportingOverflow(by: rows)
+            guard !overflow else { throw NativeIOError.invalid("Native crop dimensions are too large.") }
+            let occurrence = cropRefresh == "per_run" ? 0 : cropRefresh == "per_epoch" ? max(0, epoch) : (cropVisits?[sampleID] ?? 0)
+            let origin = permutedOrigin(occurrence % count, count: count, sampleID: sampleID,
+                                        width: width, height: height, size: size)
+            x = origin % columns; y = origin / columns
+            if cropRefresh == "per_sample" {
+                if cropVisits == nil { cropVisits = [:] }
+                cropVisits?[sampleID] = (occurrence + 1) % count
+            }
+        } else {
+            x = centerCrop ? (width - size) / 2 : crop.integer(width - size + 1)
+            y = centerCrop ? (height - size) / 2 : crop.integer(height - size + 1)
+        }
         let horizontal = flip && augmentation.integer(2) == 1
         let vertical = flip && augmentation.integer(2) == 1
         let turns = rotate ? augmentation.integer(4) : 0
         return NativeCropTransform(x: x, y: y, size: size, horizontalFlip: horizontal, verticalFlip: vertical, quarterTurns: turns)
+    }
+    private func permutedOrigin(_ index: Int, count: Int, sampleID: String, width: Int, height: Int, size: Int) -> Int {
+        guard count > 1 else { return 0 }
+        // Cycle walking a permutation on a power-of-two domain gives a
+        // permutation on exactly `count` values. No image-sized state is saved.
+        let digest = SHA256.hash(data: Data("\(seed)|native-crop-v2|\(sampleID)|\(width)|\(height)|\(size)".utf8))
+        var keys = NativeCropRandom(state: digest.withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) })
+        let bits = Int.bitWidth - (count - 1).leadingZeroBitCount
+        let mask = (UInt64(1) << bits) - 1
+        let a = keys.next() | 1, b = keys.next(), c = keys.next() | 1, d = keys.next()
+        var value = UInt64(index)
+        repeat {
+            value = (value &* a &+ b) & mask
+            value ^= value >> max(1, bits / 2)
+            value = (value &* c &+ d) & mask
+            value ^= value >> max(1, bits / 3)
+        } while value >= UInt64(count)
+        return Int(value)
     }
     private func generator(stream: String, refresh: String, sampleID: String, epoch: Int) -> NativeCropRandom {
         let period = refresh == "per_run" ? 0 : epoch

@@ -89,13 +89,13 @@ final class TrainingSettingsTests: XCTestCase {
     func testSourceResolutionLevelsDefaultToBaseAndRejectUnsupportedValues() {
         var settings = TrainingSettings()
         XCTAssertEqual(settings.sourceResolutionLevels, 1)
-        for levels in 0...3 {
+        for levels in 0...5 {
             settings.sourceResolutionLevels = levels
             XCTAssertNil(settings.validationIssue)
         }
-        for levels in [-1, 4, Int.max] {
+        for levels in [-1, 6, Int.max] {
             settings.sourceResolutionLevels = levels
-            XCTAssertEqual(settings.validationIssue, "Source resolution levels must be one to three, or all available.")
+            XCTAssertEqual(settings.validationIssue, "Source resolution levels must be one to five, or all available.")
         }
     }
 

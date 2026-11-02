@@ -17,6 +17,8 @@ extension LoomProject {
         defer { withExtendedLifetime(operationLease) {} }
         guard !operationActive else { throw LoomError("An operation is already running in this source project. Stop it before starting another.") }
         guard MapRole.targets.contains(map) else { throw LoomError("Choose depth, roughness or normal training.") }
+        operationActive = true
+        defer { operationActive = false }
         var requestedStart = start ?? .fresh
         if start == nil, settings.continueLatestWeights == true {
             guard let checkpoint = try loadCheckpoints().first(where: { $0.datasetID == datasetID && $0.map == map }) else {
@@ -36,10 +38,16 @@ extension LoomProject {
             progress(.init(type: "start_selection", message: "Continuing saved model \(parent)"))
         }
         var runSettings = prepared.settings
+        // Keep historical recipes readable; every newly started run uses the
+        // current crop policy and never enables the retired rotation option.
+        runSettings.cropRefresh = .perEpoch
+        runSettings.rotateCrops = false
         if let issue = runSettings.validationIssue { throw LoomError(issue) }
         runSettings.requestedSeed = runSettings.seed
         runSettings.resolveRandomSeedForRun()
         let settings = runSettings
+        _ = try await recoverTrainingSources(datasetID: datasetID, map: map, settings: settings, progress: progress)
+        try Task.checkCancellation()
         let current = try snapshot()
         guard let dataset = current.datasets.first(where: { $0.id == datasetID }),
               let plan = try current.trainingPlan(datasetID: datasetID, map: map, settings: settings) else {
@@ -58,8 +66,8 @@ extension LoomProject {
         try TrainingRunFiles.writeMetadata(metadata, at: output)
         let cancellation = NativeCancellation()
         let control = TrainingRunControl(runID: id)
-        operationActive = true; activeTraining = cancellation; activeTrainingControl = control
-        defer { control.finish(); operationActive = false; activeTraining = nil; activeTrainingControl = nil }
+        activeTraining = cancellation; activeTrainingControl = control
+        defer { control.finish(); activeTraining = nil; activeTrainingControl = nil }
         let root = sourceFolder, projectID = document.id, continued = prepared.resume?.weights
         // The actor remains available to Stop while the serial GPU worker runs.
         do {

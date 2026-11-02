@@ -96,11 +96,36 @@ explicit seed remains reproducible; missing legacy seeds retain their seed-zero
 interpretation. Continuing with `-1` inherits the saved seed. The validation seed
 remains explicit so architecture comparisons can keep a common material split.
 
-Crop coordinates are uniform integer native origins over `0...(width-size)` and
-`0...(height-size)`, including both edges. Input and target share the same crop;
-their refresh follows the selected visit/epoch/run cadence. Source pair selection
-still contributes one crop visit per selected material resolution and paired
-diffuse variant, without enumerating extra crop positions.
+Every new run takes one exact native crop per selected material resolution and
+paired diffuse variant per epoch. A seeded permutation covers all integer origins
+over `0...(width-size)` and `0...(height-size)`, including both edges, without
+replacement. An origin repeats only after that source's finite set is exhausted.
+At a 1K training grid, a 1K original has one origin, 2K has 1,050,625, 8K has
+51,394,561, and 16K has 235,960,321. Input and target always share coordinates and
+flips; normal vectors follow flips. New runs disable random rotation and always
+refresh crop positions each epoch, including when opened from older recipes.
+Historical recipes retain their recorded settings. Sampler v2 is recorded in
+requests, model descriptors and checkpoints so old cursors cannot silently resume
+with a different crop sequence. New cursors preserve the exact sequence on resume.
+
+Before training, Factory checks recognized Poly Haven filenames for missing
+diffuse and selected target maps. Levels 1–5 fill tiers through 1×, 2×, 4×, 8× or
+16× the base native resolution, capped at published 16K sources. With a 1K base,
+levels 4 and 5 request through 8K and 16K while retaining the 1K training crop.
+All available fills gaps through each material's highest
+local tier without expanding to larger remote tiers. Small training grids use
+the provider's native 1K minimum. Published PNG URLs, byte counts and MD5 hashes
+come from the provider's live file catalog; downloads must also match native
+dimensions before installation. The original bytes are never overwritten or
+resized. New files inherit the dataset category and surviving counterpart's
+pairing key; manual ignores, roles and pair choices on existing files remain
+authoritative. Alternate diffuse color variants retain their own filenames.
+
+**Check & Download** runs the same preparation without training, then
+refreshes the visible pair counts. Preparation supports cancellation and records
+events in `.loom-factory/source-preparation.log`. Missing published formats and
+unrecognized/custom provider names are reported explicitly; their current local
+files continue to determine usable pairs. Powered by [Poly Haven](https://polyhaven.com/our-api).
 
 Core ML export serializes the selected graph and float32 weights in Swift.
 Apple Core ML compiles the exported `.mlmodel`, and numerical tests compare native

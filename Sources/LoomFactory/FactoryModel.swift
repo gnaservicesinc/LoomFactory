@@ -323,6 +323,8 @@ final class FactoryModel {
     }
     var effectiveTrainingSettings: TrainingSettings {
         var value = settings.training
+        value.cropRefresh = .perEpoch
+        value.rotateCrops = false
         if continuingTraining {
             if effectiveStartMode == .exportedModel, let saved = selectedTrainingVersion?.settings {
                 value.modelArchitecture = saved.modelArchitecture
@@ -609,6 +611,17 @@ final class FactoryModel {
                                           start: start, runLabel: label, scalarLossOverride: objective, progress: onProgress)
             guard let self, self.generation == current else { return }
             self.invalidateExportedPackage()
+        }
+    }
+
+    func prepareTrainingSources() {
+        guard let dataset = selectedDataset else { return }
+        let training = effectiveTrainingSettings, map = selectedMap
+        let value = settings
+        let onProgress = progressHandler()
+        perform("Preparing source resolutions", clearEvents: true) { project in
+            try await project.updateSettings(value)
+            _ = try await project.prepareTrainingSources(datasetID: dataset.id, map: map, settings: training, progress: onProgress)
         }
     }
 
@@ -1292,7 +1305,7 @@ final class FactoryModel {
 
     func cancel() {
         guard let project, busy else { return }
-        if isTraining { saveAndStopTraining(); return }
+        if isTraining && trainingProgress != nil { saveAndStopTraining(); return }
         operation?.cancel()
         Task { await project.cancelTraining() }
         activityTitle = "Stopping safely…"
@@ -1339,6 +1352,13 @@ final class FactoryModel {
     /// A failed checkpoint returns promptly and keeps the app and run alive.
     func saveTrainingAndPrepareForTermination() async -> Bool {
         if !isTraining { return await prepareForTermination() }
+        if trainingProgress == nil {
+            // Source downloads precede the first trainable update. Stop them
+            // through task cancellation; there is no new checkpoint to save.
+            cancel()
+            await waitForTrainingToFinish()
+            return !busy && !isTraining
+        }
         if let checkpointOperation, checkpointRequestPending {
             let alreadyStopping = checkpointWillStop
             guard await checkpointOperation.value else { return false }
@@ -1423,6 +1443,21 @@ final class FactoryModel {
                 if self.events.count > 300 { self.events.removeFirst(self.events.count - 300) }
                 if self.busy, self.operation?.isCancelled != true, let latest = batch.last { self.activityTitle = latest.message }
                 if self.busy, let progress = measurements?.progress { self.progress = progress }
+                if self.busy, self.isTraining, batch.contains(where: { $0.type == "source_prepared" }), let project = self.project {
+                    Task { [weak self] in
+                        do {
+                            let value = try await project.snapshot()
+                            guard let self, self.generation == current, self.progressDeliverySerial == expectedSerial,
+                                  self.busy, self.isTraining else { return }
+                            // Training can last hours; reflect recovered files
+                            // now rather than waiting for the run to finish.
+                            await self.adopt(value, restoreSettings: false)
+                        } catch {
+                            guard let self, self.generation == current, self.progressDeliverySerial == expectedSerial else { return }
+                            self.events.append(.init(type: "warning", message: "Source counts could not be refreshed: \(error.localizedDescription)"))
+                        }
+                    }
+                }
             }
         }
     }

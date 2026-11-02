@@ -70,7 +70,8 @@ public enum TrainingDevice: String, Codable, CaseIterable, Sendable, Identifiabl
 public struct TrainingSettings: Codable, Sendable, Equatable {
     public var imageSize: Int
     /// One selects each material's smallest usable source grid; two and three
-    /// also allow grids up to 2x and 4x that size. Zero keeps all source grids.
+    /// through five also allow grids up to 2x, 4x, 8x and 16x that size.
+    /// Zero keeps all local source grids.
     public var sourceResolutionLevels: Int
     public var epochs: Int
     public var batchSize: Int
@@ -197,7 +198,7 @@ public struct TrainingSettings: Codable, Sendable, Equatable {
     }
     public var validationIssue: String? {
         if !(32...8192).contains(imageSize) { return "Training dimensions must be between 32 and 8,192 pixels." }
-        if !(0...3).contains(sourceResolutionLevels) { return "Source resolution levels must be one to three, or all available." }
+        if !(0...5).contains(sourceResolutionLevels) { return "Source resolution levels must be one to five, or all available." }
         if !(1...100_000).contains(epochs) { return "Epochs must be between 1 and 100,000." }
         if !(1...64).contains(batchSize) { return "Batch size must be between 1 and 64." }
         if cacheImagesInMemory && (imageCacheLimitMB < 1 || imageCacheLimitMB > Int.max / (1024 * 1024)) { return "Image cache limit must be a positive number of MiB." }

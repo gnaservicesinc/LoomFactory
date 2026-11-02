@@ -11,6 +11,8 @@ enum NativeFactoryTraining {
                     prepareAhead: Bool = true, control: TrainingRunControl? = nil,
                     preparationCapacity: Int = 2) throws -> ModelArtifact {
         var runSettings = settings
+        runSettings.cropRefresh = .perEpoch
+        runSettings.rotateCrops = false
         if let issue = runSettings.validationIssue { throw LoomError(issue) }
         runSettings.resolveRandomSeedForRun()
         let settings = runSettings
@@ -608,7 +610,7 @@ enum NativeFactoryTraining {
          "gradient_clip_warmup_updates": s.gradientClipWarmupUpdates,
          "gradient_accumulation_steps": s.gradientAccumulationSteps, "lr_schedule": s.learningRateSchedule.rawValue,
          "warmup_epochs": s.warmupEpochs, "minimum_lr_ratio": s.minimumLearningRateRatio,
-         "crop_refresh": s.cropRefresh.rawValue, "augmentation_refresh": s.augmentationRefresh.rawValue,
+         "crop_refresh": s.cropRefresh.rawValue, "crop_sampler": "native-origin-permutation-v2", "augmentation_refresh": s.augmentationRefresh.rawValue,
          "validation_fraction": s.validationFraction, "validation_seed": s.validationSeed,
          "early_stopping_patience": s.earlyStoppingPatience, "export_best_weights": s.exportBestWeights,
          "checkpoint_every_epochs": s.checkpointEveryEpochs]

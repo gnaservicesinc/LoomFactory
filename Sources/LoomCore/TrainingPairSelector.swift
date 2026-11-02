@@ -16,7 +16,7 @@ enum TrainingPairSelector {
     static func selectSourceResolutions(pairs: [TrainingPair], levels: Int) -> [TrainingPair] {
         guard levels > 0 else { return pairs }
         let groups = Dictionary(grouping: pairs) { $0.input.url.deletingLastPathComponent().standardizedFileURL }
-        let factor = 1 << (min(levels, 3) - 1)
+        let factor = 1 << (min(levels, 5) - 1)
         let maximumDimensions = groups.mapValues { group in
             let base = group.map { min($0.input.width, $0.input.height) }.min() ?? 0
             let (maximum, overflow) = base.multipliedReportingOverflow(by: factor)

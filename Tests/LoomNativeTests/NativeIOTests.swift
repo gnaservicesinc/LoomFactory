@@ -261,6 +261,42 @@ final class NativeIOTests: XCTestCase {
         }
     }
 
+    func testCropOriginsDoNotRepeatBeforeExhaustionAndSurviveCheckpointRestore() throws {
+        for (width, height, count) in [(7, 5, 8), (1024, 1024, 1), (2048, 2048, 1000),
+                                      (8192, 8192, 1000), (16384, 16384, 1000), (8192, 2048, 1000)] {
+            let size = width < 1024 ? 4 : 1024
+            var plan = NativeAugmentationPlan(seed: 42, cropRefresh: "per_epoch", augmentationRefresh: "per_epoch")
+            var origins = Set<String>()
+            for epoch in 0..<count {
+                let crop = try plan.transform(sampleID: "material", epoch: epoch, width: width, height: height,
+                                              size: size, flip: false, rotate: false)
+                XCTAssertTrue((0...(width - size)).contains(crop.x))
+                XCTAssertTrue((0...(height - size)).contains(crop.y))
+                XCTAssertTrue(origins.insert("\(crop.x),\(crop.y)").inserted, "Repeated crop at epoch \(epoch)")
+            }
+            var restored = try JSONDecoder().decode(NativeAugmentationPlan.self, from: JSONEncoder().encode(plan))
+            let next = try plan.transform(sampleID: "material", epoch: count, width: width, height: height,
+                                          size: size, flip: false, rotate: false)
+            XCTAssertEqual(next, try restored.transform(sampleID: "material", epoch: count, width: width, height: height,
+                                                        size: size, flip: false, rotate: false))
+            if width < 1024 { XCTAssertTrue(origins.contains("\(next.x),\(next.y)"), "An exhausted finite domain cycles safely") }
+        }
+    }
+
+    func testPerVisitCropsTrackEachSampleIndependentlyAcrossShufflingAndRestore() throws {
+        var plan = NativeAugmentationPlan(seed: 91, cropRefresh: "per_sample", augmentationRefresh: "per_sample")
+        var seen: [String: Set<String>] = [:]
+        for visit in 0..<8 {
+            for sample in visit.isMultiple(of: 2) ? ["a", "b"] : ["b", "a"] {
+                let crop = try plan.transform(sampleID: sample, epoch: visit, width: 7, height: 5,
+                                              size: 4, flip: false, rotate: false)
+                XCTAssertTrue(seen[sample, default: []].insert("\(crop.x),\(crop.y)").inserted)
+            }
+            plan = try JSONDecoder().decode(NativeAugmentationPlan.self, from: JSONEncoder().encode(plan))
+        }
+        XCTAssertEqual(seen["a"]?.count, 8); XCTAssertEqual(seen["b"]?.count, 8)
+    }
+
     func testImageWorkHonorsAnAlreadyCancelledRun() throws {
         let cancellation = NativeCancellation(); cancellation.cancel()
         XCTAssertThrowsError(try NativeImages.readRGB(from: URL(fileURLWithPath: "/missing.png"), cancellation: cancellation)) {

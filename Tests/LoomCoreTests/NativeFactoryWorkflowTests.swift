@@ -51,8 +51,8 @@ final class NativeFactoryWorkflowTests: XCTestCase {
         let snapshot = try await project.snapshot()
         let originals = try Dictionary(uniqueKeysWithValues: snapshot.images.map { ($0.url, try Data(contentsOf: $0.url)) })
         let settings = TrainingSettings(imageSize: 32, sourceResolutionLevels: 2, epochs: 2,
-            batchSize: 2, shuffleEachEpoch: false, modelWidth: 8, modelBlocks: 1,
-            gradientAccumulationSteps: 3, validationFraction: 0)
+            batchSize: 2, shuffleEachEpoch: false, rotateCrops: true, modelWidth: 8, modelBlocks: 1,
+            gradientAccumulationSteps: 3, cropRefresh: .perRun, validationFraction: 0)
         let datasetID = ImageMetadataStore.categoryID("Bricks")
         let plan = try XCTUnwrap(snapshot.trainingPlan(datasetID: datasetID, map: .depth, settings: settings))
         XCTAssertEqual(plan.sourceMaterialCount, 1)
@@ -61,6 +61,9 @@ final class NativeFactoryWorkflowTests: XCTestCase {
         XCTAssertEqual(plan.excludedPairCount, 1)
         let artifact = try await project.trainMap(datasetID: datasetID, map: .depth, settings: settings, progress: { _ in })
         let request = try NativeFactoryTraining.json(artifact.directory.appendingPathComponent("request.json"))
+        XCTAssertEqual(request["crop_refresh"] as? String, "per_epoch")
+        XCTAssertEqual(request["rotate_crops"] as? Bool, false)
+        XCTAssertEqual(request["crop_sampler"] as? String, "native-origin-permutation-v2")
         XCTAssertEqual(settings.seed, -1, "The editable fresh-run setting keeps its random sentinel")
         let resolvedSeed = try XCTUnwrap(request["seed"] as? Int)
         XCTAssertTrue((0...Int(Int32.max)).contains(resolvedSeed))

@@ -35,9 +35,9 @@ struct LoomFactoryApp: App {
             CommandGroup(replacing: .saveItem) {
                 Button("Save Checkpoint") { model.saveCheckpoint() }
                     .keyboardShortcut("s")
-                    .disabled(!model.isTraining)
+                    .disabled(!model.isTraining || model.trainingProgress == nil)
                 Button("Save & Stop Training") { model.saveAndStopTraining() }
-                    .disabled(!model.isTraining)
+                    .disabled(!model.isTraining || model.trainingProgress == nil)
             }
         }
     }
