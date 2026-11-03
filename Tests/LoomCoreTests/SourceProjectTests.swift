@@ -177,6 +177,33 @@ final class SourceProjectTests: XCTestCase {
         XCTAssertEqual(Set(after.images.map(\.id)), Set(refreshed.images.map(\.id)))
     }
 
+    func testSnapshotPollingCacheReflectsExternalMetadataAndFileMutationsWithoutPersistingInventory() async throws {
+        let root = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let diff = try image(root, "stone_diff.png")
+        let disp = try image(root, "stone_disp.png")
+        let project = try LoomProject(sourceFolder: root)
+        let first = try await project.snapshot()
+        try await project.updateImage(id: first.images[0].id, category: "Stone", verified: true, note: "Initial")
+        let cachedFirst = try await project.snapshot()
+        let cachedSecond = try await project.snapshot()
+        XCTAssertEqual(cachedFirst.images, cachedSecond.images)
+        XCTAssertEqual(cachedFirst.datasets, cachedSecond.datasets)
+
+        // External xattr edit must invalidate the cached entry immediately.
+        var externalMeta = try XCTUnwrap(ImageMetadataStore.read(diff))
+        externalMeta.note = "Edited externally"
+        try ImageMetadataStore.write(externalMeta, to: diff)
+        let afterExternalEdit = try await project.snapshot()
+        XCTAssertEqual(afterExternalEdit.images.first(where: { $0.url.lastPathComponent == "stone_diff.png" })?.note, "Edited externally")
+
+        // Deleting a physical file must immediately update datasets and pair counts.
+        try FileManager.default.removeItem(at: disp)
+        let afterDelete = try await project.snapshot()
+        XCTAssertEqual(afterDelete.images.count, 1)
+        XCTAssertEqual(afterDelete.datasets.first?.pairCounts[MapRole.depth.rawValue], 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent(".loom-factory/inventory.json").path))
+    }
+
     private func fixture() throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("loom-project-test-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

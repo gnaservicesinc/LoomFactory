@@ -9,7 +9,7 @@ enum NativeFactoryTraining {
                     map: MapRole, plan: TrainingDataPlan, settings: TrainingSettings, resume: URL?,
                     cancellation: NativeCancellation, progress: @escaping @Sendable (TrainingEvent) -> Void,
                     prepareAhead: Bool = true, control: TrainingRunControl? = nil,
-                    preparationCapacity: Int = 2) throws -> ModelArtifact {
+                    preparationCapacity: Int = 2, startSelectionMessage: String? = nil) throws -> ModelArtifact {
         var runSettings = settings
         runSettings.cropRefresh = .perEpoch
         runSettings.rotateCrops = false
@@ -37,6 +37,9 @@ enum NativeFactoryTraining {
         let logURL = output.appendingPathComponent("training.log")
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
         let log = try FileHandle(forWritingTo: logURL); defer { try? log.close() }
+        let timestampFormatter = ISO8601DateFormatter()
+        let jsonEncoder = JSONEncoder()
+        var logBytesWritten: UInt64 = 0
         var inherited = TrainingContinuationHistory()
         func emit(_ event: TrainingEvent, inheritedOffsets: Bool = true) {
             let snapshot = tracker.snapshot(now: clock())
@@ -59,16 +62,18 @@ enum NativeFactoryTraining {
             if let v = event.gradientNorm { json["gradient_norm"] = v }
             if let v = event.gradientClipThreshold { json["gradient_clip_threshold"] = v }
             if let value = event.trainingProgress,
-               let data = try? JSONEncoder().encode(value), let object = try? JSONSerialization.jsonObject(with: data) {
+               let data = try? jsonEncoder.encode(value), let object = try? JSONSerialization.jsonObject(with: data) {
                 json["training_progress"] = object
             }
             if let value = event.cycleTiming,
-               let data = try? JSONEncoder().encode(value), let object = try? JSONSerialization.jsonObject(with: data) {
+               let data = try? jsonEncoder.encode(value), let object = try? JSONSerialization.jsonObject(with: data) {
                 json["cycle_timing"] = object
             }
-            json["timestamp"] = ISO8601DateFormatter().string(from: Date())
+            json["timestamp"] = timestampFormatter.string(from: Date())
             if var data = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]) {
-                data.append(10); try? log.write(contentsOf: data)
+                data.append(10)
+                try? log.write(contentsOf: data)
+                logBytesWritten += UInt64(data.count)
             }
         }
         let all = plan.training + plan.validation
@@ -89,6 +94,9 @@ enum NativeFactoryTraining {
         request["resume_state_policy"] = settings.requestedSeed == -1 ? "fresh-optimizer-and-sampler" : "restore-compatible-state"
         if let resume { request["resume_weights"] = resume.path }
         try writeJSON(request, to: output.appendingPathComponent("request.json"))
+        if let startSelectionMessage {
+            emit(.init(type: "start_selection", message: startSelectionMessage), inheritedOffsets: false)
+        }
         emit(.init(type: "status", message: "Checking source images…"))
         let proofs = try NativeSourceProofStore(urls: all.flatMap { [$0.input.url, $0.target.url] }, cancellation: cancellation)
         for (index, pair) in all.enumerated() {
@@ -486,6 +494,9 @@ enum NativeFactoryTraining {
                 emit(.init(type: "epoch_completed", message: "Epoch \(inherited.epochs + epoch + 1) complete", epoch: epoch + 1,
                     loss: epochLoss / Double(count), validationLoss: validation, update: update, totalUpdates: totalUpdates))
                 if (epoch + 1) % settings.checkpointEveryEpochs == 0 || epoch + 1 == settings.epochs || stop { automaticCheckpoint("training") }
+                if logBytesWritten > TrainingLogCompactor.activeRunByteLimit {
+                    logBytesWritten = TrainingLogCompactor.compactInPlace(log, at: logURL, preservingCompletedSteps: update)
+                }
                 try serviceCheckpointRequest()
                 try writeProgress("training")
                 if stop { stoppedEarly = true; break }
@@ -557,6 +568,9 @@ enum NativeFactoryTraining {
             try JSONEncoder().encode(artifact).write(to: output.appendingPathComponent("artifact.json"), options: .atomic)
             tracker.begin(stage: .completed, now: clock())
             emit(.init(type: "completed", message: "Training complete · model saved", progress: 1))
+            if logBytesWritten > UInt64(TrainingLogCompactor.retainedByteLimit) {
+                logBytesWritten = TrainingLogCompactor.compactInPlace(log, at: logURL, preservingCompletedSteps: update)
+            }
             return artifact
         } catch {
             if error is TrainingSavedStop {

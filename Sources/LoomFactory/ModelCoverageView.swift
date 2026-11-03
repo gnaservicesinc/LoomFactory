@@ -168,7 +168,9 @@ struct ModelCoverageView: View {
         .sheet(isPresented: $comparingModels) { ModelComparisonView(model: model) }
         .confirmationDialog("Remove older checkpoints from approved models?", isPresented: Binding(
             get: { cleanupPreview != nil }, set: { if !$0 { cleanupPreview = nil } }), titleVisibility: .visible) {
-                Button("Remove \(cleanupPreview?.checkpointCount ?? 0) checkpoints", role: .destructive) {
+                Button(cleanupPreview?.checkpointCount == 0 && (cleanupPreview?.fileCount ?? 0) > 0
+                    ? "Compact training logs (\(cleanupPreview?.formattedSize ?? "0 bytes"))"
+                    : "Remove \(cleanupPreview?.checkpointCount ?? 0) checkpoints", role: .destructive) {
                     cleanupPreview = nil
                     model.cleanupApprovedCheckpoints()
                 }.disabled(cleanupPreview?.fileCount == 0)

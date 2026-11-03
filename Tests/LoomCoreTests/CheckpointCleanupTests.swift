@@ -184,6 +184,55 @@ final class CheckpointCleanupTests: XCTestCase {
         }
     }
 
+    func testOversizedTrainingLogIsCompactedForApprovedRunsAndPreservesLatestProgress() async throws {
+        let f = try await Fixture(); defer { f.remove() }
+        let artifact = try f.run("with-large-log")
+        // First approve so old checkpoints are already pruned, leaving only the approved run.
+        _ = try await f.project.setModelApproval(runID: artifact.id, approved: true)
+        let logURL = artifact.directory.appendingPathComponent("training.log")
+        var lines: [String] = [
+            #"{"backend":"swift-mpsgraph-metal","event":"status","message":"Checking source images…"}"#,
+            #"{"backend":"swift-mpsgraph-metal","event":"epoch_completed","epoch":1,"loss":0.2,"message":"Epoch 1 complete","update":10}"#
+        ]
+        let filler = String(repeating: "x", count: 240)
+        for step in 1...3_000 {
+            lines.append("{\"backend\":\"swift-mpsgraph-metal\",\"event\":\"image_training\",\"message\":\"\(filler)-\(step)\"}")
+        }
+        let progressSnapshot = try JSONSerialization.jsonObject(with: JSONEncoder().encode(
+            TrainingProgress(stage: .training, epoch: 3, totalEpochs: 3, imageIndex: 2, imagesPerEpoch: 20,
+                completedImages: 60, stepInEpoch: 10, stepsPerEpoch: 10, completedSteps: 30, totalSteps: 30, elapsedSeconds: 42.5)
+        ))
+        let progressRow = try JSONSerialization.data(withJSONObject: [
+            "backend": "swift-mpsgraph-metal", "event": "progress", "message": "Step 30",
+            "training_progress": progressSnapshot, "update": 30
+        ], options: [.sortedKeys])
+        lines.append(String(decoding: progressRow, as: UTF8.self))
+        lines.append(#"{"backend":"swift-mpsgraph-metal","event":"completed","message":"Training complete · model saved","progress":1}"#)
+        let rawLog = Data((lines.joined(separator: "\n") + "\n").utf8)
+        XCTAssertGreaterThan(rawLog.count, TrainingLogCompactor.retainedByteLimit)
+        try rawLog.write(to: logURL)
+
+        let preview = try await f.project.approvedCheckpointCleanupPreview()
+        XCTAssertEqual(preview.runCount, 1)
+        XCTAssertEqual(preview.checkpointCount, 0)
+        XCTAssertEqual(preview.fileCount, 1)
+        XCTAssertGreaterThan(preview.byteCount, 0)
+        XCTAssertTrue(preview.message.contains("Compacted training logs"))
+
+        let result = try await f.project.cleanupApprovedCheckpoints()
+        XCTAssertEqual(result, preview)
+        let compacted = try Data(contentsOf: logURL)
+        XCTAssertLessThanOrEqual(compacted.count, TrainingLogCompactor.retainedByteLimit)
+        let measured = TrainingContinuationHistory.measuredProgress(in: artifact.directory, completedUpdates: 30)
+        XCTAssertEqual(measured?.completedSteps, 30)
+        XCTAssertEqual(measured?.completedImages, 60)
+        XCTAssertEqual(measured?.elapsedSeconds, 42.5)
+
+        let secondPass = try await f.project.cleanupApprovedCheckpoints()
+        XCTAssertEqual(secondPass.fileCount, 0)
+        XCTAssertEqual(secondPass.byteCount, 0)
+    }
+
     private struct Fixture {
         let root: URL, project: LoomProject, projectID: String
         let datasetID = ImageMetadataStore.categoryID("Bricks")

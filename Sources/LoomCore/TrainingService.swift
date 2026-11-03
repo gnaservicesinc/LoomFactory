@@ -28,14 +28,15 @@ extension LoomProject {
         }
         let prepared = try prepareTrainingStart(requestedStart, datasetID: datasetID, map: map,
             settings: settings, scalarLossOverride: scalarLossOverride)
+        let startSelectionMessage: String
         switch requestedStart {
         case .fresh:
-            progress(.init(type: "start_selection", message: "Starting fresh model weights"))
+            startSelectionMessage = "Starting fresh model weights"
         case .checkpoint(let parent), .model(let parent):
             guard prepared.resume?.runID == parent else {
                 throw LoomError("The requested saved model was not loaded. Training was not started.")
             }
-            progress(.init(type: "start_selection", message: "Continuing saved model \(parent)"))
+            startSelectionMessage = "Continuing saved model \(parent)"
         }
         var runSettings = prepared.settings
         // Keep historical recipes readable; every newly started run uses the
@@ -46,7 +47,7 @@ extension LoomProject {
         runSettings.requestedSeed = runSettings.seed
         runSettings.resolveRandomSeedForRun()
         let settings = runSettings
-        _ = try await recoverTrainingSources(datasetID: datasetID, map: map, settings: settings, progress: progress)
+        _ = try await recoverTrainingSources(datasetID: datasetID, map: map, settings: settings, explicit: false, progress: progress)
         try Task.checkCancellation()
         let current = try snapshot()
         guard let dataset = current.datasets.first(where: { $0.id == datasetID }),
@@ -76,7 +77,8 @@ extension LoomProject {
                 return try await Task.detached(priority: .userInitiated) {
                     try NativeFactoryTraining.run(id: id, root: root, output: output, projectID: projectID,
                         dataset: dataset, map: map, plan: plan, settings: settings, resume: continued,
-                        cancellation: cancellation, progress: progress, control: control)
+                        cancellation: cancellation, progress: progress, control: control,
+                        startSelectionMessage: startSelectionMessage)
                 }.value
             } onCancel: { cancellation.cancel() }
             metadata.status = "completed"

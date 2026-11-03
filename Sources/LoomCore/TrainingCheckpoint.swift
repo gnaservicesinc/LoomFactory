@@ -64,8 +64,7 @@ extension LoomProject {
 
     private func loadCheckpoint(at path: URL, directory: URL) -> TrainingCheckpoint? {
             guard let file = try? TrainingRunFiles.containedFile(path.lastPathComponent, directory: directory),
-                  let data = try? Data(contentsOf: file),
-                  let descriptor = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+                  let descriptor = TrainingRunFiles.optionalJSON(file) else { return nil }
             return checkpointMetadata(descriptor, filename: path.lastPathComponent, directory: directory, requiresWeights: true)
     }
 

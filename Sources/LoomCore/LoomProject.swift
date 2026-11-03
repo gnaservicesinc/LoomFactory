@@ -3,6 +3,52 @@ import Darwin
 import ImageIO
 import LoomNative
 
+struct FileStamp: Equatable, Sendable {
+    var dev: Int32
+    var ino: UInt64
+    var mode: UInt16
+    var size: Int64
+    var mtimeSec: Int
+    var mtimeNsec: Int
+    var ctimeSec: Int
+    var ctimeNsec: Int
+
+    func sameContent(as other: FileStamp) -> Bool {
+        dev == other.dev && ino == other.ino && mode == other.mode && size == other.size
+            && mtimeSec == other.mtimeSec && mtimeNsec == other.mtimeNsec
+    }
+
+    static func lstat(_ path: String) -> FileStamp? {
+        var info = Darwin.stat()
+        guard Darwin.lstat(path, &info) == 0 else { return nil }
+        return FileStamp(info)
+    }
+
+    static func stat(_ path: String) -> FileStamp? {
+        var info = Darwin.stat()
+        guard fstatat(AT_FDCWD, path, &info, 0) == 0 else { return nil }
+        return FileStamp(info)
+    }
+
+    private init(_ info: Darwin.stat) {
+        self.dev = info.st_dev
+        self.ino = info.st_ino
+        self.mode = info.st_mode
+        self.size = info.st_size
+        self.mtimeSec = info.st_mtimespec.tv_sec
+        self.mtimeNsec = info.st_mtimespec.tv_nsec
+        self.ctimeSec = info.st_ctimespec.tv_sec
+        self.ctimeNsec = info.st_ctimespec.tv_nsec
+    }
+}
+
+private struct CachedScannedImage: Sendable {
+    var linkStamp: FileStamp
+    var targetStamp: FileStamp
+    var xattrData: Data
+    var image: SourceImage
+}
+
 struct ProjectDocument: Codable, Sendable {
     var schema = "loom-factory.project.v1"
     var id = UUID().uuidString.lowercased()
@@ -20,6 +66,11 @@ public actor LoomProject {
     private var mapTypePredictor: (any MapTypePredictor)?
     private var mapTypeClassifierWasResolved = false
     private var failedMapTypePredictions: Set<String> = []
+    private var scannedImageCache: [String: CachedScannedImage] = [:]
+    private var cachedSnapshotImages: [SourceImage]?
+    private var cachedDatasets: [DatasetCategory]?
+    private var artifactFileCache: [String: (stamp: FileStamp, artifact: ModelArtifact)] = [:]
+    var runVersionCache: [String: CachedRunVersionEntry] = [:]
     public init(sourceFolder: URL) throws {
         // Foundation can mix /var and /private/var URLs. Establish one actual
         // project root, then keep every discovered membership path relative to it.
@@ -46,17 +97,25 @@ public actor LoomProject {
 
     public func snapshot() throws -> ProjectSnapshot {
         let images = try scanImages()
-        let categories = Set(images.filter { !$0.ignored }.compactMap(\.category)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
-        let datasets = categories.map { category in
-            let members = images.filter { $0.category == category && !$0.ignored }
-            let families = Dictionary(grouping: members, by: \.pairingKey)
-            let counts = Dictionary(uniqueKeysWithValues: MapRole.targets.map { map in
-                (map.rawValue, families.values.reduce(0) { count, group in
-                    count + ((try? TrainingPairSelector.select(images: group, dataset: category, map: map, size: 1).count) ?? 0)
+        let datasets: [DatasetCategory]
+        if let cachedSnapshotImages, let cachedDatasets, cachedSnapshotImages == images {
+            datasets = cachedDatasets
+        } else {
+            let categories = Set(images.filter { !$0.ignored }.compactMap(\.category)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            let computed = categories.map { category in
+                let members = images.filter { $0.category == category && !$0.ignored }
+                let families = Dictionary(grouping: members, by: \.pairingKey)
+                let counts = Dictionary(uniqueKeysWithValues: MapRole.targets.map { map in
+                    (map.rawValue, families.values.reduce(0) { count, group in
+                        count + ((try? TrainingPairSelector.select(images: group, dataset: category, map: map, size: 1).count) ?? 0)
+                    })
                 })
-            })
-            return DatasetCategory(id: ImageMetadataStore.categoryID(category), name: category,
-                imageCount: members.count, verifiedCount: members.filter(\.verified).count, pairCounts: counts)
+                return DatasetCategory(id: ImageMetadataStore.categoryID(category), name: category,
+                    imageCount: members.count, verifiedCount: members.filter(\.verified).count, pairCounts: counts)
+            }
+            cachedSnapshotImages = images
+            cachedDatasets = computed
+            datasets = computed
         }
         let artifacts = try loadArtifacts(), checkpoints = try loadCheckpoints()
         return ProjectSnapshot(sourceURL: sourceFolder, projectID: document.id, settings: document.settings,
@@ -159,19 +218,39 @@ public actor LoomProject {
     }
     func loadArtifacts() throws -> [ModelArtifact] {
         let runs = projectFolder.appendingPathComponent("runs", isDirectory: true)
-        guard FileManager.default.fileExists(atPath: runs.path) else { return [] }
-        return try FileManager.default.contentsOfDirectory(at: runs, includingPropertiesForKeys: nil)
-            .compactMap { folder in
+        guard FileManager.default.fileExists(atPath: runs.path) else {
+            artifactFileCache.removeAll()
+            return []
+        }
+        var nextCache: [String: (stamp: FileStamp, artifact: ModelArtifact)] = [:]
+        let artifacts = try FileManager.default.contentsOfDirectory(at: runs, includingPropertiesForKeys: nil)
+            .compactMap { folder -> ModelArtifact? in
                 let path = folder.appendingPathComponent("artifact.json")
-                guard FileManager.default.fileExists(atPath: path.path) else { return nil }
+                guard let stamp = FileStamp.lstat(path.path) else { return nil }
+                if let cached = artifactFileCache[path.path], cached.stamp == stamp {
+                    let updated = ModelArtifact(id: cached.artifact.id, kind: cached.artifact.kind,
+                        datasetID: cached.artifact.datasetID, datasetName: cached.artifact.datasetName,
+                        map: cached.artifact.map, directory: folder, createdAt: cached.artifact.createdAt,
+                        epochs: cached.artifact.epochs, loss: cached.artifact.loss,
+                        coreMLPath: cached.artifact.coreMLPath, weightsPath: cached.artifact.weightsPath,
+                        architecture: cached.artifact.architecture)
+                    nextCache[path.path] = (stamp, updated)
+                    return updated
+                }
                 // One damaged run must not hide the other groups' saved models.
                 // Explicit choices still surface as unavailable until replaced.
                 guard let saved = try? JSONDecoder().decode(ModelArtifact.self, from: Data(contentsOf: path)) else { return nil }
-                return ModelArtifact(id: saved.id, kind: saved.kind, datasetID: saved.datasetID,
+                let artifact = ModelArtifact(id: saved.id, kind: saved.kind, datasetID: saved.datasetID,
                     datasetName: saved.datasetName, map: saved.map, directory: folder,
                     createdAt: saved.createdAt, epochs: saved.epochs, loss: saved.loss,
                     coreMLPath: saved.coreMLPath, weightsPath: saved.weightsPath, architecture: saved.architecture)
+                if let after = FileStamp.lstat(path.path), after == stamp {
+                    nextCache[path.path] = (stamp, artifact)
+                }
+                return artifact
             }.sorted { $0.createdAt > $1.createdAt }
+        artifactFileCache = nextCache
+        return artifacts
     }
     func scanImages() throws -> [SourceImage] {
         let supported: Set<String> = ["png", "jpg", "jpeg", "tif", "tiff", "heic", "heif", "webp", "bmp", "exr"]
@@ -179,6 +258,8 @@ public actor LoomProject {
         var visitedDirectories: Set<String> = []
         var visitedFiles: Set<String> = []
         var imageIDs: Set<String> = []
+        var nextCache: [String: CachedScannedImage] = [:]
+        nextCache.reserveCapacity(scannedImageCache.count)
         func visit(_ folder: URL) throws {
             let resolved = folder.resolvingSymlinksInPath().standardizedFileURL
             guard visitedDirectories.insert(resolved.path).inserted else { return }
@@ -186,57 +267,102 @@ public actor LoomProject {
                 try Task.checkCancellation()
                 // Retain the in-folder link path for imported external originals.
                 let file = folder.appendingPathComponent(entry.lastPathComponent)
-                let target = file.resolvingSymlinksInPath().standardizedFileURL
-                var isDirectory: ObjCBool = false
-                guard FileManager.default.fileExists(atPath: target.path, isDirectory: &isDirectory) else { continue }
-                if isDirectory.boolValue { try visit(file); continue }
-                guard supported.contains(file.pathExtension.lowercased()), visitedFiles.insert(target.path).inserted else { continue }
-                guard let source = CGImageSourceCreateWithURL(target as CFURL, nil),
-                      let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
-                      let width = props[kCGImagePropertyPixelWidth] as? Int,
-                      let height = props[kCGImagePropertyPixelHeight] as? Int else {
-                    throw LoomError("Could not read \(file.lastPathComponent). The file remains in the source folder; refresh after it finishes copying.")
+                guard let linkStamp = FileStamp.lstat(file.path) else { continue }
+                let target: URL
+                let targetStamp: FileStamp
+                if (linkStamp.mode & S_IFMT) == S_IFLNK {
+                    target = file.resolvingSymlinksInPath().standardizedFileURL
+                    guard let resolvedStamp = FileStamp.stat(target.path) else { continue }
+                    targetStamp = resolvedStamp
+                } else {
+                    target = resolved.appendingPathComponent(entry.lastPathComponent).standardizedFileURL
+                    targetStamp = linkStamp
                 }
-                var metadata = try ImageMetadataStore.read(target)
+                if (targetStamp.mode & S_IFMT) == S_IFDIR { try visit(file); continue }
+                guard supported.contains(file.pathExtension.lowercased()), visitedFiles.insert(target.path).inserted else { continue }
+                let rawXattr = try ImageMetadataStore.rawBytes(target)
+                let previous = scannedImageCache[file.path]
+                if let rawXattr,
+                   let previous,
+                   previous.linkStamp == linkStamp,
+                   previous.targetStamp == targetStamp,
+                   previous.xattrData == rawXattr,
+                   imageIDs.insert(previous.image.id).inserted {
+                    nextCache[file.path] = previous
+                    result.append(previous.image)
+                    continue
+                }
+                let width: Int
+                let height: Int
+                if let previous, previous.targetStamp.sameContent(as: targetStamp) {
+                    width = previous.image.width
+                    height = previous.image.height
+                } else {
+                    guard let source = CGImageSourceCreateWithURL(target as CFURL, nil),
+                          let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                          let w = props[kCGImagePropertyPixelWidth] as? Int,
+                          let h = props[kCGImagePropertyPixelHeight] as? Int else {
+                        throw LoomError("Could not read \(file.lastPathComponent). The file remains in the source folder; refresh after it finishes copying.")
+                    }
+                    width = w
+                    height = h
+                }
+                var currentXattrData = rawXattr
+                var metadata = try rawXattr.map { try ImageMetadataStore.decode($0, file: target) }
                 if metadata == nil {
-                    metadata = ImageMetadataStore.initialMetadata(file: file, sourceRoot: sourceFolder, width: width, height: height)
-                    try ImageMetadataStore.write(metadata!, to: target)
+                    let initial = ImageMetadataStore.initialMetadata(file: file, sourceRoot: sourceFolder, width: width, height: height)
+                    currentXattrData = try ImageMetadataStore.writeData(initial, to: target)
+                    metadata = initial
                 }
                 var tag = metadata!
                 let variantTag = ImageMetadataStore.repairingColorVariantInference(tag, file: file, sourceRoot: sourceFolder, width: width, height: height)
                 let repaired = ImageMetadataStore.repairingLegacyInference(variantTag, file: file, sourceRoot: sourceFolder, width: width, height: height)
                 if repaired != tag {
                     tag = repaired
-                    try ImageMetadataStore.write(tag, to: target)
+                    currentXattrData = try ImageMetadataStore.writeData(tag, to: target)
                 }
                 let classified = resolveMapType(tag, file: file, width: width, height: height)
                 try Task.checkCancellation()
                 if classified != tag {
                     // A classifier call may outlive an external metadata edit.
                     // Human edits or metadata removal win over the stale guess.
-                    if let current = try ImageMetadataStore.read(target) {
-                        if current == tag { tag = classified; try ImageMetadataStore.write(tag, to: target) }
-                        else { tag = current }
+                    if let latestRaw = try ImageMetadataStore.rawBytes(target) {
+                        let current = try ImageMetadataStore.decode(latestRaw, file: target)
+                        if current == tag {
+                            tag = classified
+                            currentXattrData = try ImageMetadataStore.writeData(tag, to: target)
+                        } else {
+                            tag = current
+                            currentXattrData = latestRaw
+                        }
                     }
                 }
                 if tag.role == .normal, tag.normalConvention?.lowercased() == "directx", tag.ignored != true {
                     tag.ignored = true
-                    try ImageMetadataStore.write(tag, to: target)
+                    currentXattrData = try ImageMetadataStore.writeData(tag, to: target)
                 }
                 // Copying a file copies its metadata too. Each distinct image
                 // needs its own selection identity while retaining its teaching tags.
                 if !imageIDs.insert(tag.id).inserted {
                     tag.id = UUID().uuidString.lowercased()
                     imageIDs.insert(tag.id)
-                    try ImageMetadataStore.write(tag, to: target)
+                    currentXattrData = try ImageMetadataStore.writeData(tag, to: target)
                 }
-                result.append(SourceImage(id: tag.id, url: file, displayName: ImageMetadataStore.friendlyName(file.deletingPathExtension().lastPathComponent),
+                let sourceImage = SourceImage(id: tag.id, url: file, displayName: ImageMetadataStore.friendlyName(file.deletingPathExtension().lastPathComponent),
                     role: tag.role, category: tag.category, verified: tag.verified, note: tag.note,
                     pairingKey: tag.pairingKey, width: width, height: height, normalConvention: tag.normalConvention,
-                    ignored: tag.ignored == true, mapTypeInference: tag.mapTypeInference))
+                    ignored: tag.ignored == true, mapTypeInference: tag.mapTypeInference)
+                if let finalXattr = currentXattrData,
+                   let postTargetStamp = FileStamp.stat(target.path),
+                   postTargetStamp.sameContent(as: targetStamp),
+                   let postLinkStamp = FileStamp.lstat(file.path) {
+                    nextCache[file.path] = CachedScannedImage(linkStamp: postLinkStamp, targetStamp: postTargetStamp, xattrData: finalXattr, image: sourceImage)
+                }
+                result.append(sourceImage)
             }
         }
         try visit(sourceFolder)
+        scannedImageCache = nextCache
         return result.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
     }
 
@@ -245,6 +371,9 @@ public actor LoomProject {
     func setMapTypePredictor(_ predictor: (any MapTypePredictor)?) {
         mapTypePredictor = predictor; mapTypeClassifierWasResolved = true
         failedMapTypePredictions.removeAll()
+        scannedImageCache.removeAll()
+        cachedSnapshotImages = nil
+        cachedDatasets = nil
     }
 
     private func resolveMapType(_ metadata: ImageMetadata, file: URL, width: Int, height: Int) -> ImageMetadata {

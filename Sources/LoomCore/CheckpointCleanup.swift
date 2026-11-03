@@ -7,7 +7,10 @@ public struct CheckpointCleanupSummary: Sendable, Equatable {
     public var byteCount: Int64 = 0
     public var formattedSize: String { ByteCountFormatter.string(fromByteCount: byteCount, countStyle: .file) }
     public var message: String {
-        "Removed \(checkpointCount) older checkpoints from \(runCount) approved models (\(formattedSize))."
+        if checkpointCount == 0 && fileCount > 0 {
+            return "Compacted training logs for \(runCount) approved models (\(formattedSize))."
+        }
+        return "Removed \(checkpointCount) older checkpoints from \(runCount) approved models (\(formattedSize))."
     }
 }
 
@@ -44,6 +47,9 @@ enum CheckpointCleanup {
         let files: [URL]
         let byteCount: Int64
         var historyData: Data? = nil
+        var compactedLogURL: URL? = nil
+        var compactedLogData: Data? = nil
+        var compactedLogSavedBytes: Int64 = 0
     }
 
     static func validateRoot(_ directory: URL) throws {
@@ -59,7 +65,11 @@ enum CheckpointCleanup {
         try validateRoot(projectFolder.appendingPathComponent("runs", isDirectory: true))
         let directory = try TrainingRunFiles.ownedRun(artifact.directory, projectFolder: projectFolder)
         let archives = try CheckpointArchive.descriptors(in: directory).filter { $0.lastPathComponent != "checkpoint.json" }
-        guard !archives.isEmpty else { return Plan(directory: directory, checkpointCount: 0, files: [], byteCount: 0) }
+        let logCandidate = directory.appendingPathComponent("training.log")
+        let logExists = FileManager.default.fileExists(atPath: logCandidate.path)
+            || ((try? logCandidate.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true)
+        let hasOversizedLog = ((try? logCandidate.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > TrainingLogCompactor.retainedByteLimit
+        guard !archives.isEmpty || hasOversizedLog else { return Plan(directory: directory, checkpointCount: 0, files: [], byteCount: 0) }
         let latest = try TrainingRunFiles.descriptor(at: directory, source: .checkpoint)
         try validateIdentity(latest, artifact: artifact, projectID: projectID)
         // Hash every retained tensor, including optimizer and best-validation state,
@@ -127,6 +137,17 @@ enum CheckpointCleanup {
                 }
             }
         }
+        var compactedLogURL: URL?
+        var compactedLogData: Data?
+        var compactedLogSavedBytes: Int64 = 0
+        if logExists {
+            let logFile = try TrainingRunFiles.containedFile("training.log", directory: directory)
+            if let compacted = try TrainingLogCompactor.compactedData(for: logFile, preservingCompletedSteps: latest["updates"] as? Int) {
+                compactedLogURL = logFile
+                compactedLogData = compacted.data
+                compactedLogSavedBytes = compacted.savedBytes
+            }
+        }
         // Tensor files first: on interruption the descriptor still identifies any
         // remaining files, allowing a subsequent cleanup to finish the same work.
         let files = tensors.subtracting(protected).sorted { $0.path < $1.path } + descriptors
@@ -134,7 +155,8 @@ enum CheckpointCleanup {
         let historyData = descriptors.isEmpty ? nil : try JSONSerialization.data(withJSONObject: history, options: [.sortedKeys])
         let historyGrowth = (historyData?.count ?? previousHistoryBytes) - previousHistoryBytes
         return Plan(directory: directory, checkpointCount: descriptors.count, files: files,
-            byteCount: max(0, bytes - Int64(historyGrowth)), historyData: historyData)
+            byteCount: max(0, bytes - Int64(historyGrowth)), historyData: historyData,
+            compactedLogURL: compactedLogURL, compactedLogData: compactedLogData, compactedLogSavedBytes: compactedLogSavedBytes)
     }
 
     private static func validateIdentity(_ descriptor: [String: Any], artifact: ModelArtifact, projectID: String) throws {
@@ -172,10 +194,11 @@ enum CheckpointCleanup {
 
     static func summary(_ plans: [Plan]) -> CheckpointCleanupSummary {
         plans.reduce(into: CheckpointCleanupSummary()) { result, plan in
-            if !plan.files.isEmpty { result.runCount += 1 }
+            let logFileCount = plan.compactedLogData == nil ? 0 : 1
+            if !plan.files.isEmpty || logFileCount > 0 { result.runCount += 1 }
             result.checkpointCount += plan.checkpointCount
-            result.fileCount += plan.files.count
-            result.byteCount += plan.byteCount
+            result.fileCount += plan.files.count + logFileCount
+            result.byteCount += plan.byteCount + plan.compactedLogSavedBytes
         }
     }
 
@@ -203,10 +226,114 @@ enum CheckpointCleanup {
                     try FileManager.default.removeItem(at: file)
                     removed += 1
                 }
+                if let logURL = plan.compactedLogURL, let logData = plan.compactedLogData {
+                    try validateRoot(plan.directory.deletingLastPathComponent().deletingLastPathComponent())
+                    try validateRoot(plan.directory.deletingLastPathComponent())
+                    try validateRoot(plan.directory)
+                    _ = try TrainingRunFiles.containedFile(logURL.lastPathComponent, directory: plan.directory)
+                    try logData.write(to: logURL, options: .atomic)
+                    removed += 1
+                }
             }
         } catch {
             throw LoomError("Checkpoint cleanup stopped after removing \(removed) files: \(error.localizedDescription). The retained checkpoint and exported model were preserved; run cleanup again to finish.")
         }
         return summary(plans)
+    }
+}
+
+enum TrainingLogCompactor {
+    /// Matches TrainingContinuationHistory.measuredProgress tail window (512 KB).
+    static let retainedByteLimit: Int = 524_288
+    /// High-water mark during active training runs before mid-run compaction.
+    static let activeRunByteLimit: UInt64 = 4 * 1024 * 1024
+    private static let headByteBudget: Int = 65_536
+    private static let milestoneByteBudget: Int = 65_536
+    private static let tailByteBudget: Int = 393_216
+
+    static func compactedData(for file: URL, preservingCompletedSteps: Int? = nil) throws -> (data: Data, savedBytes: Int64)? {
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        let fileSize = try handle.seekToEnd()
+        guard fileSize > UInt64(retainedByteLimit) else { return nil }
+        try handle.seek(toOffset: 0)
+        let headRaw = try handle.read(upToCount: headByteBudget) ?? Data()
+        let headSlice: Data
+        if let lastNewline = headRaw.lastIndex(of: 10) {
+            headSlice = Data(headRaw[...lastNewline])
+        } else {
+            headSlice = Data()
+        }
+        let windowOffset = max(UInt64(headSlice.count), fileSize > UInt64(retainedByteLimit) ? fileSize - UInt64(retainedByteLimit) : 0)
+        try handle.seek(toOffset: windowOffset)
+        var windowRaw = try handle.readToEnd() ?? Data()
+        if windowOffset > UInt64(headSlice.count) {
+            if let firstNewline = windowRaw.firstIndex(of: 10) {
+                windowRaw = Data(windowRaw[windowRaw.index(after: firstNewline)...])
+            } else {
+                windowRaw = Data()
+            }
+        }
+        let tailSlice: Data
+        let earlierSlice: Data
+        if windowRaw.count <= tailByteBudget {
+            tailSlice = windowRaw
+            earlierSlice = Data()
+        } else {
+            let cutIndex = windowRaw.count - tailByteBudget
+            if let boundary = windowRaw[cutIndex...].firstIndex(of: 10) {
+                let start = windowRaw.index(after: boundary)
+                tailSlice = Data(windowRaw[start...])
+                earlierSlice = Data(windowRaw[..<start])
+            } else {
+                tailSlice = Data(windowRaw[cutIndex...])
+                earlierSlice = Data(windowRaw[..<cutIndex])
+            }
+        }
+        var milestoneData = Data()
+        if !earlierSlice.isEmpty {
+            let stepNeedle = preservingCompletedSteps.map { Data("\"completedSteps\":\($0)".utf8) }
+            let epochNeedle = Data("\"epoch_completed\"".utf8)
+            let checkpointNeedle = Data("\"checkpoint".utf8)
+            let warningNeedle = Data("\"warning\"".utf8)
+            var lineStart = earlierSlice.startIndex
+            while lineStart < earlierSlice.endIndex {
+                let lineEnd = earlierSlice[lineStart...].firstIndex(of: 10) ?? earlierSlice.endIndex
+                let nextIndex = lineEnd < earlierSlice.endIndex ? earlierSlice.index(after: lineEnd) : earlierSlice.endIndex
+                let line = earlierSlice[lineStart..<nextIndex]
+                let keep = (stepNeedle.map { line.range(of: $0) != nil } ?? false)
+                    || line.range(of: epochNeedle) != nil
+                    || line.range(of: checkpointNeedle) != nil
+                    || line.range(of: warningNeedle) != nil
+                if keep, milestoneData.count + line.count <= milestoneByteBudget {
+                    milestoneData.append(contentsOf: line)
+                }
+                lineStart = nextIndex
+            }
+        }
+        var result = Data()
+        result.reserveCapacity(headSlice.count + milestoneData.count + tailSlice.count)
+        result.append(contentsOf: headSlice)
+        result.append(contentsOf: milestoneData)
+        result.append(contentsOf: tailSlice)
+        let saved = Int64(fileSize) - Int64(result.count)
+        guard saved > 0, result.count <= retainedByteLimit else { return nil }
+        return (result, saved)
+    }
+
+    @discardableResult
+    static func compactInPlace(_ handle: FileHandle, at file: URL, preservingCompletedSteps: Int? = nil) -> UInt64 {
+        guard let compacted = try? compactedData(for: file, preservingCompletedSteps: preservingCompletedSteps) else {
+            return (try? handle.seekToEnd()) ?? 0
+        }
+        do {
+            try handle.seek(toOffset: 0)
+            try handle.write(contentsOf: compacted.data)
+            try handle.truncate(atOffset: UInt64(compacted.data.count))
+            _ = try handle.seekToEnd()
+            return UInt64(compacted.data.count)
+        } catch {
+            return (try? handle.seekToEnd()) ?? 0
+        }
     }
 }

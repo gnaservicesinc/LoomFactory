@@ -77,23 +77,10 @@ enum TrainingSourceRecovery {
     }
 
     static func recover(images: [SourceImage], sourceRoot: URL, category: String, map: MapRole, settings: TrainingSettings,
+                        explicit: Bool = true,
                         progress: @escaping @Sendable (TrainingEvent) -> Void) async throws -> Int {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 60
-        configuration.timeoutIntervalForResource = 30 * 60
-        let session = URLSession(configuration: configuration)
-        defer { session.invalidateAndCancel() }
         let materials = materials(images: images, category: category, settings: settings)
-        let recognizedFolders = Set(materials.map(\.folder))
-        let otherFolders = Set(images.filter { $0.category == category && !$0.ignored && $0.role == .diffuse }
-            .map { $0.url.deletingLastPathComponent().standardizedFileURL }).subtracting(recognizedFolders)
-        progress(.init(type: "source_recovery", message: "Checking source resolution levels for \(category)…"))
-        if !otherFolders.isEmpty {
-            progress(.init(type: "warning", message: "\(otherFolders.count) material folders have no recognized Poly Haven source filename. Their current files remain available; automatic downloads were not attempted for them."))
-        }
-        var downloads = 0
-        for material in materials {
-            try Task.checkCancellation()
+        let pending: [(material: Material, missing: [(Int, MapRole)])] = materials.compactMap { material in
             // Existing ignored or deliberately retagged files are not replaced.
             let missing = material.tiers.flatMap { tier in [MapRole.diffuse, map].compactMap { role -> (Int, MapRole)? in
                 let file = material.folder.appendingPathComponent(filename(asset: material.asset, role: role, tier: tier, diffuseSuffix: material.diffuseSuffix))
@@ -115,7 +102,24 @@ enum TrainingSourceRecovery {
                 }
                 return existing || alreadyPaired || FileManager.default.fileExists(atPath: file.path) ? nil : (tier, role)
             } }
-            guard !missing.isEmpty else { continue }
+            return missing.isEmpty ? nil : (material, missing)
+        }
+        guard explicit || !pending.isEmpty else { return 0 }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 30 * 60
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let recognizedFolders = Set(materials.map(\.folder))
+        let otherFolders = Set(images.filter { $0.category == category && !$0.ignored && $0.role == .diffuse }
+            .map { $0.url.deletingLastPathComponent().standardizedFileURL }).subtracting(recognizedFolders)
+        progress(.init(type: "source_recovery", message: "Checking source resolution levels for \(category)…"))
+        if !otherFolders.isEmpty {
+            progress(.init(type: "warning", message: "\(otherFolders.count) material folders have no recognized Poly Haven source filename. Their current files remain available; automatic downloads were not attempted for them."))
+        }
+        var downloads = 0
+        for (material, missing) in pending {
+            try Task.checkCancellation()
             progress(.init(type: "source_recovery", message: "Checking Poly Haven: \(material.asset)…"))
             var request = URLRequest(url: URL(string: "https://api.polyhaven.com/files/\(material.asset)")!)
             request.setValue("LoomFactory/1.0 (material training source recovery)", forHTTPHeaderField: "User-Agent")
@@ -222,14 +226,17 @@ extension LoomProject {
         return try await recoverTrainingSources(datasetID: datasetID, map: map, settings: settings, progress: progress)
     }
     func recoverTrainingSources(datasetID: String, map: MapRole, settings: TrainingSettings,
+        explicit: Bool = true,
         progress: @escaping @Sendable (TrainingEvent) -> Void) async throws -> Int {
         let current = try snapshot()
-        guard let dataset = current.datasets.first(where: { $0.id == datasetID }) else { throw LoomError("Choose a current dataset.") }
+        guard let dataset = current.datasets.first(where: { $0.id == datasetID }) else {
+            throw LoomError("This dataset no longer has images in the source folder. Choose a current dataset.")
+        }
         let log = try SourcePreparationLog(url: projectFolder.appendingPathComponent("source-preparation.log"))
         let report: @Sendable (TrainingEvent) -> Void = { event in log.append(event); progress(event) }
         do {
             return try await TrainingSourceRecovery.recover(images: current.images, sourceRoot: sourceFolder, category: dataset.name, map: map,
-                                                           settings: settings, progress: report)
+                                                           settings: settings, explicit: explicit, progress: report)
         } catch {
             report(.init(type: "source_recovery", message: "Source preparation stopped: \(error.localizedDescription)"))
             throw error

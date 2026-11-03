@@ -34,7 +34,7 @@ public struct ImageMetadata: Codable, Sendable, Equatable {
 
 public enum ImageMetadataStore {
     public static let attribute = "com.gnaservicesinc.loomfactory.image.v1"
-    public static func read(_ file: URL) throws -> ImageMetadata? {
+    static func rawBytes(_ file: URL) throws -> Data? {
         let size = getxattr(file.path, attribute, nil, 0, 0, 0)
         if size < 0 {
             if errno == ENOATTR { return nil }
@@ -44,15 +44,26 @@ public enum ImageMetadataStore {
         var data = Data(count: size)
         let count = data.withUnsafeMutableBytes { getxattr(file.path, attribute, $0.baseAddress, size, 0, 0) }
         guard count == size else { throw LoomError("The image changed while its metadata was being read. Refresh the source folder.") }
+        return data
+    }
+    static func decode(_ data: Data, file: URL) throws -> ImageMetadata {
         let value = try JSONDecoder().decode(ImageMetadata.self, from: data)
         guard value.schema == "loom-factory.image.v1" else { throw LoomError("This image has metadata from a newer Loom Factory version.") }
         return value
     }
+    public static func read(_ file: URL) throws -> ImageMetadata? {
+        guard let data = try rawBytes(file) else { return nil }
+        return try decode(data, file: file)
+    }
     public static func write(_ metadata: ImageMetadata, to file: URL) throws {
+        _ = try writeData(metadata, to: file)
+    }
+    static func writeData(_ metadata: ImageMetadata, to file: URL) throws -> Data {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(metadata)
         let result = data.withUnsafeBytes { setxattr(file.path, attribute, $0.baseAddress, data.count, 0, 0) }
         guard result == 0 else { throw LoomError("Could not save image metadata for \(file.lastPathComponent): \(String(cString: strerror(errno))).") }
+        return data
     }
     public static func clear(_ file: URL) throws {
         guard removexattr(file.path, attribute, 0) == 0 || errno == ENOATTR else {

@@ -106,6 +106,24 @@ struct TrainingResume: Sendable {
     let source: TrainingWeightSource
 }
 
+struct CachedRunVersionEntry: Sendable {
+    var stamp: [String: FileStamp]
+    var projectID: String
+    var artifact: ModelArtifact?
+    var checkpoint: TrainingCheckpoint?
+    var datasetID: String
+    var datasetName: String
+    var map: MapRole
+    var recordedStatus: String
+    var createdAt: Date
+    var defaultLabel: String
+    var settings: TrainingSettings?
+    var history: [TrainingMetric]
+    var lineage: TrainingLineage?
+    var inheritedEpochs: Int
+    var checkpointVersions: [TrainingCheckpoint]
+}
+
 struct ModelSelection: Codable {
     var schema = "loom-factory-model-selection-v1"
     let projectID: String
@@ -161,71 +179,118 @@ extension LoomProject {
         try encoder.encode(selection).write(to: projectFolder.appendingPathComponent("model-selection.json"), options: .atomic)
     }
 
+    private func runDirectoryStamp(for folder: URL) -> [String: FileStamp]? {
+        guard let folderStamp = FileStamp.lstat(folder.path),
+              let entries = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else {
+            return nil
+        }
+        var stamps: [String: FileStamp] = ["": folderStamp]
+        stamps.reserveCapacity(entries.count + 1)
+        for entry in entries {
+            let name = entry.lastPathComponent
+            if name == "training.log" { continue }
+            guard let stamp = FileStamp.lstat(entry.path) else { return nil }
+            stamps[name] = stamp
+        }
+        return stamps
+    }
+
     func loadModelVersions(artifacts: [ModelArtifact], checkpoints: [TrainingCheckpoint]) throws -> [ModelVersion] {
         let runs = projectFolder.appendingPathComponent("runs", isDirectory: true)
-        guard FileManager.default.fileExists(atPath: runs.path) else { return [] }
+        guard FileManager.default.fileExists(atPath: runs.path) else {
+            runVersionCache.removeAll()
+            return []
+        }
         let selection = try loadModelSelection()
         let management = try loadModelManagement()
         let displayMetadata = try loadModelVersionMetadata()
         let folders = try FileManager.default.contentsOfDirectory(at: runs, includingPropertiesForKeys: nil)
-        return folders.compactMap { folder -> ModelVersion? in
+        var nextCache: [String: CachedRunVersionEntry] = [:]
+        nextCache.reserveCapacity(folders.count)
+        let versions = folders.compactMap { folder -> ModelVersion? in
             guard (try? TrainingRunFiles.ownedRun(folder, projectFolder: projectFolder)) != nil else { return nil }
             let checkpoint = checkpoints.first { $0.directory == folder }
             let artifact = artifacts.first { $0.kind == "map" && $0.directory == folder }
-            let metadata = try? TrainingRunFiles.metadata(at: folder)
-            let model = TrainingRunFiles.optionalJSON(folder.appendingPathComponent("model.json"))
-            let savedCheckpoint = TrainingRunFiles.optionalJSON(folder.appendingPathComponent("checkpoint.json"))
-            let request = TrainingRunFiles.optionalJSON(folder.appendingPathComponent("request.json"))
-            let descriptors = [model, savedCheckpoint, request].compactMap { $0 }
-            guard metadata?.projectID == document.id || descriptors.contains(where: { $0["project_id"] as? String == document.id }) else { return nil }
-            // Do not surface a run copied from a different source project as local history.
-            guard descriptors.allSatisfy({ ($0["project_id"] as? String).map { $0 == document.id } ?? true }),
-                  metadata?.projectID == nil || metadata?.projectID == document.id else { return nil }
-            guard let datasetID = metadata?.datasetID ?? artifact?.datasetID ?? checkpoint?.datasetID ?? request?["dataset_id"] as? String,
-                  let map = metadata?.map ?? artifact?.map ?? checkpoint?.map ?? (request?["map_kind"] as? String).flatMap(MapRole.init(rawValue:)),
-                  MapRole.targets.contains(map) else { return nil }
-            let progress = TrainingRunFiles.optionalJSON(folder.appendingPathComponent("progress.json"))
-            let training = model?["training"] as? [String: Any]
-            let settings = metadata?.settings ?? TrainingRunFiles.settings(from: request ?? training ?? savedCheckpoint?["settings"] as? [String: Any] ?? [:],
-                descriptor: model ?? savedCheckpoint)
-            let localHistory = progress?["history"] as? [[String: Any]] ?? training?["history"] as? [[String: Any]] ?? savedCheckpoint?["history"] as? [[String: Any]] ?? []
-            let priorHistory = progress?["prior_history"] as? [[String: Any]] ?? training?["prior_history"] as? [[String: Any]] ?? savedCheckpoint?["prior_history"] as? [[String: Any]] ?? []
-            let priorEpochs = progress?["prior_epochs"] as? Int ?? training?["prior_epochs"] as? Int ?? savedCheckpoint?["prior_epochs"] as? Int ?? 0
-            let priorUpdates = progress?["prior_updates"] as? Int ?? training?["prior_updates"] as? Int ?? savedCheckpoint?["prior_updates"] as? Int ?? 0
-            let historyRows = priorHistory + localHistory.enumerated().map { index, row in
-                var shifted = row
-                shifted["epoch"] = (row["epoch"] as? Int ?? index + 1) + priorEpochs
-                if let update = row["update"] as? Int ?? row["updates"] as? Int { shifted["update"] = update + priorUpdates }
-                return shifted
+            let preStamp = runDirectoryStamp(for: folder)
+            let base: CachedRunVersionEntry
+            if let preStamp,
+               let cached = runVersionCache[folder.path],
+               cached.stamp == preStamp,
+               cached.projectID == document.id,
+               cached.artifact == artifact,
+               cached.checkpoint == checkpoint {
+                nextCache[folder.path] = cached
+                base = cached
+            } else {
+                let metadata = try? TrainingRunFiles.metadata(at: folder)
+                let model = TrainingRunFiles.optionalJSON(folder.appendingPathComponent("model.json"))
+                let savedCheckpoint = TrainingRunFiles.optionalJSON(folder.appendingPathComponent("checkpoint.json"))
+                let request = TrainingRunFiles.optionalJSON(folder.appendingPathComponent("request.json"))
+                let descriptors = [model, savedCheckpoint, request].compactMap { $0 }
+                guard metadata?.projectID == document.id || descriptors.contains(where: { $0["project_id"] as? String == document.id }) else { return nil }
+                // Do not surface a run copied from a different source project as local history.
+                guard descriptors.allSatisfy({ ($0["project_id"] as? String).map { $0 == document.id } ?? true }),
+                      metadata?.projectID == nil || metadata?.projectID == document.id else { return nil }
+                guard let datasetID = metadata?.datasetID ?? artifact?.datasetID ?? checkpoint?.datasetID ?? request?["dataset_id"] as? String,
+                      let map = metadata?.map ?? artifact?.map ?? checkpoint?.map ?? (request?["map_kind"] as? String).flatMap(MapRole.init(rawValue:)),
+                      MapRole.targets.contains(map) else { return nil }
+                let progress = TrainingRunFiles.optionalJSON(folder.appendingPathComponent("progress.json"))
+                let training = model?["training"] as? [String: Any]
+                let settings = metadata?.settings ?? TrainingRunFiles.settings(from: request ?? training ?? savedCheckpoint?["settings"] as? [String: Any] ?? [:],
+                    descriptor: model ?? savedCheckpoint)
+                let localHistory = progress?["history"] as? [[String: Any]] ?? training?["history"] as? [[String: Any]] ?? savedCheckpoint?["history"] as? [[String: Any]] ?? []
+                let priorHistory = progress?["prior_history"] as? [[String: Any]] ?? training?["prior_history"] as? [[String: Any]] ?? savedCheckpoint?["prior_history"] as? [[String: Any]] ?? []
+                let priorEpochs = progress?["prior_epochs"] as? Int ?? training?["prior_epochs"] as? Int ?? savedCheckpoint?["prior_epochs"] as? Int ?? 0
+                let priorUpdates = progress?["prior_updates"] as? Int ?? training?["prior_updates"] as? Int ?? savedCheckpoint?["prior_updates"] as? Int ?? 0
+                let historyRows = priorHistory + localHistory.enumerated().map { index, row in
+                    var shifted = row
+                    shifted["epoch"] = (row["epoch"] as? Int ?? index + 1) + priorEpochs
+                    if let update = row["update"] as? Int ?? row["updates"] as? Int { shifted["update"] = update + priorUpdates }
+                    return shifted
+                }
+                let history = historyRows.enumerated().map { index, row in
+                    TrainingMetric(epoch: row["epoch"] as? Int ?? index + 1, loss: row["loss"] as? Double,
+                        validationLoss: row["validation_loss"] as? Double, learningRate: row["learning_rate"] as? Double,
+                        update: row["update"] as? Int ?? row["updates"] as? Int,
+                        meanGradientNorm: row["mean_gradient_norm"] as? Double, peakGradientNorm: row["peak_gradient_norm"] as? Double,
+                        clippedUpdates: row["clipped_updates"] as? Int, optimizerUpdates: row["optimizer_updates"] as? Int,
+                        gradientClipThreshold: row["gradient_clip_threshold"] as? Double,
+                        scalarLoss: map == .normal && settings?.modelArchitecture != NativeArchitecture.compactIdentifier
+                            ? nil : (row["scalar_loss"] as? String).flatMap(NativeScalarLoss.init(rawValue:)) ?? settings?.scalarLoss)
+                }
+                let created = metadata?.createdAt ?? artifact?.createdAt ?? checkpoint?.modifiedAt ??
+                    (try? folder.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
+                let recordedStatus = progress?["status"] as? String ?? checkpoint?.status ?? metadata?.status ?? "interrupted"
+                let datasetName = artifact?.datasetName ?? model?["dataset_name"] as? String ?? savedCheckpoint?["dataset_name"] as? String ?? request?["display_name"] as? String ?? datasetID
+                let defaultLabel = metadata?.label ?? request?["run_label"] as? String ?? ""
+                let checkpointVersions = (try? loadCheckpointVersions(directory: folder)) ?? []
+                let computed = CachedRunVersionEntry(
+                    stamp: preStamp ?? [:], projectID: document.id, artifact: artifact, checkpoint: checkpoint,
+                    datasetID: datasetID, datasetName: datasetName, map: map, recordedStatus: recordedStatus,
+                    createdAt: created, defaultLabel: defaultLabel, settings: settings, history: history,
+                    lineage: metadata?.lineage, inheritedEpochs: priorEpochs, checkpointVersions: checkpointVersions
+                )
+                if let preStamp, let postStamp = runDirectoryStamp(for: folder), postStamp == preStamp {
+                    nextCache[folder.path] = computed
+                }
+                base = computed
             }
-            let history = historyRows.enumerated().map { index, row in
-                TrainingMetric(epoch: row["epoch"] as? Int ?? index + 1, loss: row["loss"] as? Double,
-                    validationLoss: row["validation_loss"] as? Double, learningRate: row["learning_rate"] as? Double,
-                    update: row["update"] as? Int ?? row["updates"] as? Int,
-                    meanGradientNorm: row["mean_gradient_norm"] as? Double, peakGradientNorm: row["peak_gradient_norm"] as? Double,
-                    clippedUpdates: row["clipped_updates"] as? Int, optimizerUpdates: row["optimizer_updates"] as? Int,
-                    gradientClipThreshold: row["gradient_clip_threshold"] as? Double,
-                    scalarLoss: map == .normal && settings?.modelArchitecture != NativeArchitecture.compactIdentifier
-                        ? nil : (row["scalar_loss"] as? String).flatMap(NativeScalarLoss.init(rawValue:)) ?? settings?.scalarLoss)
-            }
-            let selected = selection.models.first { $0.datasetID == datasetID && $0.map == map }
-            let active = selected?.runID ?? artifacts.first { $0.kind == "map" && $0.datasetID == datasetID && $0.map == map }?.directory.lastPathComponent
-            let created = metadata?.createdAt ?? artifact?.createdAt ?? checkpoint?.modifiedAt ??
-                (try? folder.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
-            let recordedStatus = progress?["status"] as? String ?? checkpoint?.status ?? metadata?.status ?? "interrupted"
-            let status = ["running", "training"].contains(recordedStatus) && activeTrainingControl?.runID != folder.lastPathComponent
-                ? "inactive in this window" : recordedStatus
+            let selected = selection.models.first { $0.datasetID == base.datasetID && $0.map == base.map }
+            let active = selected?.runID ?? artifacts.first { $0.kind == "map" && $0.datasetID == base.datasetID && $0.map == base.map }?.directory.lastPathComponent
+            let status = ["running", "training"].contains(base.recordedStatus) && activeTrainingControl?.runID != folder.lastPathComponent
+                ? "inactive in this window" : base.recordedStatus
             let approval = artifact.map { modelApprovalState(for: $0, management: management) } ?? (approved: false, stale: false)
             let display = displayMetadata.versions.first { $0.runID == folder.lastPathComponent }
-            return ModelVersion(id: folder.lastPathComponent, directory: folder, datasetID: datasetID,
-                datasetName: artifact?.datasetName ?? model?["dataset_name"] as? String ?? savedCheckpoint?["dataset_name"] as? String ?? request?["display_name"] as? String ?? datasetID,
-                map: map, status: artifact == nil ? status : "completed",
-                createdAt: created, label: display?.name ?? metadata?.label ?? request?["run_label"] as? String ?? "", settings: settings,
-                checkpoint: checkpoint, artifact: artifact, history: history, lineage: metadata?.lineage,
+            return ModelVersion(id: folder.lastPathComponent, directory: folder, datasetID: base.datasetID,
+                datasetName: base.datasetName, map: base.map, status: artifact == nil ? status : "completed",
+                createdAt: base.createdAt, label: display?.name ?? base.defaultLabel, settings: base.settings,
+                checkpoint: checkpoint, artifact: artifact, history: base.history, lineage: base.lineage,
                 isActive: artifact != nil && active == folder.lastPathComponent,
-                isApproved: approval.approved, approvalIsStale: approval.stale, notes: display?.notes ?? "", inheritedEpochs: priorEpochs,
-                checkpointVersions: (try? loadCheckpointVersions(directory: folder)) ?? [])
+                isApproved: approval.approved, approvalIsStale: approval.stale, notes: display?.notes ?? "",
+                inheritedEpochs: base.inheritedEpochs, checkpointVersions: base.checkpointVersions)
         }.sorted { $0.createdAt > $1.createdAt }
+        runVersionCache = nextCache
+        return versions
     }
 
     func prepareTrainingStart(_ start: TrainingStart, datasetID: String, map: MapRole,
@@ -297,12 +362,52 @@ extension LoomProject {
 }
 
 enum TrainingRunFiles {
+    private final class Cache: @unchecked Sendable {
+        let lock = NSLock()
+        var json: [String: (stamp: FileStamp, object: [String: Any])] = [:]
+        var metadata: [String: (stamp: FileStamp, value: TrainingRunMetadata)] = [:]
+    }
+    private static let cache = Cache()
+
+    static func cachedJSON(_ file: URL) throws -> [String: Any] {
+        guard let before = FileStamp.lstat(file.path) else {
+            throw LoomError("The saved model file could not be read.")
+        }
+        cache.lock.lock()
+        let saved = cache.json[file.path]
+        cache.lock.unlock()
+        if let saved, saved.stamp == before {
+            return saved.object
+        }
+        let data = try Data(contentsOf: file)
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw LoomError("This saved model version is incomplete or uses an unsupported format.")
+        }
+        if let after = FileStamp.lstat(file.path), after == before {
+            cache.lock.lock()
+            cache.json[file.path] = (before, object)
+            cache.lock.unlock()
+        }
+        return object
+    }
+
     static func metadata(at directory: URL) throws -> TrainingRunMetadata? {
         let file = directory.appendingPathComponent("run-version.json")
-        guard FileManager.default.fileExists(atPath: file.path) else { return nil }
+        guard let before = FileStamp.lstat(file.path) else { return nil }
+        cache.lock.lock()
+        let saved = cache.metadata[file.path]
+        cache.lock.unlock()
+        if let saved, saved.stamp == before, saved.value.runID == directory.lastPathComponent {
+            return saved.value
+        }
         let value = try JSONDecoder().decode(TrainingRunMetadata.self, from: Data(contentsOf: file))
         guard value.schema == "loom-factory-run-version-v1", value.runID == directory.lastPathComponent else {
             throw LoomError("The saved run version identity is inconsistent.")
+        }
+        if let after = FileStamp.lstat(file.path), after == before {
+            cache.lock.lock()
+            cache.metadata[file.path] = (before, value)
+            cache.lock.unlock()
         }
         return value
     }
@@ -351,7 +456,7 @@ enum TrainingRunFiles {
         guard source == .checkpoint || checkpointID == nil else { throw LoomError("Choose checkpoint weights to select a checkpoint revision.") }
         let name = try checkpointID.map(CheckpointArchive.filename) ?? (source == .checkpoint ? "checkpoint.json" : "model.json")
         let file = try containedFile(name, directory: directory)
-        guard let value = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any],
+        guard let value = try? cachedJSON(file),
               value["schema"] as? String == (source == .checkpoint ? "loom-factory-checkpoint-v1" : "loom-factory-model-v1"),
               source == .checkpoint || value["status"] as? String == "completed",
               checkpointID == nil || value["checkpoint_id"] as? String == checkpointID else {
@@ -415,8 +520,7 @@ enum TrainingRunFiles {
     }
 
     static func optionalJSON(_ url: URL) -> [String: Any]? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        try? cachedJSON(url)
     }
 
     static func settings(from values: [String: Any], descriptor: [String: Any]?) -> TrainingSettings? {
