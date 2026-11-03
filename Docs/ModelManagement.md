@@ -40,6 +40,48 @@ the descriptor, native model and trainable weights identity. Replaced files need
 review again. Existing projects retain their latest completed model defaults
 until you choose explicitly; no existing model is automatically approved.
 
+## Closing a finished category
+
+**Close Category…** appears beside the category name only when its current depth,
+normal and roughness models are all approved and still available. Optional
+products still need approval before closing. Nothing closes or deletes sources
+automatically. The button first verifies provider sources and previews the file
+count, material count, disk savings and number of files that will stay. Canceling
+the confirmation leaves every source file in place.
+
+Confirming saves `.loom-factory/closed-categories/<category-id>.json` before
+removing any source image. The readable list records Poly Haven / ambientCG asset
+links, filenames, local paths, native dimensions and review/pairing metadata.
+Only current provider originals with matching published bytes are removed.
+Generated or custom files, edited images, unrecognized names, external imports
+and symbolic links stay on disk. A missing or unpublished provider file stays,
+too. Poly Haven verification uses its live file catalog; ambientCG verification
+uses the published ZIP directory, avoiding a duplicate full dataset download.
+Removal is permanent rather than moving files to Trash, so space is reclaimed.
+Models, approvals, checkpoints, history and saved outputs are preserved.
+
+Closed categories stay visible even if they have no physical source images.
+Their classifier labels and package/model assignments remain intact. The recovery
+list never supplies virtual training pairs. Reopen from **Models** before
+preparing sources or training again.
+
+**Reopen Category…** asks before downloading. It resolves current provider
+releases, restores only the saved files and tiers, checks current download
+integrity and image dimensions, and restores image tags. Historical source
+hashes are not persisted or enforced, so provider fixes can be downloaded.
+Existing matching files are kept; conflicting files are never overwritten.
+Downloads show progress and support cancellation. One archive is handled at a
+time, with a free-space check and a reserve. Completed files and the recovery
+list survive cancellation, network failures and partial restores; press Reopen
+again to resume. The category becomes open only when all listed files exist
+with their saved tags. Internet access and continued provider availability are
+required. Reopening requests no additional tiers, including no automatic 16K.
+
+Closing and reopening require the exclusive project lease, so neither can run
+during training, testing or an overnight queue. The final close rechecks approvals
+and source changes after the preview. Keep the entire `.loom-factory` directory
+with its source folder; it owns the recovery list as well as the trained models.
+
 ## Extension boundary
 
 Management uses a stable group and product slot, separate from image map roles.

@@ -100,14 +100,16 @@ public struct ProjectSnapshot: Sendable {
     public let checkpoints: [TrainingCheckpoint]
     public let modelVersions: [ModelVersion]
     public let modelCoverage: [ModelCoverageEntry]
+    public let closedCategories: [ClosedCategory]
     public init(sourceURL: URL, projectID: String, settings: ProjectSettings,
                 images: [SourceImage], datasets: [DatasetCategory], artifacts: [ModelArtifact], checkpoints: [TrainingCheckpoint] = [],
-                modelVersions: [ModelVersion] = [], modelCoverage: [ModelCoverageEntry] = []) {
+                modelVersions: [ModelVersion] = [], modelCoverage: [ModelCoverageEntry] = [], closedCategories: [ClosedCategory] = []) {
         self.sourceURL = sourceURL; self.projectID = projectID; self.settings = settings
         self.images = images; self.datasets = datasets; self.artifacts = artifacts
         self.checkpoints = checkpoints
         self.modelVersions = modelVersions
         self.modelCoverage = modelCoverage
+        self.closedCategories = closedCategories
     }
     public func eligiblePairCount(datasetID: String, map: MapRole, imageSize: Int) -> Int {
         guard let dataset = datasets.first(where: { $0.id == datasetID }) else { return 0 }

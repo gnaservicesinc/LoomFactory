@@ -21,7 +21,7 @@ final class TrainingSourceRecoveryTests: XCTestCase {
         settings.sourceResolutionLevels = 5
         XCTAssertEqual(TrainingSourceRecovery.materials(images: images, category: "Tiles", settings: settings).map(\.tiers), [[1, 2, 4, 8, 16], [1, 2, 4, 8, 16]])
         settings.sourceResolutionLevels = 0
-        XCTAssertEqual(TrainingSourceRecovery.materials(images: images, category: "Tiles", settings: settings).map(\.tiers), [[1, 2, 4, 8], [1, 2, 4]])
+        XCTAssertEqual(TrainingSourceRecovery.materials(images: images, category: "Tiles", settings: settings).map(\.tiers), [[1, 2, 4, 8], [1, 2, 4, 8]])
         settings.sourceResolutionLevels = 1
         settings.imageSize = 512
         XCTAssertEqual(TrainingSourceRecovery.materials(images: images, category: "Tiles", settings: settings).map(\.tiers), [[1], [1]])
@@ -29,6 +29,14 @@ final class TrainingSourceRecoveryTests: XCTestCase {
         XCTAssertEqual(TrainingSourceRecovery.materials(images: images, category: "Tiles", settings: settings).map(\.tiers), [[2], [2]])
         var ignored = image(1); ignored.ignored = true
         XCTAssertTrue(TrainingSourceRecovery.materials(images: [ignored], category: "Tiles", settings: settings).isEmpty)
+    }
+    func testAutomaticCategoryMatchingNeverRequests16KEvenWhenSomeLocalSourcesAre16K() {
+        let images = [image(1), image(4), image(16, folder: "Other")]
+        let materials = TrainingSourceRecovery.materials(images: images, category: "Tiles", settings: .init(sourceResolutionLevels: 0))
+        XCTAssertTrue(materials.allSatisfy { !$0.tiers.contains(16) })
+        XCTAssertEqual(materials.first { $0.folder.lastPathComponent == "Stone" }?.tiers, [1, 2, 4, 8])
+        let explicit = TrainingSourceRecovery.materials(images: [image(1)], category: "Tiles", settings: .init(sourceResolutionLevels: 5))
+        XCTAssertEqual(explicit.first?.tiers, [1, 2, 4, 8, 16])
     }
     func testCatalogUsesPublishedPNGAndOpenGLOnlyAndRejectsInvalidDescriptions() throws {
         let file: [String: Any] = ["url": "https://dl.polyhaven.org/file/ph-assets/stone_nor_gl_2k.png", "size": 123, "md5": String(repeating: "a", count: 32)]

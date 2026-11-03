@@ -6,6 +6,8 @@ The selected source folder owns all project settings, runs, models, and exports 
 
 Loom Room is the only starting workspace. Datasets are the categories discovered from current metadata; choosing a dataset never changes the source folder. The viewer and training controls share one current folder snapshot and the same training-pair selector.
 
+Explicitly closed categories retain a recovery recipe under `.loom-factory/closed-categories`, including provider identities, filenames, resolutions and image metadata. These recipes preserve the category and its model/package assignments after source removal; they never supply virtual training membership. Closing requires current approved depth, normal and roughness models and a manual confirmation. Delete only verified downloadable originals; keep generated, edited, unrecognized and linked files. Reopening resolves current provider releases and restores missing files and tags before removing the recipe. Historical checksums must not block provider updates.
+
 Preserve original image bytes and precision. Training must check current file/tag membership, report real progress, support cancellation, and export native CoreML plus architecture/weights for compatible LoRA training. Never represent a smoke test or an untrained model as a qualified production model.
 
 Manual review flags and notes are informational; they never determine training

@@ -117,11 +117,15 @@ public actor LoomProject {
             cachedDatasets = computed
             datasets = computed
         }
+        let closed = try loadCategoryArchives().map { $0.1.summary(at: $0.0) }
+        let allDatasets = (datasets + closed.filter { category in !datasets.contains { $0.id == category.id } }.map {
+            DatasetCategory(id: $0.id, name: $0.name, imageCount: 0, verifiedCount: 0, pairCounts: [:])
+        }).sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
         let artifacts = try loadArtifacts(), checkpoints = try loadCheckpoints()
         return ProjectSnapshot(sourceURL: sourceFolder, projectID: document.id, settings: document.settings,
-            images: images, datasets: datasets, artifacts: artifacts, checkpoints: checkpoints,
+            images: images, datasets: allDatasets, artifacts: artifacts, checkpoints: checkpoints,
             modelVersions: try loadModelVersions(artifacts: artifacts, checkpoints: checkpoints),
-            modelCoverage: try loadModelCoverage(datasets: datasets, artifacts: artifacts, checkpoints: checkpoints))
+            modelCoverage: try loadModelCoverage(datasets: allDatasets, artifacts: artifacts, checkpoints: checkpoints), closedCategories: closed)
     }
 
     public func updateSettings(_ settings: ProjectSettings) throws {

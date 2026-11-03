@@ -19,6 +19,10 @@ struct TrainingPanel: View {
     var body: some View {
         FactoryPanel("Train a dataset", subtitle: "Train with native Swift and the Apple GPU from paired diffuse and material maps.") {
             datasetSelection
+            if model.selectedCategoryIsClosed {
+                Label("This category is closed. Reopen it from Models to restore its sources before training.", systemImage: "archivebox")
+                    .font(.callout).foregroundStyle(.orange).accessibilityIdentifier("training.closedCategory")
+            }
             trainedModels
             pairReadiness
             trainingSection("Model", symbol: "cube") { architectureSettings }
@@ -98,19 +102,19 @@ struct TrainingPanel: View {
                     }
                 }.labelsHidden().accessibilityIdentifier("training.imageSize")
             }
-            row("Source resolution levels", detail: "Missing Poly Haven originals download before training, through 16K. For a 1K base, levels 4 and 5 request 8K and 16K sources while training still uses native crops. All available fills gaps through each material’s highest local tier.") {
+            row("Source resolution levels", detail: "Missing Poly Haven originals download before training. Match category fills gaps through the category’s highest local tier, capped at 8K. 16K requires an explicit choice. Training still uses native crops.") {
                 Picker("Source resolution levels", selection: $model.settings.training.sourceResolutionLevels) {
                     Text("1 (base)").tag(1)
                     Text("2 (up to 2×)").tag(2)
                     Text("3 (up to 4×)").tag(3)
                     Text("4 (up to 8×)").tag(4)
-                    Text("5 (up to 16×)").tag(5)
-                    Text("All available").tag(0)
+                    Text("5 (up to 16×, includes 16K)").tag(5)
+                    Text("Match category (up to 8K)").tag(0)
                 }.labelsHidden().accessibilityIdentifier("training.sourceResolutionLevels")
             }
             row("Prepare source images", detail: "Check and download missing diffuse and selected target maps, then refresh dataset counts. Powered by Poly Haven.") {
                 Button("Check & Download") { model.prepareTrainingSources() }
-                    .disabled(model.selectedDataset == nil || model.busy || model.effectiveTrainingSettings.validationIssue != nil)
+                    .disabled(model.selectedDataset == nil || model.selectedCategoryIsClosed || model.busy || model.effectiveTrainingSettings.validationIssue != nil)
                     .accessibilityIdentifier("training.prepareSources")
             }
             row("Keep decoded images in RAM", detail: "Loads images as training needs them while workers prepare upcoming images. Older entries are evicted at the limit; larger datasets keep training.") {
@@ -692,7 +696,7 @@ struct TrainingOverviewPanel: View {
             }
             if let plan = model.trainingPlan {
                 Divider()
-                summary("Resolution levels", model.effectiveTrainingSettings.sourceResolutionLevels == 0 ? "All available" : model.effectiveTrainingSettings.sourceResolutionLevels.formatted())
+                summary("Resolution levels", model.effectiveTrainingSettings.sourceResolutionLevels == 0 ? "Match category (up to 8K)" : model.effectiveTrainingSettings.sourceResolutionLevels.formatted())
                 summary("Training pairs", plan.trainingPairCount.formatted())
                 summary("Validation pairs", plan.validationPairCount.formatted())
                 summary("Training pair uses", plan.trainingSampleVisits.formatted())

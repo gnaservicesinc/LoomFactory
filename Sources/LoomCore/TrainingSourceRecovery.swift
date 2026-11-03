@@ -19,6 +19,12 @@ enum TrainingSourceRecovery {
     }
     static func materials(images: [SourceImage], category: String, settings: TrainingSettings) -> [Material] {
         let inputs = images.filter { $0.category == category && !$0.ignored && $0.role == .diffuse }
+        // Match the category's existing tiers, with an automatic ceiling of 8K.
+        // 16K originals are requested only with an explicit resolution setting.
+        let categoryMaximum = min(8, images.filter {
+            $0.category == category && !$0.ignored && $0.width == $0.height &&
+            [1024, 2048, 4096, 8192, 16384].contains($0.width)
+        }.map { $0.width / 1024 }.max() ?? 1)
         let folders = Dictionary(grouping: inputs) { $0.url.deletingLastPathComponent().standardizedFileURL }
         return folders.keys.sorted(by: { $0.path < $1.path }).flatMap { folder -> [Material] in
             let named = folders[folder]!.compactMap { image -> (String, Int, String)? in
@@ -34,19 +40,9 @@ enum TrainingSourceRecovery {
             return Dictionary(grouping: named, by: { $0.0 + "|" + $0.2 }).values.sorted(by: { $0[0].0 + $0[0].2 < $1[0].0 + $1[0].2 }).compactMap { group in
                 let asset = group[0].0, suffix = group[0].2
                 let present = group.map(\.1)
-                let localTiers = images.filter { image in
-                    image.category == category && !image.ignored &&
-                    image.url.deletingLastPathComponent().standardizedFileURL == folder &&
-                    [MapRole.diffuse, .depth, .roughness, .normal].contains(image.role) &&
-                    image.width == image.height && image.width.isMultiple(of: 1024) &&
-                    image.url.deletingPathExtension().lastPathComponent == filename(asset: asset, role: image.role,
-                        tier: image.width / 1024, diffuseSuffix: suffix).replacingOccurrences(of: ".png", with: "")
-                }.map { $0.width / 1024 }
                 let cropTier = [1, 2, 4, 8, 16].first { $0 * 1024 >= settings.imageSize } ?? 16
                 let base = max(cropTier, present.min() ?? cropTier)
-                // All available fills gaps through the largest local tier; it
-                // never turns a 4K project into an unsolicited 8K/16K download.
-                let maximum = settings.sourceResolutionLevels == 0 ? max(base, localTiers.max() ?? base)
+                let maximum = settings.sourceResolutionLevels == 0 ? min(8, max(base, categoryMaximum))
                     : min(16, base * (1 << (settings.sourceResolutionLevels - 1)))
                 let tiers = [1, 2, 4, 8, 16].filter { $0 >= base && $0 <= maximum }
                 return Material(asset: asset, folder: folder, category: category, tiers: tiers, diffuseSuffix: suffix)
@@ -190,7 +186,7 @@ enum TrainingSourceRecovery {
     }
 }
 
-private final class SourceDownloadProgress: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+final class SourceDownloadProgress: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     let name: String
     let progress: @Sendable (TrainingEvent) -> Void
     private let lock = NSLock()
@@ -229,6 +225,9 @@ extension LoomProject {
         explicit: Bool = true,
         progress: @escaping @Sendable (TrainingEvent) -> Void) async throws -> Int {
         let current = try snapshot()
+        guard !current.closedCategories.contains(where: { $0.id == datasetID }) else {
+            throw LoomError("Reopen this category from Models before preparing sources or training again.")
+        }
         guard let dataset = current.datasets.first(where: { $0.id == datasetID }) else {
             throw LoomError("This dataset no longer has images in the source folder. Choose a current dataset.")
         }

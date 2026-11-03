@@ -10,6 +10,40 @@ final class ModelManagementExportTests: XCTestCase {
     // These are package assembly fixtures. They validate exact assignments and
     // persisted review decisions without training or claiming model quality.
 
+    func testClosedCategoryWithNoPhysicalImagesKeepsClassifierLabelsAndAllPackageModels() async throws {
+        let fixture = try await Fixture(); defer { fixture.remove() }
+        _ = try await fixture.classifier(marker: "closed category export")
+        let category = try XCTUnwrap(fixture.categories.first)
+        for item in fixture.categories {
+            let depth = try fixture.artifact("depth-" + item.id, category: item, date: .now)
+            try await fixture.project.selectModelVersion(runID: depth.id, datasetID: item.id, map: .depth)
+            if item.id == category.id { try await fixture.project.setModelApproval(runID: depth.id, approved: true) }
+        }
+        for map in [MapRole.normal, .roughness] {
+            let artifact = try fixture.artifact(map.rawValue + "-" + category.id, category: category, date: .now, map: map)
+            try await fixture.project.selectModelVersion(runID: artifact.id, datasetID: category.id, map: map)
+            try await fixture.project.setModelApproval(runID: artifact.id, approved: true)
+        }
+        let preview = try await fixture.project.previewCategoryClose(datasetID: category.id) { _ in }
+        try await fixture.project.closeCategory(preview)
+        // These package fixtures use generated images, which close preserves.
+        // Simulate an empty category separately to exercise package catalog retention.
+        try FileManager.default.removeItem(at: fixture.root.appendingPathComponent("Material-0"))
+        let reopened = try LoomProject(sourceFolder: fixture.root)
+        let snapshot = try await reopened.snapshot()
+        XCTAssertEqual(snapshot.datasets.first { $0.id == category.id }?.imageCount, 0)
+        XCTAssertEqual(snapshot.closedCategories.map(\.id), [category.id])
+        let archive = try await reopened.exportPackage(name: "Closed Categories", version: "1.0.0")
+        let unpacked = try fixture.extract(archive)
+        let manifest = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: unpacked.appendingPathComponent("manifest.json"))) as? [String: Any])
+        let categories = try XCTUnwrap(manifest["categories"] as? [[String: Any]])
+        XCTAssertEqual(Set(categories.compactMap { $0["id"] as? String }), Set(fixture.categories.map(\.id)))
+        let closed = try XCTUnwrap(categories.first { $0["id"] as? String == category.id })
+        let models = try XCTUnwrap(closed["models"] as? [[String: Any]])
+        XCTAssertEqual(Set(models.compactMap { $0["map"] as? String }), Set(["depth", "normal", "roughness"]))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: unpacked.appendingPathComponent("closed-categories").path))
+    }
+
     func testExportKeepsChosenHistoricalModelsAndClassifierDespiteApprovedNewerCandidates() async throws {
         let fixture = try await Fixture(); defer { fixture.remove() }
         let classifier = try await fixture.classifier(marker: "chosen classifier")

@@ -135,6 +135,9 @@ final class FactoryModel {
     var selectedDataset: DatasetCategory? {
         snapshot?.datasets.first { $0.id == selectedDatasetID }
     }
+    var selectedCategoryIsClosed: Bool {
+        snapshot?.closedCategories.contains { $0.id == selectedDatasetID } == true
+    }
 
     var matchingImages: [SourceImage] {
         currentBrowserProjection()?.matching ?? []
@@ -381,7 +384,7 @@ final class FactoryModel {
         return selectedCheckpoint != nil
     }
     var canTrain: Bool {
-        project != nil && selectedDataset != nil && trainingOptionsIssue == nil && (trainingPlan?.trainingPairCount ?? 0) > 0 && !busy &&
+        project != nil && selectedDataset != nil && !selectedCategoryIsClosed && trainingOptionsIssue == nil && (trainingPlan?.trainingPairCount ?? 0) > 0 && !busy &&
         (!continuingTraining || canContinueMap)
     }
 
@@ -743,6 +746,30 @@ final class FactoryModel {
         let preview = try await project.approvedCheckpointCleanupPreview()
         guard current == generation else { throw LoomError("The source folder changed. Open cleanup again.") }
         return preview
+    }
+
+    func previewCategoryClose(datasetID: String, completion: @escaping @MainActor (CategoryClosePreview) -> Void) {
+        let current = generation
+        let onProgress = progressHandler()
+        perform("Checking category sources", clearEvents: true) { [weak self] project in
+            let preview = try await project.previewCategoryClose(datasetID: datasetID, progress: onProgress)
+            guard let self, self.generation == current else { return }
+            completion(preview)
+        }
+    }
+
+    func closeCategory(_ preview: CategoryClosePreview) {
+        perform("Closing \(preview.name)", clearEvents: true) { [weak self] project in
+            try await project.closeCategory(preview)
+            self?.events.append(.init(type: "summary", message: "Closed \(preview.name): removed \(preview.fileCount) verified downloadable files (\(preview.formattedSize)). Kept \(preview.preservedFileCount) other source files and all models."))
+        }
+    }
+
+    func reopenCategory(_ category: ClosedCategory) {
+        let onProgress = progressHandler()
+        perform("Reopening \(category.name)", clearEvents: true) { project in
+            try await project.reopenCategory(datasetID: category.id, progress: onProgress)
+        }
     }
 
     func trainCoverageSlot(slot: ModelSlot) {
@@ -1489,7 +1516,7 @@ final class FactoryModel {
         if snapshot?.sourceURL != value.sourceURL || snapshot?.settings != value.settings ||
            imagesChanged || snapshot?.datasets != value.datasets || snapshot?.artifacts != value.artifacts ||
            snapshot?.checkpoints != value.checkpoints || snapshot?.modelVersions != value.modelVersions ||
-           snapshot?.modelCoverage != value.modelCoverage {
+           snapshot?.modelCoverage != value.modelCoverage || snapshot?.closedCategories != value.closedCategories {
             snapshot = value
             refreshTestOriginalMap()
         }

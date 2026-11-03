@@ -11,6 +11,59 @@ import UniformTypeIdentifiers
 @Suite(.serialized)
 struct ModelCoverageControlsTests {
     @Test @MainActor
+    func categoryClosingAppearsAfterThreeApprovalsAndClosedControlsAllowReopening() async throws {
+        let fixture = try await CoverageControlsFixture()
+        defer { fixture.remove() }
+        let project = try LoomProject(sourceFolder: fixture.source)
+        let initial = try await project.snapshot()
+        let depth = try #require(initial.artifacts.first { $0.directory.lastPathComponent == "latest-depth" })
+        for map in [MapRole.normal, .roughness] {
+            let folder = project.projectFolder.appendingPathComponent("runs/bricks-\(map.rawValue)")
+            try FileManager.default.copyItem(at: depth.directory, to: folder)
+            let descriptorURL = folder.appendingPathComponent("model.json")
+            var descriptor = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: descriptorURL)) as? [String: Any])
+            descriptor["map"] = map.rawValue
+            try JSONSerialization.data(withJSONObject: descriptor).write(to: descriptorURL)
+            let artifact = ModelArtifact(id: "bricks-\(map.rawValue)", kind: "map", datasetID: depth.datasetID, datasetName: depth.datasetName, map: map,
+                directory: folder, createdAt: .now, epochs: 20, loss: nil, coreMLPath: depth.coreMLPath, weightsPath: depth.weightsPath, architecture: depth.architecture)
+            try JSONEncoder().encode(artifact).write(to: folder.appendingPathComponent("artifact.json"))
+        }
+        let model = FactoryModel(rememberSourceFolder: false)
+        model.openFolder(fixture.source)
+        try await wait(model)
+        let categoryID = try #require(depth.datasetID)
+        for map in MapRole.targets {
+            #expect(model.snapshot?.canCloseCategory(categoryID) == false)
+            let artifact = try #require(model.snapshot?.artifacts.first { $0.datasetID == categoryID && $0.map == map && $0.directory.lastPathComponent != "older-depth" })
+            model.approveAndUseCoverageModel(artifact: artifact)
+            try await wait(model)
+        }
+        #expect(model.snapshot?.canCloseCategory(categoryID) == true)
+        try await render(ModelCoverageView(model: model).padding(24).preferredColorScheme(.dark),
+            size: NSSize(width: 1380, height: 1000), name: "category-ready-to-close.png", appearance: .darkAqua)
+        // All these fixture images are generated; a close must keep them.
+        let preview = try await project.previewCategoryClose(datasetID: categoryID) { _ in }
+        #expect(preview.fileCount == 0)
+        #expect(preview.preservedFileCount == 3)
+        let imageCount = model.snapshot?.images.count
+        model.closeCategory(preview)
+        try await wait(model)
+        let closed = try #require(model.snapshot?.closedCategories.first { $0.id == categoryID })
+        #expect(model.snapshot?.images.count == imageCount)
+        #expect(model.snapshot?.canCloseCategory(categoryID) == false)
+        model.selectedDatasetID = categoryID
+        #expect(model.selectedCategoryIsClosed)
+        #expect(!model.canTrain)
+        try await render(ModelCoverageView(model: model).padding(24).preferredColorScheme(.dark),
+            size: NSSize(width: 1380, height: 1000), name: "category-closed-reopen.png", appearance: .darkAqua)
+        model.reopenCategory(closed)
+        try await wait(model)
+        #expect(!model.selectedCategoryIsClosed)
+        #expect(model.snapshot?.closedCategories.isEmpty == true)
+        #expect(model.snapshot?.canCloseCategory(categoryID) == true)
+    }
+
+    @Test @MainActor
     func selectingCheckpointCreatesChosenCandidateWithoutApprovingOrReplacingOriginal() async throws {
         let fixture = try await CoverageControlsFixture()
         defer { fixture.remove() }
@@ -297,11 +350,12 @@ struct ModelCoverageControlsTests {
         _ = try #require(model.snapshot)
     }
 
-    @MainActor private func render<Content: View>(_ content: Content, size: NSSize, name: String) async throws {
+    @MainActor private func render<Content: View>(_ content: Content, size: NSSize, name: String, appearance: NSAppearance.Name? = nil) async throws {
         _ = NSApplication.shared
         let view = NSHostingView(rootView: content.frame(width: size.width))
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
+        if let appearance { window.appearance = NSAppearance(named: appearance) }
         window.contentView = view
         window.orderFrontRegardless()
         defer { window.close() }

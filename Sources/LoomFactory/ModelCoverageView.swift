@@ -214,6 +214,7 @@ struct ModelCoverageView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(groupName(datasetID)).font(.callout.weight(.semibold))
                             Text("\(groupImageCount(datasetID).formatted()) images").font(.caption).foregroundStyle(.secondary)
+                            CategoryLifecycleControl(model: model, datasetID: datasetID)
                         }.frame(width: 165, alignment: .leading)
                         ForEach(ModelProductID.categoryProducts, id: \.self) { product in
                             if let entry = entries.first(where: { $0.slot.datasetID == datasetID && $0.slot.product == product }) {

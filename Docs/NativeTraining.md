@@ -112,8 +112,11 @@ Before training, Factory checks recognized Poly Haven filenames for missing
 diffuse and selected target maps. Levels 1–5 fill tiers through 1×, 2×, 4×, 8× or
 16× the base native resolution, capped at published 16K sources. With a 1K base,
 levels 4 and 5 request through 8K and 16K while retaining the 1K training crop.
-All available fills gaps through each material's highest
-local tier without expanding to larger remote tiers. Small training grids use
+**Match category (up to 8K)** fills gaps through the highest native tier already
+present anywhere in that category, capped at 8K. Thus two 8K materials alongside
+sixteen 4K materials request the missing 8K sources for all eighteen. It never
+automatically requests 16K, even when another local material has 16K files.
+16K requires an explicit resolution-level selection. Small training grids use
 the provider's native 1K minimum. Published PNG URLs, byte counts and MD5 hashes
 come from the provider's live file catalog; downloads must also match native
 dimensions before installation. The original bytes are never overwritten or
